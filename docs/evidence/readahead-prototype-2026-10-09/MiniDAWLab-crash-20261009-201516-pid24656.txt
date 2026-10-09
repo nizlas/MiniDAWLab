@@ -1,0 +1,15 @@
+MiniDAWLab (Danielssons Audio Lab) crash report
+time (local): 2026-10-09 20:15:16
+version: 1.2.1
+build config: Release
+executable: C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe
+process id: 24656
+exception code: 0xC0000005
+exception address: 0x000002DD3F30675E
+faulting module: C:\Program Files\IK Multimedia\AmpliTube 4\AmpliTube 4.vpa
+module base: 0x000002DD3F290000
+module offset: 0x7675E
+minidump written: yes (C:\Users\nicla\AppData\Roaming\MiniDAWLab\crash-dumps\MiniDAWLab-crash-20261009-201516-pid24656.dmp)
+last-operation copied: yes (C:\Users\nicla\AppData\Roaming\MiniDAWLab\crash-dumps\MiniDAWLab-crash-20261009-201516-pid24656-last-operation.txt)
+related logs (in %APPDATA%\MiniDAWLab\): last-operation.txt, track-delete-diag.log, mixdown-diag.log, project load/save diag logs
+symbolize: powershell -File scripts\symbolize-crash.ps1 -CrashText <this file> -Exe <matching MiniDAWLab.exe with .pdb beside it; releases are archived under dist\symbols\>

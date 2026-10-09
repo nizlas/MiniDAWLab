@@ -109,6 +109,7 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/SoloMuteView.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
     src/engine/InstrumentRenderPool.cpp
     src/app/AudioMixdownExporter.cpp
     src/app/AudioMixdownProgressWindow.cpp
@@ -430,6 +431,7 @@ target_sources(ExportLevelFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
     src/engine/SoloMuteView.cpp
@@ -489,6 +491,7 @@ target_sources(InstrumentParallelFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
     src/engine/SoloMuteView.cpp
@@ -557,6 +560,7 @@ target_sources(AudioStripParallelFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
     src/engine/SoloMuteView.cpp
@@ -595,6 +599,74 @@ if (MSVC)
     target_compile_options(AudioStripParallelFocusedTests PRIVATE /wd4458)
 endif()
 juce_generate_juce_header(AudioStripParallelFocusedTests)
+
+# -----------------------------------------------------------------------------
+# ReadAheadPrototypeFocusedTests: experimental audio-row read-ahead prototype (Stage B,
+# docs/READAHEAD_PROTOTYPE.md; OFF by default, CLI `--experimental-readahead`). The PRODUCTION
+# PlaybackEngine callback + a deterministic PUMP-mode read-ahead renderer (the test is the worker)
+# with a STATE-DEPENDENT probe insert recording playhead positions: flag-off bit-identity in stable
+# playback (adoption included), exactly-once contiguous streams, delayed-worker miss = counted
+# silence, stale discards, stop/replay residue (documented), seek resets, gapless Monitor drain,
+# chain removal under ownership (publish-before-destroy + quiesce), cycle adoption gate, and one
+# real worker-thread smoke run. Device-free, deterministic (except the labeled smoke timing).
+# -----------------------------------------------------------------------------
+juce_add_console_app(ReadAheadPrototypeFocusedTests PRODUCT_NAME "ReadAheadPrototypeFocusedTests")
+target_sources(ReadAheadPrototypeFocusedTests PRIVATE
+    tests/selftest/ReadAheadPrototypeFocusedTestsMain.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/diagnostics/PlaybackUiLoadLog.cpp
+    src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
+    src/diagnostics/DrumNameDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
+    src/engine/InstrumentRenderPool.cpp
+    src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
+    src/engine/RoutingPlanBuilder.cpp
+    src/engine/RecorderService.cpp
+    src/engine/CountInClickOutput.cpp
+    src/engine/LiveMidiInputBus.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/ExperimentalInstrumentHost.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/plugins/Vst3ChildProcessScan.cpp
+    src/plugins/PluginDiscovery.cpp
+    src/plugins/InstrumentCatalog.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
+    src/transport/Transport.cpp)
+target_include_directories(ReadAheadPrototypeFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ReadAheadPrototypeFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_USE_MP3AUDIOFORMAT=1)
+target_link_libraries(ReadAheadPrototypeFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_cryptography
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(ReadAheadPrototypeFocusedTests PRIVATE /wd4458)
+endif()
+juce_generate_juce_header(ReadAheadPrototypeFocusedTests)
 
 # -----------------------------------------------------------------------------
 # LiveMidiRecordingFocusedTests: live MIDI input slice — the realtime LiveMidiInputBus (device-thread

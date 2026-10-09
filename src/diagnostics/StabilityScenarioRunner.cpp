@@ -1,4 +1,4 @@
-﻿#include "diagnostics/StabilityScenarioRunner.h"
+#include "diagnostics/StabilityScenarioRunner.h"
 
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "diagnostics/StabilityInvariants.h"
@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <memory>
+#include <regex>
 #include <thread>
 
 #if JUCE_WINDOWS
@@ -324,6 +325,19 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-readahead-transitions")
+        {
+            if (!setKind(StabilityScenarioKind::ReadAheadTransitions)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-readahead-transitions requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--reopen-check")
+        {
+            req.readAheadReopenCheck = true;
+        }
         else if (a == "--seconds" || a == "--warmup" || a == "--buffer" || a == "--start-seconds")
         {
             if (i + 1 >= args.size())
@@ -534,6 +548,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::ProxyPlaybackEdges: scenarioName_ = "proxy-playback-edges"; break;
         case StabilityScenarioKind::Mixer: scenarioName_ = "mixer"; break;
         case StabilityScenarioKind::PerfProfile: scenarioName_ = "perf-profile"; break;
+        case StabilityScenarioKind::ReadAheadTransitions: scenarioName_ = "readahead-transitions"; break;
         case StabilityScenarioKind::LoadProgress: scenarioName_ = "load-progress"; break;
         case StabilityScenarioKind::DuplicateTrack: scenarioName_ = "duplicate-track"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
@@ -639,6 +654,10 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::PerfProfile:
             appendPerfProfileSteps(request);
+            break;
+        case StabilityScenarioKind::ReadAheadTransitions:
+            if (request.readAheadReopenCheck) { appendReadAheadReopenCheckSteps(request); }
+            else { appendReadAheadTransitionsSteps(request); }
             break;
         case StabilityScenarioKind::LoadProgress:
             appendLoadProgressSteps(request);
@@ -1062,7 +1081,7 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                appendStabilityRunLine("  count-in started with Cycle ON; wrap count at start=" + juce::String((int)cycleWrapsAtRecordStart_));
                                return true;
                            },
-                           3700 }); // 8 × 375 ms + 375 ms pre-roll
+                           3700 }); // 8 ? 375 ms + 375 ms pre-roll
     steps_.push_back(Step{ "midi-cycle: recording started; preview starts exactly at the record boundary (no 40 px floor)",
                            [this, checkPreview, png](juce::String& failReason) -> bool {
                                if (!hooks_.isRecordingInProgress() || hooks_.isCountInActive())
@@ -1083,7 +1102,7 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                return checkPreview("start", cycleRecordStart_, failReason);
                            },
                            300 });
-    // ---- 2. Pass 0: notes on inst (ch1) + Lower (ch5 → Force 2), sustain + wheel; key 62 held across wrap 1.
+    // ---- 2. Pass 0: notes on inst (ch1) + Lower (ch5 ? Force 2), sustain + wheel; key 62 held across wrap 1.
     steps_.push_back(Step{ "midi-cycle: pass 0 - ch1 60 on + ch5 48 on (Lower), sustain down, pitch bend 12000",
                            [this, inject, on](juce::String&) -> bool {
                                inject(on(1, 60, 100));
@@ -1855,7 +1874,7 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                    appendStabilityRunLine("  stored extent now=" + juce::String((juce::int64)*extentBeforeAll) + " at fixture time="
                                                           + juce::String((juce::int64)*storedExtentAtStart) + " (loop end R=" + juce::String((juce::int64)cycleLocR_) + ")");
                                    // The takes end at R, so the extent may cover exactly up to R when the project was
-                                   // shorter than the loop — never beyond that (no reserve, no per-pass growth).
+                                   // shorter than the loop ? never beyond that (no reserve, no per-pass growth).
                                    const std::int64_t expected = juce::jmax<std::int64_t>(*storedExtentAtStart, cycleLocR_);
                                    if (*extentBeforeAll != expected)
                                    {
@@ -3046,7 +3065,7 @@ void StabilityScenarioRunner::appendProxyRecordingSteps(const juce::File& projec
 }
 
 // -----------------------------------------------------------------------------
-// Proxy render probe (`--stability-proxy-render-probe <project> <trackId> <outDir> …`)
+// Proxy render probe (`--stability-proxy-render-probe <project> <trackId> <outDir> ?`)
 // -----------------------------------------------------------------------------
 void StabilityScenarioRunner::appendProxyRenderProbeSteps(const StabilityScenarioRequest& request)
 {
@@ -3198,7 +3217,7 @@ void StabilityScenarioRunner::appendProxyRenderProbeSteps(const StabilityScenari
                                    return hooks_.proxyRenderProbeStartWorker(failReason);
                                },
                                300 });
-        constexpr int kPolls = 1200; // 1200 × 500 ms = 10 min upper bound per render
+        constexpr int kPolls = 1200; // 1200 ? 500 ms = 10 min upper bound per render
         auto doneLogged = std::make_shared<bool>(false);
         auto lastProgress = std::make_shared<std::int64_t>(-1);
         for (int poll = 1; poll <= kPolls; ++poll)
@@ -3217,7 +3236,7 @@ void StabilityScenarioRunner::appendProxyRenderProbeSteps(const StabilityScenari
                                            const std::int64_t p = hooks_.proxyRenderProbeProgressMs();
                                            if (p / 10000 != *lastProgress / 10000)
                                            {
-                                               appendStabilityRunLine("  rendering… " + juce::String(p) + " ms of material");
+                                               appendStabilityRunLine("  rendering? " + juce::String(p) + " ms of material");
                                                *lastProgress = p;
                                            }
                                        }
@@ -3639,7 +3658,7 @@ void StabilityScenarioRunner::appendMixerSteps(const juce::File& project)
     auto sectionFlagsBefore = std::make_shared<std::vector<bool>>();
     const juce::StringArray sectionKeys{ "routing", "preGain", "preInserts", "postInserts", "sends", "faders", "meters" };
 
-    // 1. F3 / close / reopen — one instance.
+    // 1. F3 / close / reopen ? one instance.
     steps_.push_back(Step{ "mixer: F3 shows the window (one instance), F3 hides, F3 shows again",
                            [this, M, say](juce::String& failReason) -> bool {
                                if (M.isVisible())
@@ -3668,7 +3687,7 @@ void StabilityScenarioRunner::appendMixerSteps(const juce::File& project)
                            },
                            600 });
 
-    // 1b. A Group row (send / output target) when the project has none — added like the menu does.
+    // 1b. A Group row (send / output target) when the project has none ? added like the menu does.
     steps_.push_back(Step{ "mixer: add a Group row when the project has none (routing / send target)",
                            [this, M, say](juce::String& failReason) -> bool {
                                for (const StabilityTrackInfo& t : hooks_.listAllTracks())
@@ -3751,7 +3770,7 @@ void StabilityScenarioRunner::appendMixerSteps(const juce::File& project)
                            },
                            400 });
 
-    // 3. Section toggles: hide routing / inserts / sends → aligned faders + meters; then restore.
+    // 3. Section toggles: hide routing / inserts / sends ? aligned faders + meters; then restore.
     steps_.push_back(Step{ "mixer: hide Routing, Pre inserts, Post inserts, Sends through the toolbar",
                            [this, M, say, sectionKeys, sectionFlagsBefore](juce::String& failReason) -> bool {
                                sectionFlagsBefore->clear();
@@ -4446,7 +4465,7 @@ void StabilityScenarioRunner::appendMixerSteps(const juce::File& project)
                                    failReason = "expected five rows after removing one";
                                    return false;
                                }
-                               // Grow the Post inserts band: divider 3 is postInserts|sends — dragging it down
+                               // Grow the Post inserts band: divider 3 is postInserts|sends ? dragging it down
                                // takes the height Sends gained above (Sends keeps at least its four slots).
                                (void)M.dragDivider(3, 90);
                                const int visible = M.stripVisibleInsertRowCount(*audioTid, false);
@@ -5312,12 +5331,12 @@ void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, cons
 // -----------------------------------------------------------------------------
 // Pre-gain through the real engine (device callback + offline mixdown)
 // -----------------------------------------------------------------------------
-// The user's report was "−24 dB pre-gain changes nothing". This scenario measures the two
+// The user's report was "-24 dB pre-gain changes nothing". This scenario measures the two
 // production signal paths a listener can hear or export, on a copy of an audio-only fixture:
-//   realtime  - device-output peak hold while the transport plays a steady tone, 0 dB vs −24 dB,
-//               with the −24 dB value set WHILE PLAYING (live update + ramp must both work);
-//   offline   - RMS of the mixdown WAV at 0 dB vs −24 dB.
-// Both ratios must equal 10^(−24/20) ≈ 0.06310 (±3 % realtime, ±1 % offline): "applied once".
+//   realtime  - device-output peak hold while the transport plays a steady tone, 0 dB vs -24 dB,
+//               with the -24 dB value set WHILE PLAYING (live update + ramp must both work);
+//   offline   - RMS of the mixdown WAV at 0 dB vs -24 dB.
+// Both ratios must equal 10^(-24/20) ? 0.06310 (?3 % realtime, ?1 % offline): "applied once".
 // A ratio near 1.0 would reproduce the report; a ratio near 0.004 would mean "applied twice".
 void StabilityScenarioRunner::appendPreGainSteps(const juce::File& project)
 {
@@ -5423,7 +5442,7 @@ void StabilityScenarioRunner::appendPreGainSteps(const juce::File& project)
                                return true;
                            },
                            kSettleDefaultMs });
-    // The −24 dB value is set WHILE PLAYING: this is the live-update path (Inspector edit during
+    // The -24 dB value is set WHILE PLAYING: this is the live-update path (Inspector edit during
     // playback). The ramp completes within one block; the 400 ms settle keeps its first samples
     // out of the measurement window.
     steps_.push_back(Step{ "pregain: realtime -24 dB - set while playing",
@@ -5458,7 +5477,7 @@ void StabilityScenarioRunner::appendPreGainSteps(const juce::File& project)
         },
         kSettleDefaultMs });
 
-    // ---- Offline: mixdown WAV RMS at 0 dB vs −24 dB (same fixture, transport stopped). ----
+    // ---- Offline: mixdown WAV RMS at 0 dB vs -24 dB (same fixture, transport stopped). ----
     scenarioOutputDir_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
                              .getChildFile("dal-stability-pregain-out");
     const juce::File out0 = scenarioOutputDir_.getChildFile("pregain-0dB.wav");
@@ -5521,7 +5540,7 @@ void StabilityScenarioRunner::appendPreGainSteps(const juce::File& project)
         },
         kSettleDefaultMs });
 
-    // ---- Persistence: save the copy at −24 dB, reload, read the value back. ----
+    // ---- Persistence: save the copy at -24 dB, reload, read the value back. ----
     steps_.push_back(Step{ "pregain: save test copy at -24 dB",
                            [this](juce::String&) -> bool {
                                hooks_.saveProject();
@@ -7614,7 +7633,7 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                400 });
     }
 
-    // ---- 3. Cycle: Record with armed MIDI rows and Cycle on STARTS (cycle takes are passes — the
+    // ---- 3. Cycle: Record with armed MIDI rows and Cycle on STARTS (cycle takes are passes ? the
     //         full behaviour is covered by `--stability-midi-cycle-takes`); Cycle is left untouched.
     if (hooks_.setCycleEnabled && hooks_.isCycleEnabled)
     {
@@ -7675,7 +7694,7 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                inject(on(1, 48, 77));
                                return true;
                            },
-                           3700 }); // count-in = 8 × 375 ms + 375 ms
+                           3700 }); // count-in = 8 ? 375 ms + 375 ms
     steps_.push_back(Step{ "live-midi: recording started (transport playing)",
                            [this](juce::String& failReason) -> bool {
                                if (!hooks_.isRecordingInProgress() || hooks_.isCountInActive())
@@ -7806,7 +7825,7 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                    failReason = "instrument clip does not start at the record boundary";
                                    return false;
                                }
-                               // Expected ticks from the playhead stamps taken at injection (±tolerance: the UI
+                               // Expected ticks from the playhead stamps taken at injection (?tolerance: the UI
                                // playhead is a per-block staircase and the device/callback clocks jitter by < 2 blocks).
                                const double sr = 48000.0;
                                const std::int64_t latency = hooks_.reportedOutputLatencySamples ? hooks_.reportedOutputLatencySamples() : 0;
@@ -8184,7 +8203,7 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                    // Shared stop boundary (1.1.13): the audio clip and the MIDI clip of one run have
                                    // the SAME length (engine-acknowledged start/stop), while their placements keep
                                    // their own deliberate compensations (audio: latency-store offset; MIDI: per
-                                   // gesture −output latency inside the clip, window start raw).
+                                   // gesture -output latency inside the clip, window start raw).
                                    if (hooks_.audioClipWindowsForTrack && hooks_.liveMidiSummarizeAllClips)
                                    {
                                        const auto audio = hooks_.audioClipWindowsForTrack(*audioTid);
@@ -9031,7 +9050,7 @@ namespace
     {
         bool valid = false;
         double processCpuMs = 0.0;   ///< kernel + user time of this process
-        double systemBusyMs = 0.0;   ///< all cores: kernel (incl. idle) + user − idle
+        double systemBusyMs = 0.0;   ///< all cores: kernel (incl. idle) + user - idle
         double systemTotalMs = 0.0;  ///< all cores: kernel + user
         double wallMs = 0.0;
         std::uint64_t workingSetBytes = 0;
@@ -9188,7 +9207,7 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
     const auto appendWindow = [&](const juce::String& label, const bool serialHint, const bool switchBefore) {
     if (switchBefore)
     {
-        steps_.push_back(Step{ "perf-profile: " + label + " — switch generation to " + (serialHint ? "SERIAL" : "PARALLEL") + " (re-warm-up)",
+        steps_.push_back(Step{ "perf-profile: " + label + " ? switch generation to " + (serialHint ? "SERIAL" : "PARALLEL") + " (re-warm-up)",
                                [this, say, serialHint](juce::String&) -> bool {
                                    if (hooks_.perf.setGenerationSerial)
                                    {
@@ -9214,6 +9233,10 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                    + " proxySelected=" + juce::String(proxySelected)
                                    + " workingSet=" + perfMb(baseline->workingSetBytes)
                                    + " private=" + perfMb(baseline->privateBytes));
+                               if (hooks_.perf.readAheadText)
+                               {
+                                   say("read-ahead: " + hooks_.perf.readAheadText());
+                               }
                                return true;
                            },
                            juce::jmax(1000, measureSeconds * 1000) });
@@ -9259,6 +9282,10 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                if (hooks_.perf.renderPoolText)
                                {
                                    say("render pool: " + hooks_.perf.renderPoolText());
+                               }
+                               if (hooks_.perf.readAheadText)
+                               {
+                                   say("read-ahead: " + hooks_.perf.readAheadText());
                                }
                                say("process: cpu=" + juce::String(procCpuPctOfOneCore, 1) + "% of one core ("
                                    + juce::String(cores > 0 ? procCpuPctOfOneCore / (double)cores : 0.0, 1) + "% of " + juce::String(cores)
@@ -9314,4 +9341,763 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                return true;
                            },
                            800 });
+}
+
+// -----------------------------------------------------------------------------
+// Read-ahead prototype transitions (`--stability-readahead-transitions <project>`)
+// -----------------------------------------------------------------------------
+// Verification aid for docs/READAHEAD_PROTOTYPE.md ?3??9 on a real device with real plug-ins. Every
+// transition goes through the same handler the UI calls (transport controller, mixer strip cells,
+// Ctrl+S save path, autosave tick, File > Open). After each step the renderer's cumulative counters
+// are logged as deltas against the previous step; deviations from the model's stated expectation are
+// logged as "OBSERVATION" lines and counted ? never folded into the PASS/FAIL verdict, which covers
+// hard errors only. Nothing in the user's project is written: all work happens on a sibling copy.
+void StabilityScenarioRunner::appendReadAheadTransitionsSteps(const StabilityScenarioRequest& request)
+{
+    using CountersView = StabilityRunnerHooks::PerfHooks::ReadAheadCountersView;
+    struct State
+    {
+        juce::File copy;
+        juce::File autosaveSeen;
+        CountersView last;
+        std::vector<TrackId> ownedAtLast;
+        TrackId target = kInvalidTrackId;
+        bool targetOwnedBeforeArm = false;
+        std::vector<std::pair<TrackId, float>> paramRows; ///< rows whose insert #0 param 0 was set before the playing save
+        std::vector<std::pair<TrackId, juce::String>> rowsBefore;   ///< describeSessionRowWithoutIdentity per track
+        std::vector<std::pair<TrackId, juce::String>> digestBefore; ///< insertChainDigest per track with a chain
+        juce::Time copyMtimeBeforeSave;
+        std::int64_t playheadBeforeSave = 0;
+        std::int64_t playheadAtPause = 0;
+        int observations = 0;
+        int trackCountBefore = 0;
+        /// Started WITHOUT `--experimental-readahead`: the same transport / save / reopen walk runs as
+        /// an A control (ownership expectations are skipped; the target is the first AmpliTube row).
+        bool control = false;
+    };
+    auto S = std::make_shared<State>();
+    const juce::File project = request.projectA;
+    const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-readahead-test.dalproj");
+    S->copy = copy;
+
+    auto say = [this](const juce::String& s) { appendStabilityRunLine("  " + s); };
+    auto observe = [this, S](const juce::String& s) {
+        ++S->observations;
+        appendStabilityRunLine("  OBSERVATION: " + s);
+    };
+    const auto sampleRate = [this]() -> double {
+        const double sr = hooks_.getDeviceSampleRate ? hooks_.getDeviceSampleRate() : 48000.0;
+        return sr > 0.0 ? sr : 48000.0;
+    };
+    const auto playhead = [this]() -> std::int64_t {
+        return hooks_.getTransportPlayheadSamples ? hooks_.getTransportPlayheadSamples() : -1;
+    };
+    const auto playing = [this]() -> bool {
+        return hooks_.load.isTransportPlaying ? hooks_.load.isTransportPlaying() : false;
+    };
+    const auto ownedNow = [this]() -> std::vector<TrackId> {
+        return hooks_.perf.readAheadOwnedTrackIds ? hooks_.perf.readAheadOwnedTrackIds() : std::vector<TrackId>{};
+    };
+    const auto contains = [](const std::vector<TrackId>& v, const TrackId t) {
+        return std::find(v.begin(), v.end(), t) != v.end();
+    };
+    // Log the full read-ahead line plus the deltas since the previous snapshot; returns the deltas.
+    const auto snapshot = [this, say, S](const juce::String& label) -> CountersView {
+        CountersView now = hooks_.perf.readAheadCounters ? hooks_.perf.readAheadCounters() : CountersView{};
+        CountersView d;
+        d.enabled = now.enabled;
+        d.depth = now.depth;
+        d.adopted = now.adopted - S->last.adopted;
+        d.produced = now.produced - S->last.produced;
+        d.consumed = now.consumed - S->last.consumed;
+        d.missed = now.missed - S->last.missed;
+        d.staleDiscarded = now.staleDiscarded - S->last.staleDiscarded;
+        d.drainReleases = now.drainReleases - S->last.drainReleases;
+        d.discardResets = now.discardResets - S->last.discardResets;
+        d.missAbandons = now.missAbandons - S->last.missAbandons;
+        say(label + " | delta since previous step: adopted=+" + juce::String((juce::int64)d.adopted)
+            + " produced=+" + juce::String((juce::int64)d.produced) + " consumed=+" + juce::String((juce::int64)d.consumed)
+            + " missed=+" + juce::String((juce::int64)d.missed) + " staleDiscarded=+" + juce::String((juce::int64)d.staleDiscarded)
+            + " drainReleases=+" + juce::String((juce::int64)d.drainReleases) + " discardResets=+" + juce::String((juce::int64)d.discardResets)
+            + " missAbandons=+" + juce::String((juce::int64)d.missAbandons)
+            + " | playing=" + (hooks_.load.isTransportPlaying && hooks_.load.isTransportPlaying() ? "yes" : "no")
+            + " playhead=" + juce::String(hooks_.getTransportPlayheadSamples ? hooks_.getTransportPlayheadSamples() : -1));
+        if (hooks_.perf.readAheadText)
+        {
+            say("read-ahead: " + hooks_.perf.readAheadText());
+        }
+        S->last = now;
+        S->ownedAtLast = hooks_.perf.readAheadOwnedTrackIds ? hooks_.perf.readAheadOwnedTrackIds() : std::vector<TrackId>{};
+        return d;
+    };
+    const auto describeOwned = [this, say](const juce::String& label, const std::vector<TrackId>& ids) {
+        juce::String s;
+        for (const TrackId t : ids)
+        {
+            s << (s.isEmpty() ? "" : ", ") << juce::String((juce::int64)t);
+        }
+        say(label + " owned ids (" + juce::String((int)ids.size()) + "): " + s);
+    };
+
+    steps_.push_back(Step{ "readahead-transitions: copy project to sibling test file",
+                           [this, project, copy](juce::String& failReason) -> bool {
+                               (void)copy.deleteFile();
+                               if (!project.copyFileTo(copy))
+                               {
+                                   failReason = "could not copy project to " + copy.getFullPathName();
+                                   return false;
+                               }
+                               appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    appendLoadAndVerifySteps(copy, "readahead-transitions");
+    steps_.push_back(Step{ "readahead-transitions: settle after load (plug-ins / proxies ready)",
+                           [](juce::String&) -> bool { return true; },
+                           8000 });
+
+    steps_.push_back(Step{ "readahead-transitions: preconditions + baseline capture (stopped, nothing adopted)",
+                           [this, say, S, sampleRate](juce::String& failReason) -> bool {
+                               const auto& P = hooks_.perf;
+                               const auto& M = hooks_.mixer;
+                               const auto& D = hooks_.dup;
+                               if (!P.readAheadCounters || !P.readAheadOwnedTrackIds || !P.readAheadText || !P.describeRuntime
+                                   || !hooks_.setPlaybackActive || !hooks_.seekTransportTo || !hooks_.load.togglePlayLikeButton
+                                   || !hooks_.load.isTransportPlaying || !M.toggleLikeF3 || !M.isVisible || !M.stripClickButton
+                                   || !D.isTrackMonitored || !D.isTrackArmed || !D.describeSessionRowWithoutIdentity
+                                   || !D.insertChainDigest || !D.setInsertParam0 || !D.getInsertParam0 || !hooks_.saveProject
+                                   || !hooks_.forceAutosaveNow || !hooks_.listAllTracks || !hooks_.describeTrackForDiagnostics)
+                               {
+                                   failReason = "required hooks not installed";
+                                   return false;
+                               }
+                               say(P.describeRuntime());
+                               const auto c = P.readAheadCounters();
+                               S->control = !c.enabled;
+                               say(juce::String("mode: ") + (S->control ? "CONTROL (read-ahead disabled; same walk, ownership expectations skipped)" : "read-ahead ENABLED")
+                                   + " depth=" + juce::String(c.depth) + " sampleRate=" + juce::String(sampleRate(), 0)
+                                   + " cycle=" + (hooks_.isCycleEnabled && hooks_.isCycleEnabled() ? "on" : "off"));
+                               S->trackCountBefore = hooks_.getTrackCount ? hooks_.getTrackCount() : 0;
+                               int chains = 0;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   S->rowsBefore.emplace_back(t.id, D.describeSessionRowWithoutIdentity(t.id));
+                                   const juce::String digest = D.insertChainDigest(t.id); // stopped + never played: no worker, safe
+                                   if (digest.isNotEmpty())
+                                   {
+                                       S->digestBefore.emplace_back(t.id, digest);
+                                       ++chains;
+                                   }
+                               }
+                               say("baseline: tracks=" + juce::String(S->trackCountBefore) + " insert chains=" + juce::String(chains));
+                               if (M.isVisible())
+                               {
+                                   M.toggleLikeF3();
+                               }
+                               if (P.resetMeasurementWindows)
+                               {
+                                   P.resetMeasurementWindows();
+                               }
+                               S->last = c;
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "readahead-transitions: T0 play from 17.333 s (handler: seek + play intent)",
+                           [this, S, sampleRate](juce::String&) -> bool {
+                               hooks_.seekTransportTo((std::int64_t)(17.333 * sampleRate()));
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           6000 });
+    steps_.push_back(Step{ "readahead-transitions: T0 observe steady state + pick target row",
+                           [this, say, observe, S, snapshot, ownedNow, describeOwned](juce::String& failReason) -> bool {
+                               const auto d = snapshot("T0 steady state after 6 s");
+                               const auto owned = ownedNow();
+                               describeOwned("T0", owned);
+                               if (owned.empty() && !S->control)
+                               {
+                                   failReason = "nothing adopted after 6 s of playback";
+                                   return false;
+                               }
+                               if (d.missed > 0 || d.missAbandons > 0)
+                               {
+                                   observe("T0 warm-up: missed=" + juce::String((juce::int64)d.missed) + " missAbandons="
+                                           + juce::String((juce::int64)d.missAbandons) + " (silence / rows leaving the mode during start-up)");
+                               }
+                               for (const TrackId t : owned)
+                               {
+                                   if (hooks_.describeTrackForDiagnostics(t).contains("AmpliTube"))
+                                   {
+                                       S->target = t;
+                                       break;
+                                   }
+                               }
+                               if (S->target == kInvalidTrackId && S->control)
+                               {
+                                   for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                                   {
+                                       if (!t.isInstrument && hooks_.describeTrackForDiagnostics(t.id).contains("AmpliTube")) { S->target = t.id; break; }
+                                   }
+                               }
+                               if (S->target == kInvalidTrackId && !owned.empty())
+                               {
+                                   S->target = owned.front();
+                                   observe("no owned row carries an AmpliTube chain; target falls back to the first owned row");
+                               }
+                               if (S->target == kInvalidTrackId)
+                               {
+                                   failReason = "no target row (no AmpliTube audio row found)";
+                                   return false;
+                               }
+                               say("target row: " + hooks_.describeTrackForDiagnostics(S->target));
+                               return true;
+                           },
+                           200 });
+
+    // T1 ? pause / resume at the same position (model ?3: NOT a discontinuity).
+    steps_.push_back(Step{ "readahead-transitions: T1 pause (transport controller, Space path)",
+                           [this, S, playhead](juce::String&) -> bool {
+                               hooks_.load.togglePlayLikeButton();
+                               S->playheadAtPause = playhead();
+                               return true;
+                           },
+                           1500 });
+    steps_.push_back(Step{ "readahead-transitions: T1 observe paused",
+                           [this, say, observe, S, snapshot, playing, playhead, ownedNow, describeOwned](juce::String&) -> bool {
+                               const auto d = snapshot("T1 paused 1.5 s");
+                               describeOwned("T1 paused", ownedNow());
+                               if (playing()) { observe("T1: transport still reports Playing after the pause click"); }
+                               if (std::llabs(playhead() - S->playheadAtPause) > 0) { observe("T1: playhead moved while paused: " + juce::String(S->playheadAtPause) + " -> " + juce::String(playhead())); }
+                               if (d.discardResets > 0 || d.drainReleases > 0 || d.missAbandons > 0)
+                               {
+                                   observe("T1 pause: ownership changed (discardResets=" + juce::String((juce::int64)d.discardResets)
+                                           + " drainReleases=" + juce::String((juce::int64)d.drainReleases) + " missAbandons="
+                                           + juce::String((juce::int64)d.missAbandons) + ") ? model says pause keeps rows owned");
+                               }
+                               if (d.missed > 0) { observe("T1 pause: missed=" + juce::String((juce::int64)d.missed)); }
+                               say("T1 paused: produced during pause=+" + juce::String((juce::int64)d.produced) + " (worker may fill to depth)");
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "readahead-transitions: T1 resume at the same position",
+                           [this](juce::String&) -> bool {
+                               hooks_.load.togglePlayLikeButton();
+                               return true;
+                           },
+                           3000 });
+    steps_.push_back(Step{ "readahead-transitions: T1 observe resumed",
+                           [this, observe, snapshot, playing, ownedNow, describeOwned](juce::String&) -> bool {
+                               const auto d = snapshot("T1 resumed 3 s");
+                               describeOwned("T1 resumed", ownedNow());
+                               if (!playing()) { observe("T1: transport not Playing after resume"); }
+                               if (d.missed > 0) { observe("T1 resume: missed=" + juce::String((juce::int64)d.missed) + " (silent segments on a continuation)"); }
+                               if (d.discardResets > 0 || d.missAbandons > 0)
+                               {
+                                   observe("T1 resume: discardResets=" + juce::String((juce::int64)d.discardResets) + " missAbandons="
+                                           + juce::String((juce::int64)d.missAbandons) + " ? model says resume is a continuation (no discard)");
+                               }
+                               return true;
+                           },
+                           200 });
+
+    // T2 ? seek while playing, then Stop button (= stop + seek 0) and restart (deliberate discontinuities).
+    steps_.push_back(Step{ "readahead-transitions: T2 seek to 25 s while playing",
+                           [this, S, sampleRate](juce::String&) -> bool {
+                               hooks_.seekTransportTo((std::int64_t)(25.0 * sampleRate()));
+                               return true;
+                           },
+                           3000 });
+    steps_.push_back(Step{ "readahead-transitions: T2 observe after seek",
+                           [this, say, observe, S, snapshot, ownedNow, describeOwned](juce::String&) -> bool {
+                               const int ownedBefore = (int)S->ownedAtLast.size();
+                               const auto d = snapshot("T2 seek +3 s");
+                               describeOwned("T2 after seek", ownedNow());
+                               say("T2 seek: expected discardResets=" + juce::String(ownedBefore) + " (one per owned row) and re-adoption");
+                               if (d.discardResets < ownedBefore) { observe("T2 seek: discardResets=+" + juce::String((juce::int64)d.discardResets) + " < owned rows " + juce::String(ownedBefore)); }
+                               if (d.adopted < ownedBefore) { observe("T2 seek: re-adoption adopted=+" + juce::String((juce::int64)d.adopted) + " < " + juce::String(ownedBefore) + " within 3 s"); }
+                               if (d.missed > 0) { observe("T2 seek: missed=" + juce::String((juce::int64)d.missed)); }
+                               if (!S->control && ownedNow().empty()) { observe("T2 seek: nothing owned 3 s after the seek"); }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "readahead-transitions: T2 Stop button (stop intent + seek 0), then seek 17.333 s and play",
+                           [this, S, sampleRate](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               hooks_.seekTransportTo(0);
+                               hooks_.seekTransportTo((std::int64_t)(17.333 * sampleRate()));
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           4000 });
+    steps_.push_back(Step{ "readahead-transitions: T2 observe after stop/restart",
+                           [this, observe, S, snapshot, playing, ownedNow, describeOwned](juce::String&) -> bool {
+                               const int ownedBefore = (int)S->ownedAtLast.size();
+                               const auto d = snapshot("T2 stop/restart +4 s");
+                               describeOwned("T2 after restart", ownedNow());
+                               if (!playing()) { observe("T2: not Playing after restart"); }
+                               if (d.discardResets < ownedBefore) { observe("T2 stop: discardResets=+" + juce::String((juce::int64)d.discardResets) + " < owned rows " + juce::String(ownedBefore)); }
+                               if (d.missed > 0) { observe("T2 restart: missed=" + juce::String((juce::int64)d.missed)); }
+                               if (!S->control && ownedNow().empty()) { observe("T2 restart: nothing owned 4 s after restart"); }
+                               return true;
+                           },
+                           200 });
+
+    // T3 ? cycle wrap (model ?4): seek 2 s before the right locator, observe the seek, then the wrap.
+    steps_.push_back(Step{ "readahead-transitions: T3a seek to 39.0 s (right locator at 41.0 s)",
+                           [this, sampleRate](juce::String&) -> bool {
+                               hooks_.seekTransportTo((std::int64_t)(39.0 * sampleRate()));
+                               return true;
+                           },
+                           1200 });
+    steps_.push_back(Step{ "readahead-transitions: T3a observe before the wrap",
+                           [this, S, snapshot, ownedNow, describeOwned, observe](juce::String&) -> bool {
+                               (void)snapshot("T3a seek +1.2 s (pre-wrap)");
+                               describeOwned("T3a pre-wrap", ownedNow());
+                               if (!S->control && ownedNow().empty()) { observe("T3a: nothing owned 1.2 s after the seek (re-adoption slower than expected)"); }
+                               return true;
+                           },
+                           4500 });
+    steps_.push_back(Step{ "readahead-transitions: T3b observe after the wrap",
+                           [this, say, observe, S, snapshot, playhead, sampleRate, ownedNow, describeOwned](juce::String&) -> bool {
+                               const int ownedBefore = (int)S->ownedAtLast.size();
+                               const auto d = snapshot("T3b wrap +4.5 s");
+                               const std::int64_t ph = playhead();
+                               describeOwned("T3b post-wrap", ownedNow());
+                               const bool wrapped = ph >= 0 && ph < (std::int64_t)(39.0 * sampleRate());
+                               say(juce::String("T3b: playhead ") + (wrapped ? "wrapped (cycle continued from the left locator)" : "did NOT wrap"));
+                               if (!wrapped) { observe("T3b: transport did not wrap within 5.7 s of a 2 s run-up (cycle off or stalled?)"); }
+                               if (d.missed > 0) { observe("T3b cycle wrap: missed=" + juce::String((juce::int64)d.missed) + " (silent segments at or after the wrap)"); }
+                               if (d.discardResets > 0 || d.missAbandons > 0)
+                               {
+                                   observe("T3b cycle wrap: discardResets=" + juce::String((juce::int64)d.discardResets) + " missAbandons="
+                                           + juce::String((juce::int64)d.missAbandons) + " ? model says the wrap is gapless, no reset");
+                               }
+                               if ((int)ownedNow().size() < ownedBefore) { observe("T3b: owned rows dropped from " + juce::String(ownedBefore) + " to " + juce::String((int)ownedNow().size()) + " across the wrap"); }
+                               return true;
+                           },
+                           200 });
+
+    // T4 ? Monitor on / off on an owned audio row through the mixer strip cell (model ?5).
+    steps_.push_back(Step{ "readahead-transitions: T4 open mixer (F3 path) to reach the audio strip cells",
+                           [this, say](juce::String&) -> bool {
+                               if (!hooks_.mixer.isVisible())
+                               {
+                                   hooks_.mixer.toggleLikeF3();
+                               }
+                               say(juce::String("mixer visible=") + (hooks_.mixer.isVisible() ? "yes" : "no"));
+                               return true;
+                           },
+                           1500 });
+    steps_.push_back(Step{ "readahead-transitions: T4 Monitor ON on the target row (strip cell click)",
+                           [this, say, observe, S, snapshot, ownedNow, contains](juce::String& failReason) -> bool {
+                               (void)snapshot("T4 before Monitor ON (mixer open)");
+                               if (!S->control && !contains(ownedNow(), S->target))
+                               {
+                                   // Re-pick: the earlier target may have lost its slot to another row after the seeks.
+                                   for (const TrackId t : ownedNow())
+                                   {
+                                       if (hooks_.describeTrackForDiagnostics(t).contains("AmpliTube")) { S->target = t; break; }
+                                   }
+                                   if (!contains(ownedNow(), S->target) && !ownedNow().empty()) { S->target = ownedNow().front(); }
+                                   say("T4 target re-picked: " + hooks_.describeTrackForDiagnostics(S->target));
+                               }
+                               if (!S->control && !contains(ownedNow(), S->target))
+                               {
+                                   failReason = "no owned row available for the Monitor test";
+                                   return false;
+                               }
+                               if (!hooks_.mixer.stripClickButton(S->target, "monitor"))
+                               {
+                                   failReason = "mixer strip Monitor cell click refused for track " + juce::String((juce::int64)S->target);
+                                   return false;
+                               }
+                               return true;
+                           },
+                           1500 });
+    steps_.push_back(Step{ "readahead-transitions: T4 observe Monitor ON",
+                           [this, say, observe, S, snapshot, ownedNow, contains, describeOwned](juce::String&) -> bool {
+                               const auto d = snapshot("T4 Monitor ON +1.5 s");
+                               const auto owned = ownedNow();
+                               describeOwned("T4 monitor on", owned);
+                               const bool mon = hooks_.dup.isTrackMonitored(S->target);
+                               say("T4: " + hooks_.describeTrackForDiagnostics(S->target));
+                               if (!mon) { observe("T4: Monitor did not turn ON on the target row through the strip cell"); }
+                               if (contains(owned, S->target)) { observe("T4: target row STILL owned by read-ahead while monitored (model: immediate handover)"); }
+                               if (!S->control && d.discardResets < 1) { observe("T4: no discard reset counted for the Monitor handover"); }
+                               if (d.missed > 0) { say("T4: missed=+" + juce::String((juce::int64)d.missed) + " during the handover (Abandoning span / silent segments) ? reported, see model ?5"); observe("T4 Monitor ON: missed=" + juce::String((juce::int64)d.missed)); }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "readahead-transitions: T4 Monitor OFF on the target row",
+                           [this, S](juce::String& failReason) -> bool {
+                               if (!hooks_.mixer.stripClickButton(S->target, "monitor"))
+                               {
+                                   failReason = "mixer strip Monitor cell click (off) refused";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           3000 });
+    steps_.push_back(Step{ "readahead-transitions: T4 observe Monitor OFF",
+                           [this, say, observe, S, snapshot, ownedNow, contains, describeOwned](juce::String&) -> bool {
+                               const auto d = snapshot("T4 Monitor OFF +3 s");
+                               const auto owned = ownedNow();
+                               describeOwned("T4 monitor off", owned);
+                               if (hooks_.dup.isTrackMonitored(S->target)) { observe("T4: Monitor still ON after the second click"); }
+                               say(juce::String("T4: target re-adopted after Monitor OFF: ") + (contains(owned, S->target) ? "yes" : "no (slot taken by another eligible row or cooldown) ? informational"));
+                               if (d.missed > 0) { observe("T4 Monitor OFF: missed=" + juce::String((juce::int64)d.missed)); }
+                               S->targetOwnedBeforeArm = contains(owned, S->target);
+                               return true;
+                           },
+                           200 });
+
+    // T5 ? Arm the same row (model ?5: never adopted while armed; an owned row drains gaplessly).
+    steps_.push_back(Step{ "readahead-transitions: T5 Arm the same row (strip cell click)",
+                           [this, S](juce::String& failReason) -> bool {
+                               if (!hooks_.mixer.stripClickButton(S->target, "arm"))
+                               {
+                                   failReason = "mixer strip Arm cell click refused";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           3000 });
+    steps_.push_back(Step{ "readahead-transitions: T5 observe armed",
+                           [this, say, observe, S, snapshot, ownedNow, contains, describeOwned](juce::String&) -> bool {
+                               const auto d = snapshot("T5 armed +3 s");
+                               const auto owned = ownedNow();
+                               describeOwned("T5 armed", owned);
+                               const bool armed = hooks_.dup.isTrackArmed(S->target);
+                               if (!armed) { observe("T5: row not armed after the strip Arm click"); }
+                               if (contains(owned, S->target)) { observe("T5: ARMED row is owned by read-ahead (model: armed rows are never adopted)"); }
+                               say(juce::String("T5: row was owned at arm time: ") + (S->targetOwnedBeforeArm ? "yes" : "no")
+                                   + "; drainReleases=+" + juce::String((juce::int64)d.drainReleases) + " discardResets=+" + juce::String((juce::int64)d.discardResets));
+                               if (S->targetOwnedBeforeArm && d.drainReleases < 1) { observe("T5: owned row armed but no gapless drain release counted"); }
+                               if (d.missed > 0) { observe("T5 arm: missed=" + juce::String((juce::int64)d.missed)); }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "readahead-transitions: T5 wait with the row armed (must stay un-adopted)",
+                           [](juce::String&) -> bool { return true; },
+                           3000 });
+    steps_.push_back(Step{ "readahead-transitions: T5 observe still armed, then disarm + close mixer",
+                           [this, say, observe, S, snapshot, ownedNow, contains](juce::String& failReason) -> bool {
+                               (void)snapshot("T5 armed +6 s");
+                               if (contains(ownedNow(), S->target)) { observe("T5: armed row adopted after 6 s (must never happen)"); }
+                               if (!hooks_.mixer.stripClickButton(S->target, "arm"))
+                               {
+                                   failReason = "mixer strip Arm cell click (off) refused";
+                                   return false;
+                               }
+                               if (hooks_.mixer.isVisible())
+                               {
+                                   hooks_.mixer.toggleLikeF3();
+                               }
+                               say("T5: disarmed, mixer closed");
+                               return true;
+                           },
+                           2000 });
+
+    // T6 ? Save while playing (capture window drains owned rows), then Save while paused.
+    steps_.push_back(Step{ "readahead-transitions: T6a set insert #0 param 0 on up to two owned AmpliTube rows (so the reopen can check it)",
+                           [this, say, observe, S, snapshot, ownedNow](juce::String&) -> bool {
+                               (void)snapshot("T6a before param change");
+                               if (hooks_.dup.isTrackArmed(S->target)) { observe("T6a: target still armed before the save tests"); }
+                               float v = 0.37f;
+                               std::vector<TrackId> candidates = ownedNow();
+                               if (S->control)
+                               {
+                                   for (const StabilityTrackInfo& t : hooks_.listAllTracks()) { if (!t.isInstrument) { candidates.push_back(t.id); } }
+                               }
+                               for (const TrackId t : candidates)
+                               {
+                                   if (S->paramRows.size() >= 2) { break; }
+                                   if (!hooks_.describeTrackForDiagnostics(t).contains("AmpliTube")) { continue; }
+                                   if (hooks_.dup.setInsertParam0(t, 0, v))
+                                   {
+                                       S->paramRows.emplace_back(t, v);
+                                       say("T6a: track " + juce::String((juce::int64)t) + " insert#0 param0 := " + juce::String(v, 3)
+                                           + " (now reads " + juce::String(hooks_.dup.getInsertParam0(t, 0), 3) + ")"
+                                           + (hooks_.dup.insertParam0Name ? " name=\"" + hooks_.dup.insertParam0Name(t, 0) + "\"" : juce::String()));
+                                       v += 0.26f;
+                                   }
+                               }
+                               if (S->paramRows.empty()) { observe("T6a: no owned AmpliTube row accepted a parameter change ? reopen check limited to session rows"); }
+                               return true;
+                           },
+                           500 });
+    steps_.push_back(Step{ "readahead-transitions: T6b Save while PLAYING (Ctrl+S path)",
+                           [this, say, S, playhead, playing](juce::String& failReason) -> bool {
+                               if (!playing())
+                               {
+                                   failReason = "transport not playing before the playing save";
+                                   return false;
+                               }
+                               S->copyMtimeBeforeSave = S->copy.getLastModificationTime();
+                               S->playheadBeforeSave = playhead();
+                               hooks_.saveProject();
+                               say("T6b: save requested at playhead " + juce::String(S->playheadBeforeSave));
+                               return true;
+                           },
+                           2500 });
+    steps_.push_back(Step{ "readahead-transitions: T6b observe after the playing save",
+                           [this, say, observe, S, snapshot, playhead, playing, sampleRate, ownedNow, describeOwned](juce::String& failReason) -> bool {
+                               const int ownedBefore = (int)S->ownedAtLast.size();
+                               const auto d = snapshot("T6b playing save +2.5 s");
+                               describeOwned("T6b after save", ownedNow());
+                               const juce::Time mt = S->copy.getLastModificationTime();
+                               if (!S->copy.existsAsFile() || S->copy.getSize() <= 0 || mt <= S->copyMtimeBeforeSave)
+                               {
+                                   failReason = "save while playing did not write the test copy (mtime unchanged or file empty)";
+                                   return false;
+                               }
+                               say("T6b: file written, size=" + juce::String(S->copy.getSize()) + " bytes");
+                               if (!playing()) { observe("T6b: transport stopped during/after the playing save"); }
+                               const double advancedSec = (double)(playhead() - S->playheadBeforeSave) / sampleRate();
+                               say("T6b: playhead advanced " + juce::String(advancedSec, 2) + " s in ~2.5 s wall (cycle wrap can make this negative)");
+                               say("T6b: drained rows for the capture window: drainReleases=+" + juce::String((juce::int64)d.drainReleases) + " (owned before: " + juce::String(ownedBefore) + "), re-adopted=+" + juce::String((juce::int64)d.adopted));
+                               if (d.drainReleases < ownedBefore) { observe("T6b: fewer drain releases than owned rows (" + juce::String((juce::int64)d.drainReleases) + " < " + juce::String(ownedBefore) + ") ? window may have resolved differently or rows were not owned"); }
+                               if (d.discardResets > 0) { observe("T6b playing save: discardResets=+" + juce::String((juce::int64)d.discardResets) + " (model: the window drains, it does not discard)"); }
+                               if (d.missed > 0) { observe("T6b playing save: missed=+" + juce::String((juce::int64)d.missed)); }
+                               if (!S->control && ownedNow().empty()) { observe("T6b: nothing re-adopted 2.5 s after the save window closed"); }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "readahead-transitions: T6c pause, then Save while PAUSED",
+                           [this, S, playhead](juce::String&) -> bool {
+                               hooks_.load.togglePlayLikeButton();
+                               S->playheadAtPause = playhead();
+                               return true;
+                           },
+                           1000 });
+    steps_.push_back(Step{ "readahead-transitions: T6c save (paused)",
+                           [this, S](juce::String&) -> bool {
+                               S->copyMtimeBeforeSave = S->copy.getLastModificationTime();
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           1500 });
+    steps_.push_back(Step{ "readahead-transitions: T6c observe paused save, then resume",
+                           [this, say, observe, S, snapshot, playhead, playing](juce::String& failReason) -> bool {
+                               const auto d = snapshot("T6c paused save +1.5 s");
+                               if (S->copy.getLastModificationTime() <= S->copyMtimeBeforeSave)
+                               {
+                                   failReason = "save while paused did not write the test copy";
+                                   return false;
+                               }
+                               say("T6c: file written while paused, size=" + juce::String(S->copy.getSize()) + " bytes");
+                               if (playing()) { observe("T6c: transport Playing during the paused save"); }
+                               if (playhead() != S->playheadAtPause) { observe("T6c: playhead moved during the paused save"); }
+                               if (d.discardResets > 0 || d.missAbandons > 0) { observe("T6c paused save: discardResets=+" + juce::String((juce::int64)d.discardResets) + " missAbandons=+" + juce::String((juce::int64)d.missAbandons)); }
+                               say("T6c: drainReleases=+" + juce::String((juce::int64)d.drainReleases) + " (model: paused save drains nothing; ownership kept)");
+                               hooks_.load.togglePlayLikeButton();
+                               return true;
+                           },
+                           3000 });
+    steps_.push_back(Step{ "readahead-transitions: T6c observe resumed after the paused save",
+                           [this, observe, snapshot, playing, ownedNow, describeOwned](juce::String&) -> bool {
+                               const auto d = snapshot("T6c resumed +3 s");
+                               describeOwned("T6c resumed", ownedNow());
+                               if (!playing()) { observe("T6c: not Playing after resume"); }
+                               if (d.missed > 0) { observe("T6c resume after paused save: missed=+" + juce::String((juce::int64)d.missed)); }
+                               return true;
+                           },
+                           200 });
+
+    // T7 ? autosave through the existing tick path while playing.
+    steps_.push_back(Step{ "readahead-transitions: T7 force autosave while playing (existing autosave mechanism)",
+                           [this, say, observe, S, snapshot](juce::String&) -> bool {
+                               (void)snapshot("T7 before autosave");
+                               // The autosave tick only writes a DIRTY project (both saves above left it clean):
+                               // make the same small undoable edit the open-save-close scenario uses.
+                               if (hooks_.renameTrackUndoable && hooks_.listAllTracks)
+                               {
+                                   const auto tracks = hooks_.listAllTracks();
+                                   if (!tracks.empty())
+                                   {
+                                       const juce::String newName = "RaAutosave " + juce::Time::getCurrentTime().formatted("%H%M%S");
+                                       say(juce::String("T7: dirtying edit (rename track ") + juce::String((juce::int64)tracks.front().id) + ") -> "
+                                           + (hooks_.renameTrackUndoable(tracks.front().id, newName) ? "ok" : "refused"));
+                                   }
+                               }
+                               juce::String why;
+                               const bool ok = hooks_.forceAutosaveNow(why);
+                               say(juce::String("T7: forceAutosaveNow -> ") + (ok ? "true" : "false") + (why.isNotEmpty() ? " (" + why + ")" : ""));
+                               if (!ok) { observe("T7: autosave did not complete now: " + why + " (deferred by the capture window?)"); }
+                               if (hooks_.getAutosaveFilePath)
+                               {
+                                   S->autosaveSeen = hooks_.getAutosaveFilePath();
+                               }
+                               return true;
+                           },
+                           2500 });
+    steps_.push_back(Step{ "readahead-transitions: T7 observe after autosave",
+                           [this, say, observe, S, snapshot, ownedNow, describeOwned](juce::String&) -> bool {
+                               const int ownedBefore = (int)S->ownedAtLast.size();
+                               const auto d = snapshot("T7 autosave +2.5 s");
+                               describeOwned("T7 after autosave", ownedNow());
+                               if (S->autosaveSeen != juce::File())
+                               {
+                                   say("T7: autosave file " + S->autosaveSeen.getFullPathName() + " exists=" + (S->autosaveSeen.existsAsFile() ? "yes" : "no")
+                                       + " size=" + juce::String(S->autosaveSeen.getSize()) + " ageSec=" + juce::String((juce::Time::getCurrentTime() - S->autosaveSeen.getLastModificationTime()).inSeconds(), 1));
+                               }
+                               say("T7: drainReleases=+" + juce::String((juce::int64)d.drainReleases) + " (owned before: " + juce::String(ownedBefore) + ") re-adopted=+" + juce::String((juce::int64)d.adopted));
+                               if (d.discardResets > 0) { observe("T7 autosave: discardResets=+" + juce::String((juce::int64)d.discardResets)); }
+                               if (d.missed > 0) { observe("T7 autosave: missed=+" + juce::String((juce::int64)d.missed)); }
+                               return true;
+                           },
+                           200 });
+
+    // T8 ? stop, reopen the saved copy, compare rows / chains / the changed parameters.
+    steps_.push_back(Step{ "readahead-transitions: T8 stop playback (engine load + output summary for the whole run)",
+                           [this, say, snapshot](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               if (hooks_.perf.audioLoadText) { say("engine (since baseline): " + hooks_.perf.audioLoadText()); }
+                               const float peak = hooks_.readOutputPeakHoldAndReset ? hooks_.readOutputPeakHoldAndReset() : -1.0f;
+                               if (hooks_.drainMasterMeter)
+                               {
+                                   const StabilityLevelStats m = hooks_.drainMasterMeter();
+                                   say("output (since baseline): peakHold=" + juce::String(peak, 3) + " oversL/R=" + juce::String((int)m.overs[0]) + "/" + juce::String((int)m.overs[1])
+                                       + " nonFinite=" + juce::String((int)m.nonFinite));
+                               }
+                               (void)snapshot("T8 stopped");
+                               return true;
+                           },
+                           1000 });
+    // The reopen itself runs in a FRESH process (`--stability-readahead-transitions <project>
+    // --reopen-check`): reopening in-process tears the played AmpliTube instances down inside the
+    // load, which hits the pre-existing AmpliTube teardown crash with and without read-ahead.
+    steps_.push_back(Step{ "readahead-transitions: T8 write the reopen-check sidecar (baseline rows / chain identities / changed parameters)",
+                           [this, say, S](juce::String& failReason) -> bool {
+                               juce::String out;
+                               out << "tracks " << S->trackCountBefore << "\n";
+                               for (const auto& [tid, expected] : S->paramRows) { out << "param " << (juce::int64)tid << " " << juce::String(expected, 4) << "\n"; }
+                               for (const auto& [tid, row] : S->rowsBefore) { out << "row " << (juce::int64)tid << " " << row << "\n"; }
+                               for (const auto& [tid, digest] : S->digestBefore) { out << "digest " << (juce::int64)tid << " " << digest << "\n"; }
+                               const juce::File sidecar = S->copy.withFileExtension(".readahead-check.txt");
+                               if (!sidecar.replaceWithText(out))
+                               {
+                                   failReason = "could not write " + sidecar.getFullPathName();
+                                   return false;
+                               }
+                               say("T8: sidecar written " + sidecar.getFullPathName() + " (" + juce::String((int)S->rowsBefore.size()) + " rows, "
+                                   + juce::String((int)S->digestBefore.size()) + " chains, " + juce::String((int)S->paramRows.size()) + " params)");
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "readahead-transitions: summary",
+                           [this, say, S](juce::String&) -> bool {
+                               say("OBSERVATIONS total: " + juce::String(S->observations) + " (each listed above as 'OBSERVATION:'; the PASS/FAIL verdict covers hard errors only)");
+                               say("next: run the same command with --reopen-check in a fresh process to verify the saved copy");
+                               return true;
+                           },
+                           200 });
+}
+
+// `--stability-readahead-transitions <project> --reopen-check`: fresh-process reopen of the sibling
+// test copy the transitions walk saved, compared against its sidecar (session rows without identity,
+// insert chain identity / order / slot count, the parameters set before the playing save).
+void StabilityScenarioRunner::appendReadAheadReopenCheckSteps(const StabilityScenarioRequest& request)
+{
+    const juce::File project = request.projectA;
+    const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-readahead-test.dalproj");
+    const juce::File sidecar = copy.withFileExtension(".readahead-check.txt");
+    auto say = [this](const juce::String& s) { appendStabilityRunLine("  " + s); };
+    auto observations = std::make_shared<int>(0);
+    auto observe = [this, observations](const juce::String& s) {
+        ++*observations;
+        appendStabilityRunLine("  OBSERVATION: " + s);
+    };
+
+    steps_.push_back(Step{ "readahead-reopen-check: preconditions",
+                           [say, copy, sidecar](juce::String& failReason) -> bool {
+                               if (!copy.existsAsFile() || !sidecar.existsAsFile())
+                               {
+                                   failReason = "missing saved copy or sidecar (run the transitions walk first): " + copy.getFullPathName();
+                                   return false;
+                               }
+                               say("reopen-check: copy=" + copy.getFullPathName() + " size=" + juce::String(copy.getSize())
+                                   + " mtime=" + copy.getLastModificationTime().toString(true, true) + " sidecar=" + sidecar.getFileName());
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    appendLoadAndVerifySteps(copy, "readahead-reopen-check");
+    steps_.push_back(Step{ "readahead-reopen-check: settle after load (plug-ins ready)",
+                           [](juce::String&) -> bool { return true; },
+                           8000 });
+    steps_.push_back(Step{ "readahead-reopen-check: compare with the sidecar",
+                           [this, say, observe, observations, sidecar](juce::String& failReason) -> bool {
+                               if (!hooks_.dup.describeSessionRowWithoutIdentity || !hooks_.dup.insertChainDigest || !hooks_.dup.getInsertParam0)
+                               {
+                                   failReason = "dup hooks not installed";
+                                   return false;
+                               }
+                               if (hooks_.perf.readAheadText) { say("read-ahead: " + hooks_.perf.readAheadText()); }
+                               juce::StringArray lines;
+                               lines.addLines(sidecar.loadFileAsString());
+                               int tracksBefore = -1, rows = 0, rowDiffs = 0, chains = 0, identityDiffs = 0, stateDiffs = 0, params = 0, paramDiffs = 0;
+                               const auto part = [](const juce::String& s, const juce::String& key) { return s.fromFirstOccurrenceOf(key, false, false).upToFirstOccurrenceOf(" ", false, false); };
+                               for (const juce::String& l : lines)
+                               {
+                                   if (l.startsWith("tracks "))
+                                   {
+                                       tracksBefore = l.fromFirstOccurrenceOf(" ", false, false).getIntValue();
+                                   }
+                                   else if (l.startsWith("param "))
+                                   {
+                                       const auto tid = (TrackId)l.fromFirstOccurrenceOf(" ", false, false).upToFirstOccurrenceOf(" ", false, false).getLargeIntValue();
+                                       const float expected = l.fromLastOccurrenceOf(" ", false, false).getFloatValue();
+                                       const float got = hooks_.dup.getInsertParam0(tid, 0);
+                                       ++params;
+                                       say("reopen-check: track " + juce::String((juce::int64)tid) + " insert#0 param0=" + juce::String(got, 3) + " expected " + juce::String(expected, 3)
+                                           + (hooks_.dup.insertParam0Name ? " name=\"" + hooks_.dup.insertParam0Name(tid, 0) + "\"" : juce::String())
+                                           + " | " + (hooks_.describeTrackForDiagnostics ? hooks_.describeTrackForDiagnostics(tid) : juce::String()));
+                                       if (std::isnan(got) || std::abs(got - expected) > 0.01f) { ++paramDiffs; observe("reopen-check: parameter set before the playing save not restored on track " + juce::String((juce::int64)tid)); }
+                                   }
+                                   else if (l.startsWith("row "))
+                                   {
+                                       // `material=0x?` is the in-process address of the decoded audio material:
+                                       // it legitimately differs between processes and is not session state.
+                                       const auto stripMaterialPointers = [](const juce::String& s) {
+                                           return juce::String(std::regex_replace(s.toStdString(), std::regex("material=0x[0-9a-fA-F]+"), "material=<ptr>"));
+                                       };
+                                       const juce::String rest = l.fromFirstOccurrenceOf(" ", false, false);
+                                       const auto tid = (TrackId)rest.upToFirstOccurrenceOf(" ", false, false).getLargeIntValue();
+                                       const juce::String before = stripMaterialPointers(rest.fromFirstOccurrenceOf(" ", false, false));
+                                       const juce::String after = stripMaterialPointers(hooks_.dup.describeSessionRowWithoutIdentity(tid));
+                                       ++rows;
+                                       if (after != before)
+                                       {
+                                           ++rowDiffs;
+                                           if (rowDiffs <= 3) { say("reopen-check row diff track " + juce::String((juce::int64)tid) + "\n    before: " + before + "\n    after:  " + after); }
+                                       }
+                                   }
+                                   else if (l.startsWith("digest "))
+                                   {
+                                       const juce::String rest = l.fromFirstOccurrenceOf(" ", false, false);
+                                       const auto tid = (TrackId)rest.upToFirstOccurrenceOf(" ", false, false).getLargeIntValue();
+                                       const juce::String before = rest.fromFirstOccurrenceOf(" ", false, false);
+                                       const juce::String after = hooks_.dup.insertChainDigest(tid); // never played in this process: no worker
+                                       ++chains;
+                                       if (part(after, "identity=") != part(before, "identity=") || part(after, "slots=") != part(before, "slots=")) { ++identityDiffs; observe("reopen-check: insert chain identity/order/slot count differs on track " + juce::String((juce::int64)tid)); }
+                                       if (part(after, "state=") != part(before, "state=")) { ++stateDiffs; }
+                                   }
+                               }
+                               const int n = hooks_.getTrackCount ? hooks_.getTrackCount() : 0;
+                               say("reopen-check: tracks=" + juce::String(n) + " (before " + juce::String(tracksBefore) + ")");
+                               if (tracksBefore >= 0 && n != tracksBefore)
+                               {
+                                   failReason = "track count differs after reopen";
+                                   return false;
+                               }
+                               say("reopen-check: session rows compared=" + juce::String(rows) + " differing (routing/fader/pan/mute/clips/sends/inputs)=" + juce::String(rowDiffs));
+                               say("reopen-check: insert chains compared=" + juce::String(chains) + " identity/order/slot diffs=" + juce::String(identityDiffs)
+                                   + " state-byte diffs=" + juce::String(stateDiffs) + " (" + juce::String(params) + " expected from the deliberate parameter change; live plug-ins may re-serialize)");
+                               say("reopen-check: parameters compared=" + juce::String(params) + " not restored=" + juce::String(paramDiffs));
+                               if (rowDiffs > 0) { observe("reopen-check: " + juce::String(rowDiffs) + " session rows differ after save/reopen"); }
+                               say("OBSERVATIONS total: " + juce::String(*observations));
+                               return true;
+                           },
+                           500 });
 }

@@ -6998,6 +6998,14 @@ private:
             }
             return inst->getParameters()[0]->getValue();
         };
+        D.insertParam0Name = [this](const TrackId tid, const int i) -> juce::String {
+            juce::AudioPluginInstance* const inst = pluginHost_.liveInstanceAtChainIndexForDiagnostics(tid, i);
+            if (inst == nullptr || inst->getParameters().isEmpty())
+            {
+                return {};
+            }
+            return inst->getParameters()[0]->getName(64) + " (" + juce::String(inst->getParameters().size()) + " params)";
+        };
         D.addUnavailablePlaceholderInsert = [this](const TrackId tid, juce::String& failReason) -> bool {
             PluginTrackChain chain = pluginHost_.hasAnyInsertOnTrack(tid) ? pluginHost_.exportChain(tid) : PluginTrackChain{};
             PluginInsertDescriptor slot;
@@ -7480,6 +7488,96 @@ private:
             return s;
         };
         P.setGenerationSerial = [this](const bool serial) { playbackEngine_.setInstrumentRenderSerialForDiagnostics(serial); };
+        P.readAheadText = [this]() -> juce::String {
+            // Diagnostics only (docs/READAHEAD_PROTOTYPE.md §10): cumulative renderer counters plus a
+            // message-thread poll of which audio rows the renderer owns right now. The row-state
+            // reads are relaxed atomics; a row adopted or released during the walk may be listed
+            // one way or the other — fine for a log line, never used for any decision.
+            readahead::ReadAheadRenderer* const ra = playbackEngine_.experimentalReadAhead();
+            if (ra == nullptr)
+            {
+                return "disabled (no --experimental-readahead)";
+            }
+            const auto c = ra->countersSnapshot();
+            juce::String s;
+            s << "depth=" << ra->depthBlocks()
+              << " counters(cumulative): adopted=" << (juce::int64)c.adopted
+              << " produced=" << (juce::int64)c.producedSegments
+              << " consumed=" << (juce::int64)c.consumedSegments
+              << " missed=" << (juce::int64)c.missedSegments
+              << " staleDiscarded=" << (juce::int64)c.staleDiscarded
+              << " drainReleases=" << (juce::int64)c.drainReleases
+              << " discardResets=" << (juce::int64)c.discardResets
+              << " missAbandons=" << (juce::int64)c.missAbandons;
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            int audioRows = 0, owned = 0;
+            juce::String rows;
+            for (int i = 0; snap != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                const Track& t = snap->getTrack(i);
+                if (t.getKind() != TrackKind::Audio)
+                {
+                    continue;
+                }
+                ++audioRows;
+                if (!ra->audioThread_isOwnedForRender(t.getId()))
+                {
+                    continue;
+                }
+                ++owned;
+                rows << (rows.isEmpty() ? "" : "; ") << "#" << i << " id=" << (juce::int64)t.getId()
+                     << " \"" << t.getName() << "\" inserts=[";
+                bool first = true;
+                for (const InsertRowView& r : pluginHost_.getInsertRowsForTrack(t.getId()))
+                {
+                    rows << (first ? "" : ", ") << (r.stage == InsertStage::Pre ? "Pre:" : "Post:") << r.displayName
+                         << (r.unavailable ? "(unavailable)" : "");
+                    first = false;
+                }
+                rows << "]";
+            }
+            s << " | ownedNow=" << owned << " of audioRows=" << audioRows
+              << " (cap " << readahead::ReadAheadRenderer::kMaxRows << ")";
+            if (rows.isNotEmpty())
+            {
+                s << " | " << rows;
+            }
+            return s;
+        };
+        P.readAheadCounters = [this]() -> StabilityRunnerHooks::PerfHooks::ReadAheadCountersView {
+            StabilityRunnerHooks::PerfHooks::ReadAheadCountersView v;
+            readahead::ReadAheadRenderer* const ra = playbackEngine_.experimentalReadAhead();
+            if (ra == nullptr)
+            {
+                return v;
+            }
+            const auto c = ra->countersSnapshot();
+            v.enabled = true;
+            v.depth = ra->depthBlocks();
+            v.adopted = c.adopted;
+            v.produced = c.producedSegments;
+            v.consumed = c.consumedSegments;
+            v.missed = c.missedSegments;
+            v.staleDiscarded = c.staleDiscarded;
+            v.drainReleases = c.drainReleases;
+            v.discardResets = c.discardResets;
+            v.missAbandons = c.missAbandons;
+            return v;
+        };
+        P.readAheadOwnedTrackIds = [this]() -> std::vector<TrackId> {
+            std::vector<TrackId> ids;
+            readahead::ReadAheadRenderer* const ra = playbackEngine_.experimentalReadAhead();
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            for (int i = 0; ra != nullptr && snap != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                const Track& t = snap->getTrack(i);
+                if (t.getKind() == TrackKind::Audio && ra->audioThread_isOwnedForRender(t.getId()))
+                {
+                    ids.push_back(t.getId());
+                }
+            }
+            return ids;
+        };
         P.instrumentActivityText = [this]() -> juce::String {
             int live = 0, proxied = 0, idle = 0;
             if (instrumentRuntimeCoordinator_ != nullptr)

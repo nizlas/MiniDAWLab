@@ -56,9 +56,11 @@
 #include <juce_events/juce_events.h>
 
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <thread>
 #include <vector>
 
 namespace
@@ -347,6 +349,104 @@ PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderS
     const int workers = override >= 0 ? override : instrument_render::defaultWorkerCount();
     instrumentRenderPool_ = std::make_unique<instrument_render::InstrumentRenderPool>();
     instrumentRenderPool_->setWorkerCount(workers);
+    // Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md): exists ONLY with the CLI flag
+    // `--experimental-readahead[=N]`; absent flag = no renderer = the exact A1/A2 paths.
+    const int readAheadDepth = readahead::configuredReadAheadDepth();
+    if (readAheadDepth > 0)
+    {
+        readahead::ReadAheadRenderer::Deps deps;
+        deps.session = &session_;
+        deps.pluginHost = pluginHost_;
+        deps.preGainRamp = &preGainRampState_;
+        deps.soloViewAtomic = &soloMuteView_;
+        readAhead_ = std::make_unique<readahead::ReadAheadRenderer>(deps, readAheadDepth, true);
+    }
+}
+
+void PlaybackEngine::enableExperimentalReadAheadForTests(const int depthBlocks)
+{
+    readahead::ReadAheadRenderer::Deps deps;
+    deps.session = &session_;
+    deps.pluginHost = pluginHost_;
+    deps.preGainRamp = &preGainRampState_;
+    deps.soloViewAtomic = &soloMuteView_;
+    readAhead_ = std::make_unique<readahead::ReadAheadRenderer>(deps, depthBlocks, false);
+}
+
+void PlaybackEngine::pauseReadAheadWorkerAfterChainPublish() noexcept
+{
+    if (readAhead_ != nullptr)
+    {
+        // The new insert map is already published and the in-flight callback was waited out:
+        // an acknowledged pause proves the worker is outside every chain render that could
+        // still reference the retired instances; after the resume it only ever acquires the
+        // newly published map (fresh per segment). Ownership and queues survive — chain edits
+        // late-apply like every other control (model doc §6/§8).
+        //
+        // The retired instances are destroyed RIGHT AFTER this hook returns, so only a real
+        // acknowledgment may let it return (publish-before-destroy on the failure path too). A
+        // worker stuck inside a plugin render stalls the edit with the instances retained; a
+        // timeout NEVER falls through into the destroy. Between attempts the worker may start
+        // new segments — those acquire the newly published map and cannot reach retired
+        // instances; only the one render in flight at publish time is waited out.
+        bool reported = false;
+        while (!readAhead_->pauseWorkerAndWait())
+        {
+            if (!reported)
+            {
+                reported = true;
+                juce::Logger::writeToLog("[read-ahead] chain publish: worker pause not "
+                                         "acknowledged — retire waits (instances retained)");
+            }
+        }
+        readAhead_->resumeWorker();
+    }
+}
+
+bool PlaybackEngine::beginPluginStateCaptureWindow() noexcept
+{
+    if (readAhead_ == nullptr)
+    {
+        return true; // direct path: the existing A1/A2 save behavior, no window needed
+    }
+    readAhead_->beginStateCaptureHold();
+    // Gapless drain of every owned row — it needs playback consumption, so it is waited on only
+    // while the transport is playing; a Playing -> Paused/Stopped transition DURING the wait
+    // resolves to the paused-capture semantics (rows stay owned, worker paused, documented
+    // <= depth state lead) instead of stalling into the timeout. Bounded message-thread wait,
+    // never touches the audio callback. A timeout (stalled/stopped device while the intent
+    // claims Playing, or overload) fails the window: the hold is released and the caller must
+    // not capture state or write the file as if it succeeded.
+    const auto deadline = std::chrono::steady_clock::now()
+                          + std::chrono::milliseconds(
+                              stateCaptureDrainTimeoutMs_.load(std::memory_order_relaxed));
+    while (readAhead_->audioThread_anyOwned()
+           && transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing)
+    {
+        if (std::chrono::steady_clock::now() > deadline)
+        {
+            readAhead_->endStateCaptureHold();
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!readAhead_->pauseWorkerAndWait())
+    {
+        // No real acknowledgment: no exclusivity against the worker, so no capture. Unwind.
+        readAhead_->endStateCaptureHold();
+        return false;
+    }
+    return true;
+}
+
+void PlaybackEngine::endPluginStateCaptureWindow() noexcept
+{
+    if (readAhead_ == nullptr)
+    {
+        return;
+    }
+    readAhead_->resumeWorker();
+    readAhead_->endStateCaptureHold();
 }
 
 // Tear order (see the header): Main removes the audio callback before destroying the engine, so
@@ -421,8 +521,9 @@ void PlaybackEngine::ensureAudioStripJobBuffersCapacity(const int numSamples) no
     // The lane model only works when "render-pool lane" and "insert-host processing lane" are the
     // same coordinate system (worker i = lane i, callback = last lane) and when every collected
     // audio payload fits the pool's job table even with zero instrument jobs.
-    static_assert(InstrumentRenderPool::kNumLanes == PluginInsertHost::kMaxProcessingLanes,
-                  "render-pool lanes and insert-host processing lanes must be the same set");
+    static_assert(InstrumentRenderPool::kNumLanes <= PluginInsertHost::kMaxProcessingLanes,
+                  "every render-pool lane must map to an insert-host processing lane (the host "
+                  "additionally reserves lane 16 for the experimental read-ahead worker)");
     static_assert(InstrumentRenderPool::kCallbackLane == PluginInsertHost::kCallbackProcessingLane,
                   "the callback must map to the same lane index in both subsystems");
     static_assert(kMaxAudioStripJobs <= InstrumentRenderPool::kMaxJobs,
@@ -623,6 +724,10 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         }
         ensureMasterScratchCapacity(juce::jmax(bs, kOfflineMixdownBlockCapSamples));
         ensureAudioStripJobBuffersCapacity(bs);
+        if (readAhead_ != nullptr)
+        {
+            readAhead_->prepareForDevice(sr, bs);
+        }
         // Pre-gain ramps start unprimed: the first block after prepare applies each track's
         // saved pre-gain directly (no unintended fade-in at playback start).
         preGainRampState_.reset();
@@ -730,6 +835,12 @@ void PlaybackEngine::audioThread_deliverLiveMidiToHost(void* /*context*/, Experi
 
 void PlaybackEngine::audioDeviceStopped()
 {
+    // Stop the read-ahead worker touching chains BEFORE the host releases them. No callback is
+    // running here (JUCE device-lifecycle contract), so the hard ownership reset is safe.
+    if (readAhead_ != nullptr)
+    {
+        readAhead_->releaseForDevice();
+    }
     if (pluginHost_ != nullptr)
     {
         pluginHost_->releaseResources();
@@ -1289,6 +1400,15 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         {
             return;
         }
+        if (readAhead_ != nullptr && readAheadExcludedCount_ > 0)
+        {
+            // Owned read-ahead rows: their entry playheads have exactly ONE writer (the worker);
+            // the serial refresh skips them (docs/READAHEAD_PROTOTYPE.md §8).
+            pluginHost_->audioThread_setProcessTransportContextExcept(
+                makeInsertProcessContext(segmentStartSample),
+                readAheadExcludedIds_.data(), readAheadExcludedCount_);
+            return;
+        }
         pluginHost_->audioThread_setProcessTransportContext(makeInsertProcessContext(segmentStartSample));
     };
 
@@ -1507,6 +1627,42 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     audioStripPayloadCount_ = 0;
     audioStripCollectActive_ = false;
     instrumentStripPayloadCount_ = 0;
+    // ---- Experimental read-ahead: ALL ownership transitions for this block happen HERE, so the
+    // owned set is block-stable for the pre-count, the collect, the serial strip path, the
+    // monitor pass and the global transport-context refresh (docs/READAHEAD_PROTOTYPE.md).
+    readAheadExcludedCount_ = 0;
+    readAheadSegCount_ = 0;
+    if (readAhead_ != nullptr)
+    {
+        readahead::ReadAheadRenderer::BlockBeginInfo rbi;
+        rbi.t0 = t0;
+        rbi.numSamples = numSamples;
+        rbi.playing = playbackIntent == PlaybackIntent::Playing;
+        rbi.cycleActive = cycleOn && validCycle;
+        rbi.locLeft = locL;
+        rbi.locRight = locR;
+        // Immediate-handover / pre-emptive-drain rows (model doc §5): the active capture row
+        // and the record-armed row. Both ids are atomics the callback already reads.
+        rbi.recordingTrackId = (recorder_ != nullptr
+                                && (recordRunCapturing || recorder_->isRecording()))
+                                   ? recorder_->getRecordingTrackId()
+                                   : kInvalidTrackId;
+        rbi.armedTrackId = recorder_ != nullptr ? recorder_->getArmedTrackId() : kInvalidTrackId;
+        rbi.playbackShift = playbackOffsetSamples_.load(std::memory_order_acquire);
+        rbi.arrangementEnd = sessionSnap != nullptr ? sessionSnap->getArrangementExtentSamples() : 0;
+        // "Usable" must guarantee a consume-capable render branch: the plan-less and
+        // stage-unprepared fallback branches have no owned-row skip, so ownership is released
+        // (discard) before any block that could reach them renders anything.
+        rbi.planUsable = rp != nullptr && !rp->sourceSteps.empty() && sessionSnap != nullptr
+                         && postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
+                         && postStripStageCapacity_ >= numSamples;
+        rbi.monitorView = monitorPtr;
+        readAhead_->audioThread_beginBlock(rbi);
+        if (sessionSnap != nullptr)
+        {
+            readAhead_->audioThread_publishContextTemplate(makeInsertProcessContext(t0));
+        }
+    }
     // ---- Stage A2: decide whether THIS block combines instrument generation + strip jobs ----
     // Needs no routing plan (instrument rows fan with or without one) — only the pool, prepared
     // job buffers, and a playing transport (stopped blocks keep today's generation-only dispatch
@@ -1542,6 +1698,14 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             {
                 continue;
             }
+            // Read-ahead-owned rows consume from their rings instead of taking a payload slot —
+            // checked BEFORE the monitor gate, because a monitored row that is still DRAINING
+            // keeps consuming its queue until the release (IDENTICAL gate order in the renderRun
+            // collection, the serial strip path and the sum loop).
+            if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
+            {
+                continue;
+            }
             if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
             {
                 continue;
@@ -1551,6 +1715,39 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         // Over job capacity: the WHOLE block renders on the serial strip path in `renderRun`
         // (same strip core on the callback lane) — rows are never dropped or split across modes.
         audioStripCollectActive_ = eligible > 0 && eligible <= kMaxAudioStripJobs;
+    }
+    // ---- Experimental read-ahead: adoption offers (rows become Scheduled, render live THIS
+    // block through the normal A1 job, and are consumed from the next block on). Offered only on
+    // collect-active blocks with the exact A1 eligibility gates; the renderer applies the model
+    // gates (linear transport, headroom, capacity) itself.
+    if (readAhead_ != nullptr && audioStripCollectActive_ && rp != nullptr && sessionSnap != nullptr)
+    {
+        for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
+        {
+            if (step.destBusIndex < 0
+                || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+            {
+                continue;
+            }
+            if (step.trackIndex < 0 || step.trackIndex >= sessionSnap->getNumTracks())
+            {
+                continue;
+            }
+            const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
+            if (srcTr.getKind() != TrackKind::Audio)
+            {
+                continue;
+            }
+            if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+            {
+                continue;
+            }
+            readAhead_->audioThread_offerAdoption(srcTr.getId(), step.trackIndex);
+        }
+    }
+    if (readAhead_ != nullptr)
+    {
+        readAheadExcludedCount_ = readAhead_->audioThread_exportExcludedTrackIds(readAheadExcludedIds_.data());
     }
 
     if (countIn_ != nullptr)
@@ -2104,6 +2301,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             {
                 continue;
             }
+            // Read-ahead-owned row still draining after Monitor was enabled: the worker may be
+            // inside this chain, so monitoring onset waits for the drain to finish (<= depth
+            // blocks; the queued clip blocks keep playing — docs/READAHEAD_PROTOTYPE.md §5).
+            if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(tr.getId()))
+            {
+                continue;
+            }
             // Resolve the track's assignment to packed input pointers; any unresolved member of a
             // pair makes the whole assignment unresolved (silence — no half-substitution).
             const TrackInputAssignment& ia = tr.getInputAssignment();
@@ -2257,24 +2461,92 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                            instrumentRenderPool_->lastRunWasParallel());
             }
         }
-        // SUM (callback thread only, after the join): fan each AUDIO payload's stage to its dry
+        // Read-ahead: the join above was the callback's LAST chain touch for any row Scheduled
+        // this block — publishing this block's serial is what allows its worker to start
+        // (docs/READAHEAD_PROTOTYPE.md §1; monotone, so cycle wraps moving the timeline
+        // backwards cannot confuse the gate. The finalize/monitor context refreshes below
+        // exclude owned rows, and fans/meters only touch buffers).
+        if (readAhead_ != nullptr && readAheadExcludedCount_ > 0)
+        {
+            readAhead_->audioThread_publishJoinedBlock();
+        }
+        // SUM (callback thread only, after the join): fan each AUDIO row's stage to its dry
         // bus + sends in `sourceSteps` order; each segment occupies its own disjoint frame
         // range, so this step-major loop accumulates bit-identically to the serial segment-major
         // order (plan §3.1). Meters fold exactly the regions the fan reads. Combined INSTRUMENT
         // stages are NOT summed here — the MIX ORDER row loop consumes them, keeping the
         // accumulation order audio fans → monitored fans → instrument fans → bus forwarding.
-        if (rp == nullptr || sessionSnap == nullptr)
+        // The walk repeats the EXACT collection gates so the payload cursor lines up with the
+        // collected payloads and read-ahead-owned rows consume (or miss) at their plan position.
+        if (rp == nullptr || sessionSnap == nullptr || !audioStripCollectActive_)
         {
-            return; // instrument-only combine block (no plan): no audio payloads to sum
+            return; // instrument-only combine block (no plan / serial-path audio): nothing to sum
         }
-        for (int k = 0; k < audioStripPayloadCount_; ++k)
+        int payloadCursor = 0;
+        for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
         {
-            const AudioStripJobPayload& p = audioStripPayloads_[(size_t)k];
+            if (step.destBusIndex < 0
+                || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+            {
+                continue;
+            }
+            if (step.trackIndex < 0 || step.trackIndex >= sessionSnap->getNumTracks())
+            {
+                continue;
+            }
+            const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
+            if (srcTr.getKind() != TrackKind::Audio)
+            {
+                continue;
+            }
+            const TrackId tid = srcTr.getId();
+            // Owned BEFORE the monitor gate (identical order as the collection). Consume every
+            // recorded segment of this block in order — a cycle-wrap block has two, each fanned
+            // at its own destination frame; a failed consume already counted the miss and
+            // advanced the row's expected sequence (silence for exactly that segment).
+            if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(tid))
+            {
+                const int segN = juce::jmin(readAheadSegCount_, kReadAheadMaxSegmentsPerBlock);
+                for (int rs = 0; rs < segN; ++rs)
+                {
+                    if (readAheadSegRun_[rs] <= 0)
+                    {
+                        continue;
+                    }
+                    readahead::ReadAheadRenderer::ConsumeView rcv;
+                    if (readAhead_->audioThread_tryConsume(tid, readAheadSegStart_[rs],
+                                                           readAheadSegRun_[rs],
+                                                           readAheadSegDestFrame_[rs], rcv))
+                    {
+                        audioThread_foldTrackMeterIfMetered(tid,
+                                                            rcv.stageL + readAheadSegDestFrame_[rs],
+                                                            rcv.stageR + readAheadSegDestFrame_[rs],
+                                                            readAheadSegRun_[rs]);
+                        playback_mix_helpers::fanPostStripStageToDryAndSends(
+                            rcv.stageL, rcv.stageR, readAheadSegDestFrame_[rs],
+                            readAheadSegRun_[rs], step.destBusIndex, step.sends, *rp);
+                        readAhead_->audioThread_releaseConsumed(tid);
+                    }
+                }
+                for (int rs = segN; rs < readAheadSegCount_; ++rs)
+                {
+                    readAhead_->audioThread_noteMiss(tid); // defensive: >2 segments can not occur
+                }
+                continue;
+            }
+            if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+            {
+                continue;
+            }
+            if (payloadCursor >= audioStripPayloadCount_)
+            {
+                continue; // no segment ever collected this block (e.g. no audible run)
+            }
+            const AudioStripJobPayload& p = audioStripPayloads_[(size_t)payloadCursor++];
             if (p.step == nullptr || p.trackIndex < 0 || p.trackIndex >= sessionSnap->getNumTracks())
             {
                 continue;
             }
-            const TrackId tid = sessionSnap->getTrack(p.trackIndex).getId();
             for (int s = 0; s < p.numSegments; ++s)
             {
                 const AudioStripSegmentDesc& seg = p.segments[(size_t)s];
@@ -2439,6 +2711,19 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             const int destFrame = outFrame0 + silencePrefix;
             const PluginProcessTransportContext segContext
                 = makeInsertProcessContext(timelineStartAudible);
+            if (readAhead_ != nullptr && readAheadExcludedCount_ > 0)
+            {
+                // Record this segment's consume key (row-independent; the engine renders at
+                // most two segments per block — a cycle wrap). The sum loop consumes them in
+                // the same order; the worker predicted identical keys from the same inputs.
+                if (readAheadSegCount_ < kReadAheadMaxSegmentsPerBlock)
+                {
+                    readAheadSegStart_[readAheadSegCount_] = timelineStartAudible;
+                    readAheadSegRun_[readAheadSegCount_] = audibleRun;
+                    readAheadSegDestFrame_[readAheadSegCount_] = destFrame;
+                }
+                ++readAheadSegCount_;
+            }
             int eligIdx = 0;
             for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
             {
@@ -2454,6 +2739,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 }
                 const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
                 if (srcTr.getKind() != TrackKind::Audio)
+                {
+                    continue;
+                }
+                // Read-ahead-owned row: no live render — the sum loop consumes its ring block
+                // (or counts a miss). Checked BEFORE the monitor gate (a monitored row still
+                // DRAINING keeps consuming); IDENTICAL gate order as the activation pre-count.
+                if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
                 {
                     continue;
                 }
@@ -2520,6 +2812,25 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
                 if (srcTr.getKind() != TrackKind::Audio)
                 {
+                    continue;
+                }
+                // Read-ahead-owned row on a serial-path block (e.g. payload overflow): consume
+                // the ring segment inline at the row's plan position so the accumulation order
+                // matches the live path; a failed consume already counted the miss for exactly
+                // this segment. BEFORE the monitor gate — identical gate order everywhere.
+                if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
+                {
+                    readahead::ReadAheadRenderer::ConsumeView rcv;
+                    if (readAhead_->audioThread_tryConsume(srcTr.getId(), timelineStartAudible,
+                                                           audibleRun, destFrame, rcv))
+                    {
+                        audioThread_foldTrackMeterIfMetered(srcTr.getId(), rcv.stageL + destFrame,
+                                                            rcv.stageR + destFrame, audibleRun);
+                        playback_mix_helpers::fanPostStripStageToDryAndSends(
+                            rcv.stageL, rcv.stageR, destFrame, audibleRun, step.destBusIndex,
+                            step.sends, *rp);
+                        readAhead_->audioThread_releaseConsumed(srcTr.getId());
+                    }
                     continue;
                 }
                 // Monitor ON: this track's clip playback (and its insert pass here) is replaced by
@@ -2897,13 +3208,37 @@ void PlaybackEngine::invokeExperimentalInstrumentBeginBlocks(
 
 bool PlaybackEngine::beginOfflineRenderGate() noexcept
 {
-    return offlineRenderGateDepth_.fetch_add(1, std::memory_order_seq_cst) == 0;
+    const bool becameActive = offlineRenderGateDepth_.fetch_add(1, std::memory_order_seq_cst) == 0;
+    if (becameActive && readAhead_ != nullptr)
+    {
+        // The offline render processes the SAME live chains on the message thread: an
+        // ACKNOWLEDGED pause is mandatory before any offline block may touch them (concurrent
+        // processBlock on one instance otherwise). The pause is held for the whole gate
+        // (released in endOfflineRenderGate); a worker stuck inside a plugin render stalls the
+        // export start rather than overlapping it (docs/READAHEAD_PROTOTYPE.md §8).
+        bool reported = false;
+        while (!readAhead_->pauseWorkerAndWait())
+        {
+            if (!reported)
+            {
+                reported = true;
+                juce::Logger::writeToLog("[read-ahead] offline gate: worker pause not "
+                                         "acknowledged — export start waits");
+            }
+        }
+        readAhead_->requestFullReset();
+    }
+    return becameActive;
 }
 
 bool PlaybackEngine::endOfflineRenderGate() noexcept
 {
     const int previous = offlineRenderGateDepth_.fetch_sub(1, std::memory_order_seq_cst);
     jassert(previous > 0);
+    if (previous == 1 && readAhead_ != nullptr)
+    {
+        readAhead_->resumeWorker();
+    }
     return previous == 1;
 }
 

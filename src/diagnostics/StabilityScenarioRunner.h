@@ -154,6 +154,15 @@ enum class StabilityScenarioKind
     /// output peak / overs, and the process' CPU / memory / page faults. Nothing is saved; use a
     /// temp project copy (a device-setup request can dirty the session).
     PerfProfile,
+    /// `--stability-readahead-transitions <project>` (run with `--experimental-readahead`): on a
+    /// sibling copy, drives the read-ahead prototype through its documented transitions with the
+    /// production handler paths (play / pause / resume / stop / seek / cycle wrap / mixer Monitor
+    /// and Arm clicks / Save while playing and while paused / autosave / reopen) and logs the
+    /// renderer's cumulative counters after every step as deltas. Unexpected deltas (misses,
+    /// discards on a continuation, a row still owned after Monitor / Arm, a save that did not
+    /// write, a reopened parameter that differs) are logged as OBSERVATION lines and counted; the
+    /// run only FAILS on hard errors (hooks missing, flag off, nothing adopted, load / save failure).
+    ReadAheadTransitions,
     /// `--stability-load-progress <project> [--evidence <dir>]`: the staged, message-loop-driven
     /// project load as the user sees it — the progress dialog must appear early and update through
     /// every phase (PNG evidence of the real dialog while instruments / effects restore), the
@@ -260,6 +269,9 @@ struct StabilityScenarioRequest
     int perfRequestedBufferSize = 0;   ///< `--buffer N`: ask the device for this block size (0 = keep)
     bool perfMixerOpen = false;        ///< `--mixer-open`: measure with the mixer window shown
     bool perfProfilerOff = false;      ///< `--profile-off`: engine load only (profiler overhead check)
+    /// ReadAheadTransitions only: `--reopen-check` = fresh-process reopen of the saved test copy
+    /// compared against the sidecar the transitions walk wrote (instead of the walk itself).
+    bool readAheadReopenCheck = false;
     /// `--generation parallel|serial|ab`: instrument generation as configured (pool), forced
     /// serial on the callback thread, or BOTH windows back to back in one process (A = serial,
     /// B = parallel) for a like-for-like comparison.
@@ -783,6 +795,21 @@ struct StabilityRunnerHooks
         std::function<juce::String()> renderPoolText;
         /// Force the serial generation path (`PlaybackEngine::setInstrumentRenderSerialForDiagnostics`).
         std::function<void(bool)> setGenerationSerial;
+        /// Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md): depth, cumulative counters and the
+        /// audio rows owned at the moment of the call with their insert chains. "disabled" without
+        /// the CLI flag. Diagnostics only (message-thread poll of the renderer's atomic row states).
+        std::function<juce::String()> readAheadText;
+        /// The same counters as numbers (`enabled == false` without the flag) and the owned audio
+        /// rows' ids, so the transitions scenario can log per-step deltas and pick a target row.
+        struct ReadAheadCountersView
+        {
+            bool enabled = false;
+            int depth = 0;
+            std::int64_t adopted = 0, produced = 0, consumed = 0, missed = 0, staleDiscarded = 0,
+                         drainReleases = 0, discardResets = 0, missAbandons = 0;
+        };
+        std::function<ReadAheadCountersView()> readAheadCounters;
+        std::function<std::vector<TrackId>()> readAheadOwnedTrackIds;
     };
     PerfHooks perf;
 
@@ -832,6 +859,8 @@ struct StabilityRunnerHooks
         /// Parameter 0 of the live instance at chain index `i`: set / get (false / NaN when none).
         std::function<bool(TrackId, int i, float v)> setInsertParam0;
         std::function<float(TrackId, int i)> getInsertParam0;
+        /// Name of that parameter ("" when none) — so a log reader knows what was changed.
+        std::function<juce::String(TrackId, int i)> insertParam0Name;
         /// Add an unavailable placeholder insert (non-existent plug-in path + opaque state) to the
         /// row through the production `importChain` path (temp copy only).
         std::function<bool(TrackId, juce::String& failReason)> addUnavailablePlaceholderInsert;
@@ -930,6 +959,9 @@ private:
     void appendProxyPlaybackEdgesSteps(const StabilityScenarioRequest& request);
     /// Audio-thread cost profile of one playback window (see `StabilityScenarioKind::PerfProfile`).
     void appendPerfProfileSteps(const StabilityScenarioRequest& request);
+    /// Read-ahead prototype transitions through production handler paths (see `ReadAheadTransitions`).
+    void appendReadAheadTransitionsSteps(const StabilityScenarioRequest& request);
+    void appendReadAheadReopenCheckSteps(const StabilityScenarioRequest& request);
     /// Staged load progress / responsiveness / gates / failure path (see `LoadProgress`).
     void appendLoadProgressSteps(const StabilityScenarioRequest& request);
     /// Duplicate Track + vertical scrollbar (see `DuplicateTrack`).

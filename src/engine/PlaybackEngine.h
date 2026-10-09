@@ -55,6 +55,7 @@
 #include "engine/TrackMeterBank.h"
 #include "engine/LiveMidiInputBus.h"
 #include "engine/PlaybackMixHelpers.h"
+#include "engine/ReadAheadRenderer.h"
 #include "engine/RoutingPlan.h"
 #include "engine/SoloMuteView.h"
 #include "transport/Transport.h"
@@ -262,6 +263,42 @@ public:
     {
         return instrumentRenderPool_ != nullptr ? instrumentRenderPool_->workerCount() : 0;
     }
+    // -----------------------------------------------------------------------
+    // Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md). OFF by default: `readAhead_` exists
+    // only when the process started with `--experimental-readahead[=N]` (ctor reads the global
+    // config) or a test created it in pump mode. Null = byte-for-byte the A1/A2 paths.
+    // -----------------------------------------------------------------------
+    /// [Message thread, BEFORE the device starts] Create a deterministic PUMP-mode renderer for
+    /// focused tests (no worker thread; the test drives it via `experimentalReadAhead()`).
+    void enableExperimentalReadAheadForTests(int depthBlocks);
+    [[nodiscard]] readahead::ReadAheadRenderer* experimentalReadAhead() noexcept { return readAhead_.get(); }
+    /// [Message thread] Pause+resume of the read-ahead worker — the publish-before-destroy hook
+    /// calls this AFTER the new insert map is published and the callback was waited out: an
+    /// acknowledged pause proves the worker is outside every chain render that could still
+    /// reference retired instances; after the resume it only ever acquires the new map.
+    /// Ownership and queues survive (model doc §8) — chain edits late-apply like other controls.
+    /// Returns only after a REAL acknowledgment (bounded attempts, unbounded total, with
+    /// diagnostics): the retired instances are destroyed right after the hook, so a worker stuck
+    /// inside a plugin render STALLS the chain edit with resources retained — publish-before-
+    /// destroy holds on the failure path too, it never proceeds into the destroy on a timeout.
+    void pauseReadAheadWorkerAfterChainPublish() noexcept;
+    /// [Message thread] Plugin-state capture window for Save / Save As / autosave (model doc
+    /// §9): gates adoption off, gaplessly drains owned rows while playback consumption runs
+    /// (bounded wait; a Playing -> Paused/Stopped transition during the wait resolves to the
+    /// paused-capture semantics instead of stalling), then requires an ACKNOWLEDGED worker
+    /// pause. Returns true only when the window is really established; on false (drain stalled —
+    /// e.g. no callbacks running — or no worker acknowledgment) every hold is released again and
+    /// the caller MUST NOT capture plugin state or write the project file as if it succeeded.
+    /// `endPluginStateCaptureWindow` must be called only after a successful begin.
+    /// Never blocks the audio callback; the wait runs on the caller's (message) thread only.
+    [[nodiscard]] bool beginPluginStateCaptureWindow() noexcept;
+    void endPluginStateCaptureWindow() noexcept;
+    /// [Test only] Shrink/restore the drain wait bound so the failure path is testable.
+    void setStateCaptureDrainTimeoutMsForTests(const int timeoutMs) noexcept
+    {
+        stateCaptureDrainTimeoutMs_.store(juce::jmax(1, timeoutMs), std::memory_order_relaxed);
+    }
+
     [[nodiscard]] instrument_render::InstrumentRenderPool::Stats instrumentRenderPoolStats() const noexcept
     {
         return instrumentRenderPool_ != nullptr ? instrumentRenderPool_->statsRelaxed()
@@ -612,6 +649,22 @@ private:
     /// instrument hosts' `audioThread_lastRenderTicksRelaxed`). Written by the job that owns the
     /// row, read by the callback before the next dispatch (ordered by the pool's join).
     std::array<std::int64_t, 1024> audioStripLastRenderTicks_{};
+
+    /// Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md); null unless explicitly enabled.
+    std::unique_ptr<readahead::ReadAheadRenderer> readAhead_;
+    /// State-capture drain wait bound (ms); test-shrinkable, same decision logic as production.
+    std::atomic<int> stateCaptureDrainTimeoutMs_{ 500 };
+    /// [Audio thread, block-stable after the read-ahead block begin] Owned rows excluded from the
+    /// global transport-context refresh, and this block's consume keys — one per `renderRun`
+    /// segment (a cycle-wrap block has two: up to the right locator, then from the left locator
+    /// at its destination frame). Row-independent; recorded once per segment in the collect walk.
+    std::array<TrackId, readahead::ReadAheadRenderer::kMaxRows> readAheadExcludedIds_{};
+    int readAheadExcludedCount_ = 0;
+    static constexpr int kReadAheadMaxSegmentsPerBlock = 2;
+    std::int64_t readAheadSegStart_[kReadAheadMaxSegmentsPerBlock] = { 0, 0 };
+    int readAheadSegRun_[kReadAheadMaxSegmentsPerBlock] = { 0, 0 };
+    int readAheadSegDestFrame_[kReadAheadMaxSegmentsPerBlock] = { 0, 0 };
+    int readAheadSegCount_ = 0;
 
     /// [Audio thread] Fold one finished callback into the diagnostic load window (relaxed atomics).
     void audioThread_accumulateCallbackLoad(int numSamples, std::int64_t startTicks) noexcept;

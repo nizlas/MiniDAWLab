@@ -155,6 +155,25 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // before the engine is constructed; absent = the conservative machine default.
     {
         const juce::StringArray args = getCommandLineParameterArray();
+        // Experimental read-ahead prototype (docs/READAHEAD_PROTOTYPE.md): OFF by default; no
+        // settings panel. `--experimental-readahead` (depth 3) or `--experimental-readahead=N`.
+        for (const juce::String& arg : args)
+        {
+            if (arg == "--experimental-readahead" || arg.startsWith("--experimental-readahead="))
+            {
+                int depth = 3;
+                if (arg.containsChar('='))
+                {
+                    depth = juce::jlimit(readahead::ReadAheadRenderer::kMinDepth,
+                                         readahead::ReadAheadRenderer::kMaxDepth,
+                                         arg.fromFirstOccurrenceOf("=", false, false).getIntValue());
+                }
+                readahead::setConfiguredReadAheadDepth(depth);
+                juce::Logger::writeToLog("[engine] EXPERIMENTAL read-ahead enabled, depth "
+                                         + juce::String(depth) + " blocks");
+                break;
+            }
+        }
         for (int i = 0; i + 1 < args.size(); ++i)
         {
             if (args[i] == "--instrument-workers")
@@ -189,6 +208,13 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // are destroyed. Hook is cleared in shutdown() before the engine is torn down.
     pluginInsertHost_->setRealtimeDrainAfterPublish([enginePtr = playbackEngine.get()] {
         (void)enginePtr->waitForAudioCallbackExit(250.0);
+        // Experimental read-ahead: its worker also holds published-map entries while rendering —
+        // this waits for an ACKNOWLEDGED pause before the retired instances are destroyed (a
+        // worker stuck inside a plugin render stalls the edit with the instances retained; it
+        // never falls through on a timeout). The resumed worker only ever sees the NEWLY
+        // published map. Ownership and queued segments survive the edit (chain edits
+        // late-apply; docs/READAHEAD_PROTOTYPE.md §6/§8).
+        enginePtr->pauseReadAheadWorkerAfterChainPublish();
     });
 
     // JUCE: open audio before we register the engine. Restore saved `audio-device.xml` if present

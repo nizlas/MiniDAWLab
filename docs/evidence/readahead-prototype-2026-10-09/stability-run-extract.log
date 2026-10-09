@@ -1,0 +1,688 @@
+2026-10-09T20:00:32.792+02:00 step end ok: perf-profile: load TSE_pt2_100tracks.dalproj elapsedMs=39218
+2026-10-09T20:00:32.840+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-09T20:00:34.457+02:00 step begin: perf-profile: verify loaded
+2026-10-09T20:00:34.462+02:00   track count after load: 101
+2026-10-09T20:00:34.468+02:00 step end ok: perf-profile: verify loaded elapsedMs=3
+2026-10-09T20:00:34.741+02:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-10-09T20:00:34.748+02:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-10-09T20:00:42.768+02:00 step begin: perf-profile: runtime conditions
+2026-10-09T20:00:42.772+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:00:42.780+02:00 step end ok: perf-profile: runtime conditions elapsedMs=2
+2026-10-09T20:00:43.128+02:00 step begin: perf-profile: project load (loaded vs processed)
+2026-10-09T20:00:43.132+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:00:43.135+02:00   tracks: audio=36 instrument=48 midi=16 group=0 master=1 (muted=0 off=0) | instrument registry entries=48 primaryLoaded=48 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=50 instances=50 | proxy states: 3:Primary,5:Primary,80:Primary,16:Primary,72:Primary,8:Primary,82:Primary,18:Primary,74:Primary,10:Primary,76:Primary,12:Primary,78:Primary,14:Primary,84:Primary,20:Primary,86:Primary,22:Primary,88:Primary,24:Primary,90:Primary,26:Primary,92:Primary,28:Primary,94:Primary,30:Primary,96:Primary,32:Primary,98:Primary,34:Primary,36:Primary,38:Primary,40:Primary,42:Primary,44:Primary,46:Primary,48:Primary,50:Primary,52:Primary,54:Primary,56:Primary,58:Primary,60:Primary,62:Primary,64:Primary,66:Primary,68:Primary,70:Primary
+2026-10-09T20:00:43.143+02:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=6
+2026-10-09T20:00:43.485+02:00 step begin: perf-profile: mixer window closed
+2026-10-09T20:00:43.488+02:00   mixer visible=no
+2026-10-09T20:00:43.495+02:00 step end ok: perf-profile: mixer window closed elapsedMs=4
+2026-10-09T20:00:43.842+02:00 step begin: perf-profile: start playback (warm-up 4 s)
+2026-10-09T20:00:43.845+02:00   start at 17.33 s (sample 831983) cycle=on profiler=ON generation=as configured | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=1036 serialBlocks=1 jobsByCallback=6612 jobsByWorkers=43164 joinKernelWaits=107 lastDispatchWallMs=0.933 lastJoinWaitMs=0.013 (cumulative since start)
+2026-10-09T20:00:43.850+02:00 step end ok: perf-profile: start playback (warm-up 4 s) elapsedMs=3
+2026-10-09T20:00:47.873+02:00 step begin: perf-profile: configured measurement window begins (19 s)
+2026-10-09T20:00:47.877+02:00   window start: playhead=1025519 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=9185.16 MB private=9482.88 MB
+2026-10-09T20:00:47.880+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:00:47.885+02:00 step end ok: perf-profile: configured measurement window begins (19 s) elapsedMs=6
+2026-10-09T20:01:06.928+02:00 step begin: perf-profile: configured collect
+2026-10-09T20:01:06.931+02:00   === window: configured ===
+2026-10-09T20:01:06.935+02:00   window end: wall=19.06 s playhead=1940463 (started 1025519)
+2026-10-09T20:01:06.937+02:00   engine: blocks=1787 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=1.300/2.386/5.884 budget%(mean/max)=22.4/55.2 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-10-09T20:01:06.938+02:00   output: peakHold=0.770 masterPeakL/R=0.668/0.770 oversL/R=0/0 rmsL/R=0.1128/0.1081 nonFinite=0
+2026-10-09T20:01:06.940+02:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-10-09T20:01:06.942+02:00   instruments: hosts with live processBlock blocks=48 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-10-09T20:01:06.943+02:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=3201 serialBlocks=1 jobsByCallback=29854 jobsByWorkers=201782 joinKernelWaits=224 lastDispatchWallMs=1.385 lastJoinWaitMs=0.040 (cumulative since start)
+2026-10-09T20:01:06.945+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:01:06.947+02:00   process: cpu=177.0% of one core (7.4% of 24 cores) systemBusy=17.0% workingSet=9168.31 MB private=9465.38 MB pageFaultsInWindow=210 (soft+hard; 11.0191/s)
+2026-10-09T20:01:06.949+02:00   profile: blocks=1788 callback ms(mean/max)=2.386/5.884
+2026-10-09T20:01:06.950+02:00   profile: category instrument-plugin: perBlock ms(mean/max)=11.884/29.272 callsPerBlock=48.0 shareOfCallback=498.1%
+2026-10-09T20:01:06.952+02:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-10-09T20:01:06.953+02:00   profile: category insert-plugin: perBlock ms(mean/max)=4.816/11.544 callsPerBlock=44.5 shareOfCallback=201.9%
+2026-10-09T20:01:06.955+02:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.155/0.342 shareOfCallback=6.5%
+2026-10-09T20:01:06.957+02:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.014/0.089
+2026-10-09T20:01:06.958+02:00   profile: phase live-midi: perBlock ms(mean/max)=0.003/0.017
+2026-10-09T20:01:06.960+02:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=2.283/5.696
+2026-10-09T20:01:06.961+02:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.039/0.135
+2026-10-09T20:01:06.963+02:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.002
+2026-10-09T20:01:06.965+02:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.035/0.107
+2026-10-09T20:01:06.966+02:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.002/0.018
+2026-10-09T20:01:06.969+02:00   profile: worst block: total=5.884 ms (512 samples): instrument-plugin CPU 29.272 | proxy-mix 0.000 | insert-plugin 11.544 | generation-section wall 5.659 | remainder 0.225
+2026-10-09T20:01:06.971+02:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=2.231/5.659 callbackIdleWait ms(mean/max)=0.058/0.663 jobsPerBlock=84.0 parallelBlocks=1788 of 1788 effectiveParallelism(instrumentCPU/sectionWall)=5.33 (parallel blocks only: 5.33)
+2026-10-09T20:01:06.973+02:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-10-09T20:01:06.974+02:00   profile: callback start intervals: n=1788 ms(mean/max)=10.666/10.961 lateStarts(>1.25x period)=0
+2026-10-09T20:01:06.976+02:00   profile: instances with calls=98 of registered 98; top 12 by summed ms:
+2026-10-09T20:01:06.978+02:00   profile:   #1 track 42 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=361.4 us maxCall=1.448 ms perBlock=0.361 ms share=15.1%
+2026-10-09T20:01:06.980+02:00   profile:   #2 track 54 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=360.5 us maxCall=1.223 ms perBlock=0.360 ms share=15.1%
+2026-10-09T20:01:06.981+02:00   profile:   #3 track 78 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=358.8 us maxCall=2.234 ms perBlock=0.359 ms share=15.0%
+2026-10-09T20:01:06.983+02:00   profile:   #4 track 24 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=357.0 us maxCall=2.241 ms perBlock=0.357 ms share=15.0%
+2026-10-09T20:01:06.984+02:00   profile:   #5 track 60 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=356.4 us maxCall=1.385 ms perBlock=0.356 ms share=14.9%
+2026-10-09T20:01:06.986+02:00   profile:   #6 track 36 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=353.7 us maxCall=1.295 ms perBlock=0.354 ms share=14.8%
+2026-10-09T20:01:06.987+02:00   profile:   #7 track 96 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=353.5 us maxCall=1.496 ms perBlock=0.354 ms share=14.8%
+2026-10-09T20:01:06.990+02:00   profile:   #8 track 66 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=352.7 us maxCall=1.455 ms perBlock=0.353 ms share=14.8%
+2026-10-09T20:01:06.991+02:00   profile:   #9 track 84 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=352.3 us maxCall=2.056 ms perBlock=0.352 ms share=14.8%
+2026-10-09T20:01:06.993+02:00   profile:   #10 track 72 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=351.6 us maxCall=2.210 ms perBlock=0.352 ms share=14.7%
+2026-10-09T20:01:06.995+02:00   profile:   #11 track 12 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=349.4 us maxCall=1.614 ms perBlock=0.349 ms share=14.6%
+2026-10-09T20:01:06.996+02:00   profile:   #12 track 5 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1788 meanPerCall=349.4 us maxCall=2.203 ms perBlock=0.349 ms share=14.6%
+2026-10-09T20:01:06.998+02:00   profile: top 12 together = 178.4% of callback time
+2026-10-09T20:01:07.000+02:00   profile: by plug-in (instances, perBlock ms, share): [VB3-II x16 5.650 ms 236.8%] [Groove Agent SE x16 5.049 ms 211.6%] [AmpliTube 4 [Pre] x18 4.357 ms 182.6%] [HALion Sonic x16 1.185 ms 49.7%] [Pro-Q 3 [Post] x16 0.277 ms 11.6%] [DAL Mono Delay [Post] x16 0.183 ms 7.7%]
+2026-10-09T20:01:07.004+02:00 step end ok: perf-profile: configured collect elapsedMs=70
+2026-10-09T20:01:07.212+02:00 step begin: perf-profile: stop playback, profiler off
+2026-10-09T20:01:07.217+02:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-10-09T20:01:08.026+02:00 RESULT: PASS scenario=perf-profile totalMs=75009
+2026-10-09T20:01:28.033+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
+2026-10-09T20:01:47.360+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-09T20:01:49.556+02:00 ================================================================
+2026-10-09T20:01:49.559+02:00 scenario start: perf-profile iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks.dalproj
+2026-10-09T20:01:49.561+02:00 steps queued: 10 (delete-loop iterations expand at plan time)
+2026-10-09T20:01:50.111+02:00 step begin: perf-profile: load TSE_pt2_100tracks.dalproj
+2026-10-09T20:02:29.907+02:00 step end ok: perf-profile: load TSE_pt2_100tracks.dalproj elapsedMs=39788
+2026-10-09T20:02:29.954+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-09T20:02:31.591+02:00 step begin: perf-profile: verify loaded
+2026-10-09T20:02:31.595+02:00   track count after load: 101
+2026-10-09T20:02:31.600+02:00 step end ok: perf-profile: verify loaded elapsedMs=2
+2026-10-09T20:02:31.872+02:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-10-09T20:02:31.880+02:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-10-09T20:02:39.905+02:00 step begin: perf-profile: runtime conditions
+2026-10-09T20:02:39.909+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:02:39.917+02:00 step end ok: perf-profile: runtime conditions elapsedMs=3
+2026-10-09T20:02:40.258+02:00 step begin: perf-profile: project load (loaded vs processed)
+2026-10-09T20:02:40.261+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:02:40.264+02:00   tracks: audio=36 instrument=48 midi=16 group=0 master=1 (muted=0 off=0) | instrument registry entries=48 primaryLoaded=48 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=50 instances=50 | proxy states: 3:Primary,5:Primary,80:Primary,16:Primary,72:Primary,8:Primary,82:Primary,18:Primary,74:Primary,10:Primary,76:Primary,12:Primary,78:Primary,14:Primary,84:Primary,20:Primary,86:Primary,22:Primary,88:Primary,24:Primary,90:Primary,26:Primary,92:Primary,28:Primary,94:Primary,30:Primary,96:Primary,32:Primary,98:Primary,34:Primary,36:Primary,38:Primary,40:Primary,42:Primary,44:Primary,46:Primary,48:Primary,50:Primary,52:Primary,54:Primary,56:Primary,58:Primary,60:Primary,62:Primary,64:Primary,66:Primary,68:Primary,70:Primary
+2026-10-09T20:02:40.271+02:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=8
+2026-10-09T20:02:40.616+02:00 step begin: perf-profile: mixer window closed
+2026-10-09T20:02:40.619+02:00   mixer visible=no
+2026-10-09T20:02:40.625+02:00 step end ok: perf-profile: mixer window closed elapsedMs=3
+2026-10-09T20:02:40.975+02:00 step begin: perf-profile: start playback (warm-up 4 s)
+2026-10-09T20:02:40.979+02:00   start at 17.33 s (sample 831983) cycle=on profiler=ON generation=as configured | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=1038 serialBlocks=1 jobsByCallback=6617 jobsByWorkers=43255 joinKernelWaits=122 lastDispatchWallMs=0.866 lastJoinWaitMs=0.003 (cumulative since start)
+2026-10-09T20:02:40.986+02:00 step end ok: perf-profile: start playback (warm-up 4 s) elapsedMs=5
+2026-10-09T20:02:45.014+02:00 step begin: perf-profile: configured measurement window begins (19 s)
+2026-10-09T20:02:45.018+02:00   window start: playhead=1025519 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=9089.12 MB private=9382.51 MB
+2026-10-09T20:02:45.021+02:00   read-ahead: depth=3 counters(cumulative): adopted=23 produced=6073 consumed=6002 missed=23 staleDiscarded=23 drainReleases=0 discardResets=7 missAbandons=7 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #48 id=51 "Track 1 — kopia 08" inserts=[]; #50 id=53 "Track 4 — kopia 08" inserts=[Pre:AmpliTube 4]; #54 id=57 "Track 1 — kopia 09" inserts=[]; #56 id=59 "Track 4 — kopia 09" inserts=[Pre:AmpliTube 4]; #60 id=63 "Track 1 — kopia 10" inserts=[]; #62 id=65 "Track 4 — kopia 10" inserts=[Pre:AmpliTube 4]; #66 id=69 "Track 1 — kopia 11" inserts=[]
+2026-10-09T20:02:45.027+02:00 step end ok: perf-profile: configured measurement window begins (19 s) elapsedMs=7
+2026-10-09T20:03:04.069+02:00 step begin: perf-profile: configured collect
+2026-10-09T20:03:04.073+02:00   === window: configured ===
+2026-10-09T20:03:04.076+02:00   window end: wall=19.06 s playhead=1940463 (started 1025519)
+2026-10-09T20:03:04.078+02:00   engine: blocks=1787 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=1.314/2.025/3.541 budget%(mean/max)=19.0/33.2 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-10-09T20:03:04.080+02:00   output: peakHold=0.754 masterPeakL/R=0.658/0.754 oversL/R=0/0 rmsL/R=0.1131/0.1084 nonFinite=0
+2026-10-09T20:03:04.086+02:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-10-09T20:03:04.090+02:00   instruments: hosts with live processBlock blocks=48 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-10-09T20:03:04.092+02:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=3204 serialBlocks=1 jobsByCallback=25724 jobsByWorkers=171459 joinKernelWaits=202 lastDispatchWallMs=1.333 lastJoinWaitMs=0.004 (cumulative since start)
+2026-10-09T20:03:04.094+02:00   read-ahead: depth=3 counters(cumulative): adopted=23 produced=34681 consumed=34626 missed=23 staleDiscarded=23 drainReleases=0 discardResets=7 missAbandons=7 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #48 id=51 "Track 1 — kopia 08" inserts=[]; #50 id=53 "Track 4 — kopia 08" inserts=[Pre:AmpliTube 4]; #54 id=57 "Track 1 — kopia 09" inserts=[]; #56 id=59 "Track 4 — kopia 09" inserts=[Pre:AmpliTube 4]; #60 id=63 "Track 1 — kopia 10" inserts=[]; #62 id=65 "Track 4 — kopia 10" inserts=[Pre:AmpliTube 4]; #66 id=69 "Track 1 — kopia 11" inserts=[]
+2026-10-09T20:03:04.096+02:00   process: cpu=164.8% of one core (6.9% of 24 cores) systemBusy=14.4% workingSet=9073.62 MB private=9365.24 MB pageFaultsInWindow=643 (soft+hard; 33.7387/s)
+2026-10-09T20:03:04.098+02:00   profile: blocks=1789 callback ms(mean/max)=2.024/3.541
+2026-10-09T20:03:04.100+02:00   profile: category instrument-plugin: perBlock ms(mean/max)=11.002/16.050 callsPerBlock=48.0 shareOfCallback=543.4%
+2026-10-09T20:03:04.102+02:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-10-09T20:03:04.104+02:00   profile: category insert-plugin: perBlock ms(mean/max)=2.979/6.556 callsPerBlock=39.6 shareOfCallback=147.2%
+2026-10-09T20:03:04.106+02:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.148/0.289 shareOfCallback=7.3%
+2026-10-09T20:03:04.108+02:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.013/0.085
+2026-10-09T20:03:04.110+02:00   profile: phase live-midi: perBlock ms(mean/max)=0.003/0.053
+2026-10-09T20:03:04.112+02:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=1.920/3.417
+2026-10-09T20:03:04.114+02:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.037/0.115
+2026-10-09T20:03:04.118+02:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.018
+2026-10-09T20:03:04.120+02:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.038/0.143
+2026-10-09T20:03:04.122+02:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.002/0.035
+2026-10-09T20:03:04.123+02:00   profile: worst block: total=3.541 ms (512 samples): instrument-plugin CPU 16.050 | proxy-mix 0.000 | insert-plugin 6.556 | generation-section wall 3.340 | remainder 0.201
+2026-10-09T20:03:04.125+02:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=1.877/3.340 callbackIdleWait ms(mean/max)=0.051/0.658 jobsPerBlock=68.0 parallelBlocks=1789 of 1789 effectiveParallelism(instrumentCPU/sectionWall)=5.86 (parallel blocks only: 5.86)
+2026-10-09T20:03:04.127+02:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-10-09T20:03:04.129+02:00   profile: callback start intervals: n=1789 ms(mean/max)=10.666/10.830 lateStarts(>1.25x period)=0
+2026-10-09T20:03:04.131+02:00   profile: instances with calls=98 of registered 98; top 12 by summed ms:
+2026-10-09T20:03:04.132+02:00   profile:   #1 track 78 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=343.3 us maxCall=1.257 ms perBlock=0.343 ms share=17.0%
+2026-10-09T20:03:04.134+02:00   profile:   #2 track 66 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=335.4 us maxCall=1.392 ms perBlock=0.335 ms share=16.6%
+2026-10-09T20:03:04.136+02:00   profile:   #3 track 18 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=319.2 us maxCall=1.190 ms perBlock=0.319 ms share=15.8%
+2026-10-09T20:03:04.138+02:00   profile:   #4 track 36 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=319.1 us maxCall=1.726 ms perBlock=0.319 ms share=15.8%
+2026-10-09T20:03:04.140+02:00   profile:   #5 track 60 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=318.7 us maxCall=1.222 ms perBlock=0.319 ms share=15.7%
+2026-10-09T20:03:04.141+02:00   profile:   #6 track 12 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=317.6 us maxCall=1.222 ms perBlock=0.318 ms share=15.7%
+2026-10-09T20:03:04.143+02:00   profile:   #7 track 24 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=317.1 us maxCall=1.268 ms perBlock=0.317 ms share=15.7%
+2026-10-09T20:03:04.145+02:00   profile:   #8 track 54 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=316.5 us maxCall=1.066 ms perBlock=0.317 ms share=15.6%
+2026-10-09T20:03:04.147+02:00   profile:   #9 track 90 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=315.9 us maxCall=1.211 ms perBlock=0.316 ms share=15.6%
+2026-10-09T20:03:04.149+02:00   profile:   #10 track 84 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=315.7 us maxCall=1.683 ms perBlock=0.316 ms share=15.6%
+2026-10-09T20:03:04.151+02:00   profile:   #11 track 48 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=315.3 us maxCall=1.320 ms perBlock=0.315 ms share=15.6%
+2026-10-09T20:03:04.153+02:00   profile:   #12 track 5 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1789 meanPerCall=314.6 us maxCall=1.438 ms perBlock=0.315 ms share=15.5%
+2026-10-09T20:03:04.155+02:00   profile: top 12 together = 190.1% of callback time
+2026-10-09T20:03:04.157+02:00   profile: by plug-in (instances, perBlock ms, share): [VB3-II x16 5.095 ms 251.7%] [Groove Agent SE x16 4.757 ms 235.0%] [AmpliTube 4 [Pre] x18 3.983 ms 196.7%] [HALion Sonic x16 1.150 ms 56.8%] [Pro-Q 3 [Post] x16 0.264 ms 13.0%] [DAL Mono Delay [Post] x16 0.178 ms 8.8%]
+2026-10-09T20:03:04.165+02:00 step end ok: perf-profile: configured collect elapsedMs=88
+2026-10-09T20:03:04.374+02:00 step begin: perf-profile: stop playback, profiler off
+2026-10-09T20:03:04.381+02:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-10-09T20:03:05.208+02:00 RESULT: PASS scenario=perf-profile totalMs=75652
+2026-10-09T20:03:25.225+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
+2026-10-09T20:04:56.084+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-09T20:04:58.373+02:00 ================================================================
+2026-10-09T20:04:58.376+02:00 scenario start: perf-profile iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks.dalproj
+2026-10-09T20:04:58.378+02:00 steps queued: 10 (delete-loop iterations expand at plan time)
+2026-10-09T20:04:58.926+02:00 step begin: perf-profile: load TSE_pt2_100tracks.dalproj
+2026-10-09T20:05:39.741+02:00 step end ok: perf-profile: load TSE_pt2_100tracks.dalproj elapsedMs=40807
+2026-10-09T20:05:39.799+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-09T20:05:41.543+02:00 step begin: perf-profile: verify loaded
+2026-10-09T20:05:41.547+02:00   track count after load: 101
+2026-10-09T20:05:41.552+02:00 step end ok: perf-profile: verify loaded elapsedMs=3
+2026-10-09T20:05:41.830+02:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-10-09T20:05:41.837+02:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-10-09T20:05:49.853+02:00 step begin: perf-profile: runtime conditions
+2026-10-09T20:05:49.857+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:05:49.862+02:00 step end ok: perf-profile: runtime conditions elapsedMs=4
+2026-10-09T20:05:50.210+02:00 step begin: perf-profile: project load (loaded vs processed)
+2026-10-09T20:05:50.213+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:05:50.216+02:00   tracks: audio=36 instrument=48 midi=16 group=0 master=1 (muted=0 off=0) | instrument registry entries=48 primaryLoaded=48 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=50 instances=50 | proxy states: 3:Primary,5:Primary,80:Primary,16:Primary,72:Primary,8:Primary,82:Primary,18:Primary,74:Primary,10:Primary,76:Primary,12:Primary,78:Primary,14:Primary,84:Primary,20:Primary,86:Primary,22:Primary,88:Primary,24:Primary,90:Primary,26:Primary,92:Primary,28:Primary,94:Primary,30:Primary,96:Primary,32:Primary,98:Primary,34:Primary,36:Primary,38:Primary,40:Primary,42:Primary,44:Primary,46:Primary,48:Primary,50:Primary,52:Primary,54:Primary,56:Primary,58:Primary,60:Primary,62:Primary,64:Primary,66:Primary,68:Primary,70:Primary
+2026-10-09T20:05:50.221+02:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=5
+2026-10-09T20:05:50.570+02:00 step begin: perf-profile: mixer window closed
+2026-10-09T20:05:50.575+02:00   mixer visible=no
+2026-10-09T20:05:50.581+02:00 step end ok: perf-profile: mixer window closed elapsedMs=3
+2026-10-09T20:05:50.929+02:00 step begin: perf-profile: start playback (warm-up 2 s)
+2026-10-09T20:05:50.933+02:00   start at 35.00 s (sample 1680000) cycle=on profiler=ON generation=as configured | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=1048 serialBlocks=1 jobsByCallback=7054 jobsByWorkers=43298 joinKernelWaits=135 lastDispatchWallMs=1.280 lastJoinWaitMs=0.074 (cumulative since start)
+2026-10-09T20:05:50.941+02:00 step end ok: perf-profile: start playback (warm-up 2 s) elapsedMs=6
+2026-10-09T20:05:52.965+02:00 step begin: perf-profile: configured measurement window begins (15 s)
+2026-10-09T20:05:52.969+02:00   window start: playhead=1777280 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=9150.8 MB private=9448.23 MB
+2026-10-09T20:05:52.973+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:05:52.979+02:00 step end ok: perf-profile: configured measurement window begins (15 s) elapsedMs=7
+2026-10-09T20:06:07.986+02:00 step begin: perf-profile: configured collect
+2026-10-09T20:06:07.991+02:00   === window: configured ===
+2026-10-09T20:06:07.996+02:00   window end: wall=15.03 s playhead=530688 (started 1777280)
+2026-10-09T20:06:07.999+02:00   engine: blocks=1409 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=1.210/2.184/13.490 budget%(mean/max)=20.5/126.5 nearOverruns(>70%)=1 overruns(>=100%)=1
+2026-10-09T20:06:08.002+02:00   output: peakHold=0.566 masterPeakL/R=0.529/0.566 oversL/R=0/0 rmsL/R=0.0799/0.0743 nonFinite=0
+2026-10-09T20:06:08.005+02:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-10-09T20:06:08.007+02:00   instruments: hosts with live processBlock blocks=48 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-10-09T20:06:08.009+02:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=2649 serialBlocks=1 jobsByCallback=24345 jobsByWorkers=160455 joinKernelWaits=202 lastDispatchWallMs=2.553 lastJoinWaitMs=0.065 (cumulative since start)
+2026-10-09T20:06:08.012+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:06:08.014+02:00   process: cpu=162.3% of one core (6.8% of 24 cores) systemBusy=15.7% workingSet=9134.64 MB private=9430.53 MB pageFaultsInWindow=398 (soft+hard; 26.4853/s)
+2026-10-09T20:06:08.017+02:00   profile: blocks=1411 callback ms(mean/max)=2.185/13.490
+2026-10-09T20:06:08.019+02:00   profile: category instrument-plugin: perBlock ms(mean/max)=10.215/22.036 callsPerBlock=48.0 shareOfCallback=467.6%
+2026-10-09T20:06:08.021+02:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-10-09T20:06:08.025+02:00   profile: category insert-plugin: perBlock ms(mean/max)=5.004/87.946 callsPerBlock=45.3 shareOfCallback=229.1%
+2026-10-09T20:06:08.028+02:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.145/0.335 shareOfCallback=6.7%
+2026-10-09T20:06:08.031+02:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.014/0.147
+2026-10-09T20:06:08.033+02:00   profile: phase live-midi: perBlock ms(mean/max)=0.003/0.042
+2026-10-09T20:06:08.036+02:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=2.084/13.396
+2026-10-09T20:06:08.038+02:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.038/0.172
+2026-10-09T20:06:08.040+02:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.001
+2026-10-09T20:06:08.043+02:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.034/0.085
+2026-10-09T20:06:08.048+02:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.002/0.029
+2026-10-09T20:06:08.052+02:00   profile: worst block: total=13.490 ms (512 samples): instrument-plugin CPU 8.932 | proxy-mix 0.000 | insert-plugin 87.946 | generation-section wall 13.368 | remainder 0.122
+2026-10-09T20:06:08.055+02:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=2.039/13.368 callbackIdleWait ms(mean/max)=0.052/2.205 jobsPerBlock=84.0 parallelBlocks=1411 of 1411 effectiveParallelism(instrumentCPU/sectionWall)=5.01 (parallel blocks only: 5.01)
+2026-10-09T20:06:08.058+02:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-10-09T20:06:08.061+02:00   profile: callback start intervals: n=1411 ms(mean/max)=10.666/13.519 lateStarts(>1.25x period)=1
+2026-10-09T20:06:08.063+02:00   profile: instances with calls=98 of registered 98; top 12 by summed ms:
+2026-10-09T20:06:08.066+02:00   profile:   #1 track 78 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=348.1 us maxCall=1.874 ms perBlock=0.348 ms share=15.9%
+2026-10-09T20:06:08.069+02:00   profile:   #2 track 30 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=343.4 us maxCall=1.493 ms perBlock=0.343 ms share=15.7%
+2026-10-09T20:06:08.071+02:00   profile:   #3 track 90 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=342.8 us maxCall=1.419 ms perBlock=0.343 ms share=15.7%
+2026-10-09T20:06:08.074+02:00   profile:   #4 track 36 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=341.1 us maxCall=1.223 ms perBlock=0.341 ms share=15.6%
+2026-10-09T20:06:08.077+02:00   profile:   #5 track 60 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=336.9 us maxCall=1.478 ms perBlock=0.337 ms share=15.4%
+2026-10-09T20:06:08.080+02:00   profile:   #6 track 84 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=330.5 us maxCall=1.313 ms perBlock=0.330 ms share=15.1%
+2026-10-09T20:06:08.083+02:00   profile:   #7 track 96 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=330.4 us maxCall=1.452 ms perBlock=0.330 ms share=15.1%
+2026-10-09T20:06:08.085+02:00   profile:   #8 track 18 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=329.6 us maxCall=1.424 ms perBlock=0.330 ms share=15.1%
+2026-10-09T20:06:08.088+02:00   profile:   #9 track 12 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=329.3 us maxCall=1.319 ms perBlock=0.329 ms share=15.1%
+2026-10-09T20:06:08.090+02:00   profile:   #10 track 66 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=329.3 us maxCall=1.550 ms perBlock=0.329 ms share=15.1%
+2026-10-09T20:06:08.092+02:00   profile:   #11 track 54 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=328.1 us maxCall=1.655 ms perBlock=0.328 ms share=15.0%
+2026-10-09T20:06:08.095+02:00   profile:   #12 track 48 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1411 meanPerCall=327.4 us maxCall=1.602 ms perBlock=0.327 ms share=15.0%
+2026-10-09T20:06:08.097+02:00   profile: top 12 together = 183.9% of callback time
+2026-10-09T20:06:08.100+02:00   profile: by plug-in (instances, perBlock ms, share): [VB3-II x16 5.315 ms 243.3%] [AmpliTube 4 [Pre] x18 4.541 ms 207.9%] [Groove Agent SE x16 3.774 ms 172.8%] [HALion Sonic x16 1.126 ms 51.5%] [Pro-Q 3 [Post] x16 0.275 ms 12.6%] [DAL Mono Delay [Post] x16 0.188 ms 8.6%]
+2026-10-09T20:06:08.105+02:00 step end ok: perf-profile: configured collect elapsedMs=111
+2026-10-09T20:06:08.311+02:00 step begin: perf-profile: stop playback, profiler off
+2026-10-09T20:06:08.319+02:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-10-09T20:06:09.125+02:00 RESULT: PASS scenario=perf-profile totalMs=70753
+2026-10-09T20:06:29.134+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
+2026-10-09T20:06:41.349+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-09T20:06:43.554+02:00 ================================================================
+2026-10-09T20:06:43.558+02:00 scenario start: perf-profile iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks.dalproj
+2026-10-09T20:06:43.561+02:00 steps queued: 10 (delete-loop iterations expand at plan time)
+2026-10-09T20:06:44.105+02:00 step begin: perf-profile: load TSE_pt2_100tracks.dalproj
+2026-10-09T20:07:23.802+02:00 step end ok: perf-profile: load TSE_pt2_100tracks.dalproj elapsedMs=39692
+2026-10-09T20:07:23.877+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-09T20:07:25.347+02:00 step begin: perf-profile: verify loaded
+2026-10-09T20:07:25.350+02:00   track count after load: 101
+2026-10-09T20:07:25.356+02:00 step end ok: perf-profile: verify loaded elapsedMs=3
+2026-10-09T20:07:25.622+02:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-10-09T20:07:25.629+02:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-10-09T20:07:33.650+02:00 step begin: perf-profile: runtime conditions
+2026-10-09T20:07:33.654+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:07:33.661+02:00 step end ok: perf-profile: runtime conditions elapsedMs=3
+2026-10-09T20:07:34.007+02:00 step begin: perf-profile: project load (loaded vs processed)
+2026-10-09T20:07:34.013+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:07:34.016+02:00   tracks: audio=36 instrument=48 midi=16 group=0 master=1 (muted=0 off=0) | instrument registry entries=48 primaryLoaded=48 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=50 instances=50 | proxy states: 3:Primary,5:Primary,80:Primary,16:Primary,72:Primary,8:Primary,82:Primary,18:Primary,74:Primary,10:Primary,76:Primary,12:Primary,78:Primary,14:Primary,84:Primary,20:Primary,86:Primary,22:Primary,88:Primary,24:Primary,90:Primary,26:Primary,92:Primary,28:Primary,94:Primary,30:Primary,96:Primary,32:Primary,98:Primary,34:Primary,36:Primary,38:Primary,40:Primary,42:Primary,44:Primary,46:Primary,48:Primary,50:Primary,52:Primary,54:Primary,56:Primary,58:Primary,60:Primary,62:Primary,64:Primary,66:Primary,68:Primary,70:Primary
+2026-10-09T20:07:34.021+02:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=6
+2026-10-09T20:07:34.364+02:00 step begin: perf-profile: mixer window closed
+2026-10-09T20:07:34.367+02:00   mixer visible=no
+2026-10-09T20:07:34.373+02:00 step end ok: perf-profile: mixer window closed elapsedMs=4
+2026-10-09T20:07:34.720+02:00 step begin: perf-profile: start playback (warm-up 2 s)
+2026-10-09T20:07:34.725+02:00   start at 35.00 s (sample 1680000) cycle=on profiler=ON generation=as configured | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=1024 serialBlocks=1 jobsByCallback=7574 jobsByWorkers=41626 joinKernelWaits=69 lastDispatchWallMs=0.918 lastJoinWaitMs=0.035 (cumulative since start)
+2026-10-09T20:07:34.731+02:00 step end ok: perf-profile: start playback (warm-up 2 s) elapsedMs=2
+2026-10-09T20:07:36.770+02:00 step begin: perf-profile: configured measurement window begins (15 s)
+2026-10-09T20:07:36.774+02:00   window start: playhead=1778304 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=9043.7 MB private=9335.4 MB
+2026-10-09T20:07:36.777+02:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=3104 consumed=3056 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:07:36.783+02:00 step end ok: perf-profile: configured measurement window begins (15 s) elapsedMs=7
+2026-10-09T20:07:51.819+02:00 step begin: perf-profile: configured collect
+2026-10-09T20:07:51.822+02:00   === window: configured ===
+2026-10-09T20:07:51.826+02:00   window end: wall=15.05 s playhead=532736 (started 1778304)
+2026-10-09T20:07:51.829+02:00   engine: blocks=1411 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=1.231/1.854/7.439 budget%(mean/max)=17.4/69.7 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-10-09T20:07:51.831+02:00   output: peakHold=0.543 masterPeakL/R=0.529/0.543 oversL/R=0/0 rmsL/R=0.0799/0.0743 nonFinite=0
+2026-10-09T20:07:51.836+02:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-10-09T20:07:51.839+02:00   instruments: hosts with live processBlock blocks=48 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-10-09T20:07:51.841+02:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=2628 serialBlocks=1 jobsByCallback=21710 jobsByWorkers=136578 joinKernelWaits=132 lastDispatchWallMs=2.032 lastJoinWaitMs=0.030 (cumulative since start)
+2026-10-09T20:07:51.844+02:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=25712 consumed=25680 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:07:51.846+02:00   process: cpu=158.6% of one core (6.6% of 24 cores) systemBusy=14.7% workingSet=9027.49 MB private=9317.7 MB pageFaultsInWindow=389 (soft+hard; 25.8441/s)
+2026-10-09T20:07:51.848+02:00   profile: blocks=1413 callback ms(mean/max)=1.854/7.439
+2026-10-09T20:07:51.850+02:00   profile: category instrument-plugin: perBlock ms(mean/max)=9.690/16.574 callsPerBlock=48.0 shareOfCallback=522.6%
+2026-10-09T20:07:51.853+02:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-10-09T20:07:51.855+02:00   profile: category insert-plugin: perBlock ms(mean/max)=2.975/41.532 callsPerBlock=39.4 shareOfCallback=160.4%
+2026-10-09T20:07:51.857+02:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.144/0.307 shareOfCallback=7.8%
+2026-10-09T20:07:51.859+02:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.013/0.045
+2026-10-09T20:07:51.861+02:00   profile: phase live-midi: perBlock ms(mean/max)=0.003/0.008
+2026-10-09T20:07:51.863+02:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=1.754/7.337
+2026-10-09T20:07:51.865+02:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.035/0.232
+2026-10-09T20:07:51.867+02:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.002
+2026-10-09T20:07:51.869+02:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.037/0.085
+2026-10-09T20:07:51.870+02:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.002/0.020
+2026-10-09T20:07:51.872+02:00   profile: worst block: total=7.439 ms (512 samples): instrument-plugin CPU 8.745 | proxy-mix 0.000 | insert-plugin 41.532 | generation-section wall 7.300 | remainder 0.000
+2026-10-09T20:07:51.875+02:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=1.710/7.300 callbackIdleWait ms(mean/max)=0.051/2.016 jobsPerBlock=68.0 parallelBlocks=1413 of 1413 effectiveParallelism(instrumentCPU/sectionWall)=5.67 (parallel blocks only: 5.67)
+2026-10-09T20:07:51.877+02:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-10-09T20:07:51.879+02:00   profile: callback start intervals: n=1413 ms(mean/max)=10.666/10.813 lateStarts(>1.25x period)=0
+2026-10-09T20:07:51.881+02:00   profile: instances with calls=98 of registered 98; top 12 by summed ms:
+2026-10-09T20:07:51.883+02:00   profile:   #1 track 36 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=325.0 us maxCall=1.073 ms perBlock=0.325 ms share=17.5%
+2026-10-09T20:07:51.885+02:00   profile:   #2 track 30 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=324.9 us maxCall=1.645 ms perBlock=0.325 ms share=17.5%
+2026-10-09T20:07:51.888+02:00   profile:   #3 track 18 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=324.8 us maxCall=1.228 ms perBlock=0.325 ms share=17.5%
+2026-10-09T20:07:51.890+02:00   profile:   #4 track 12 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=321.0 us maxCall=1.276 ms perBlock=0.321 ms share=17.3%
+2026-10-09T20:07:51.892+02:00   profile:   #5 track 66 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=318.1 us maxCall=1.126 ms perBlock=0.318 ms share=17.2%
+2026-10-09T20:07:51.894+02:00   profile:   #6 track 72 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=314.8 us maxCall=1.139 ms perBlock=0.315 ms share=17.0%
+2026-10-09T20:07:51.896+02:00   profile:   #7 track 90 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=314.6 us maxCall=1.617 ms perBlock=0.315 ms share=17.0%
+2026-10-09T20:07:51.898+02:00   profile:   #8 track 60 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=314.3 us maxCall=1.117 ms perBlock=0.314 ms share=17.0%
+2026-10-09T20:07:51.900+02:00   profile:   #9 track 54 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=314.2 us maxCall=1.240 ms perBlock=0.314 ms share=16.9%
+2026-10-09T20:07:51.902+02:00   profile:   #10 track 78 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=312.3 us maxCall=1.216 ms perBlock=0.312 ms share=16.8%
+2026-10-09T20:07:51.904+02:00   profile:   #11 track 48 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=312.3 us maxCall=1.188 ms perBlock=0.312 ms share=16.8%
+2026-10-09T20:07:51.907+02:00   profile:   #12 track 84 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=1413 meanPerCall=307.8 us maxCall=1.111 ms perBlock=0.308 ms share=16.6%
+2026-10-09T20:07:51.909+02:00   profile: top 12 together = 205.1% of callback time
+2026-10-09T20:07:51.911+02:00   profile: by plug-in (instances, perBlock ms, share): [VB3-II x16 5.031 ms 271.3%] [AmpliTube 4 [Pre] x18 4.286 ms 231.1%] [Groove Agent SE x16 3.591 ms 193.6%] [HALion Sonic x16 1.069 ms 57.6%] [Pro-Q 3 [Post] x16 0.263 ms 14.2%] [DAL Mono Delay [Post] x16 0.182 ms 9.8%]
+2026-10-09T20:07:51.915+02:00 step end ok: perf-profile: configured collect elapsedMs=91
+2026-10-09T20:07:52.119+02:00 step begin: perf-profile: stop playback, profiler off
+2026-10-09T20:07:52.129+02:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-10-09T20:07:52.984+02:00 RESULT: PASS scenario=perf-profile totalMs=69430
+2026-10-09T20:08:12.993+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
+2026-10-09T20:08:40.129+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-09T20:08:42.332+02:00 ================================================================
+2026-10-09T20:08:42.337+02:00 scenario start: readahead-transitions iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks.dalproj
+2026-10-09T20:08:42.340+02:00 steps queued: 39 (delete-loop iterations expand at plan time)
+2026-10-09T20:08:42.888+02:00 step begin: readahead-transitions: copy project to sibling test file
+2026-10-09T20:08:42.896+02:00   test copy: C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks-readahead-test.dalproj
+2026-10-09T20:08:42.902+02:00 step end ok: readahead-transitions: copy project to sibling test file elapsedMs=8
+2026-10-09T20:08:43.195+02:00 step begin: readahead-transitions: load TSE_pt2_100tracks-readahead-test.dalproj
+2026-10-09T20:09:22.602+02:00 step end ok: readahead-transitions: load TSE_pt2_100tracks-readahead-test.dalproj elapsedMs=39401
+2026-10-09T20:09:22.645+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-09T20:09:24.252+02:00 step begin: readahead-transitions: verify loaded
+2026-10-09T20:09:24.255+02:00   track count after load: 101
+2026-10-09T20:09:24.261+02:00 step end ok: readahead-transitions: verify loaded elapsedMs=2
+2026-10-09T20:09:24.530+02:00 step begin: readahead-transitions: settle after load (plug-ins / proxies ready)
+2026-10-09T20:09:24.536+02:00 step end ok: readahead-transitions: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-10-09T20:09:32.564+02:00 step begin: readahead-transitions: preconditions + baseline capture (stopped, nothing adopted)
+2026-10-09T20:09:32.568+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:09:32.571+02:00   mode: read-ahead ENABLED depth=3 sampleRate=48000 cycle=on
+2026-10-09T20:09:32.585+02:00   baseline: tracks=101 insert chains=50
+2026-10-09T20:09:32.591+02:00 step end ok: readahead-transitions: preconditions + baseline capture (stopped, nothing adopted) elapsedMs=20
+2026-10-09T20:09:33.224+02:00 step begin: readahead-transitions: T0 play from 17.333 s (handler: seek + play intent)
+2026-10-09T20:09:33.231+02:00 step end ok: readahead-transitions: T0 play from 17.333 s (handler: seek + play intent) elapsedMs=0
+2026-10-09T20:09:39.247+02:00 step begin: readahead-transitions: T0 observe steady state + pick target row
+2026-10-09T20:09:39.251+02:00   T0 steady state after 6 s | delta since previous step: adopted=+19 produced=+9053 consumed=+8987 missed=+18 staleDiscarded=+18 drainReleases=+0 discardResets=+3 missAbandons=+3 | playing=yes playhead=1120751
+2026-10-09T20:09:39.253+02:00   read-ahead: depth=3 counters(cumulative): adopted=19 produced=9053 consumed=8987 missed=18 staleDiscarded=18 drainReleases=0 discardResets=3 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #48 id=51 "Track 1 — kopia 08" inserts=[]; #50 id=53 "Track 4 — kopia 08" inserts=[Pre:AmpliTube 4]; #54 id=57 "Track 1 — kopia 09" inserts=[]
+2026-10-09T20:09:39.257+02:00   T0 owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 51, 53, 57
+2026-10-09T20:09:39.262+02:00   OBSERVATION: T0 warm-up: missed=18 missAbandons=3 (silence / rows leaving the mode during start-up)
+2026-10-09T20:09:39.265+02:00   target row: track 4 kind=audio name="Track 4" muted=no off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=off inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-09T20:09:39.273+02:00 step end ok: readahead-transitions: T0 observe steady state + pick target row elapsedMs=19
+2026-10-09T20:09:39.506+02:00 step begin: readahead-transitions: T1 pause (transport controller, Space path)
+2026-10-09T20:09:39.513+02:00 step end ok: readahead-transitions: T1 pause (transport controller, Space path) elapsedMs=0
+2026-10-09T20:09:41.039+02:00 step begin: readahead-transitions: T1 observe paused
+2026-10-09T20:09:41.043+02:00   T1 paused 1.5 s | delta since previous step: adopted=+0 produced=+384 consumed=+384 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=no playhead=1133039
+2026-10-09T20:09:41.045+02:00   read-ahead: depth=3 counters(cumulative): adopted=19 produced=9437 consumed=9371 missed=18 staleDiscarded=18 drainReleases=0 discardResets=3 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #48 id=51 "Track 1 — kopia 08" inserts=[]; #50 id=53 "Track 4 — kopia 08" inserts=[Pre:AmpliTube 4]; #54 id=57 "Track 1 — kopia 09" inserts=[]
+2026-10-09T20:09:41.048+02:00   T1 paused owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 51, 53, 57
+2026-10-09T20:09:41.050+02:00   T1 paused: produced during pause=+384 (worker may fill to depth)
+2026-10-09T20:09:41.055+02:00 step end ok: readahead-transitions: T1 observe paused elapsedMs=10
+2026-10-09T20:09:41.297+02:00 step begin: readahead-transitions: T1 resume at the same position
+2026-10-09T20:09:41.305+02:00 step end ok: readahead-transitions: T1 resume at the same position elapsedMs=0
+2026-10-09T20:09:44.318+02:00 step begin: readahead-transitions: T1 observe resumed
+2026-10-09T20:09:44.322+02:00   T1 resumed 3 s | delta since previous step: adopted=+0 produced=+4528 consumed=+4528 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1278447
+2026-10-09T20:09:44.325+02:00   read-ahead: depth=3 counters(cumulative): adopted=19 produced=13976 consumed=13915 missed=18 staleDiscarded=18 drainReleases=0 discardResets=3 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #48 id=51 "Track 1 — kopia 08" inserts=[]; #50 id=53 "Track 4 — kopia 08" inserts=[Pre:AmpliTube 4]; #54 id=57 "Track 1 — kopia 09" inserts=[]
+2026-10-09T20:09:44.328+02:00   T1 resumed owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 51, 53, 57
+2026-10-09T20:09:44.334+02:00 step end ok: readahead-transitions: T1 observe resumed elapsedMs=8
+2026-10-09T20:09:44.575+02:00 step begin: readahead-transitions: T2 seek to 25 s while playing
+2026-10-09T20:09:44.582+02:00 step end ok: readahead-transitions: T2 seek to 25 s while playing elapsedMs=0
+2026-10-09T20:09:47.593+02:00 step begin: readahead-transitions: T2 observe after seek
+2026-10-09T20:09:47.600+02:00   T2 seek +3 s | delta since previous step: adopted=+16 produced=+4935 consumed=+4896 missed=+0 staleDiscarded=+48 drainReleases=+0 discardResets=+16 missAbandons=+0 | playing=yes playhead=1344896
+2026-10-09T20:09:47.602+02:00   read-ahead: depth=3 counters(cumulative): adopted=35 produced=18909 consumed=18795 missed=18 staleDiscarded=66 drainReleases=0 discardResets=19 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:09:47.604+02:00   T2 after seek owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47
+2026-10-09T20:09:47.607+02:00   T2 seek: expected discardResets=16 (one per owned row) and re-adoption
+2026-10-09T20:09:47.613+02:00 step end ok: readahead-transitions: T2 observe after seek elapsedMs=11
+2026-10-09T20:09:47.851+02:00 step begin: readahead-transitions: T2 Stop button (stop intent + seek 0), then seek 17.333 s and play
+2026-10-09T20:09:47.861+02:00 step end ok: readahead-transitions: T2 Stop button (stop intent + seek 0), then seek 17.333 s and play elapsedMs=0
+2026-10-09T20:09:51.887+02:00 step begin: readahead-transitions: T2 observe after stop/restart
+2026-10-09T20:09:51.891+02:00   T2 stop/restart +4 s | delta since previous step: adopted=+16 produced=+6457 consumed=+6400 missed=+0 staleDiscarded=+48 drainReleases=+0 discardResets=+16 missAbandons=+0 | playing=yes playhead=1025519
+2026-10-09T20:09:51.894+02:00   read-ahead: depth=3 counters(cumulative): adopted=51 produced=25357 consumed=25195 missed=18 staleDiscarded=114 drainReleases=0 discardResets=35 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:09:51.896+02:00   T2 after restart owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47
+2026-10-09T20:09:51.901+02:00 step end ok: readahead-transitions: T2 observe after stop/restart elapsedMs=9
+2026-10-09T20:09:52.142+02:00 step begin: readahead-transitions: T3a seek to 39.0 s (right locator at 41.0 s)
+2026-10-09T20:09:52.148+02:00 step end ok: readahead-transitions: T3a seek to 39.0 s (right locator at 41.0 s) elapsedMs=0
+2026-10-09T20:09:53.372+02:00 step begin: readahead-transitions: T3a observe before the wrap
+2026-10-09T20:09:53.376+02:00   T3a seek +1.2 s (pre-wrap) | delta since previous step: adopted=+16 produced=+2240 consumed=+2192 missed=+0 staleDiscarded=+48 drainReleases=+0 discardResets=+16 missAbandons=+0 | playing=yes playhead=1931392
+2026-10-09T20:09:53.379+02:00   read-ahead: depth=3 counters(cumulative): adopted=67 produced=27613 consumed=27403 missed=18 staleDiscarded=162 drainReleases=0 discardResets=51 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:09:53.381+02:00   T3a pre-wrap owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47
+2026-10-09T20:09:53.385+02:00 step end ok: readahead-transitions: T3a observe before the wrap elapsedMs=8
+2026-10-09T20:09:57.923+02:00 step begin: readahead-transitions: T3b observe after the wrap
+2026-10-09T20:09:57.927+02:00   T3b wrap +4.5 s | delta since previous step: adopted=+0 produced=+6848 consumed=+6848 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=181504
+2026-10-09T20:09:57.930+02:00   read-ahead: depth=3 counters(cumulative): adopted=67 produced=34445 consumed=34235 missed=18 staleDiscarded=162 drainReleases=0 discardResets=51 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:09:57.933+02:00   T3b post-wrap owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47
+2026-10-09T20:09:57.936+02:00   T3b: playhead wrapped (cycle continued from the left locator)
+2026-10-09T20:09:57.940+02:00 step end ok: readahead-transitions: T3b observe after the wrap elapsedMs=11
+2026-10-09T20:09:58.180+02:00 step begin: readahead-transitions: T4 open mixer (F3 path) to reach the audio strip cells
+2026-10-09T20:09:58.247+02:00   mixer visible=yes
+2026-10-09T20:09:58.254+02:00 step end ok: readahead-transitions: T4 open mixer (F3 path) to reach the audio strip cells elapsedMs=67
+2026-10-09T20:09:59.790+02:00 step begin: readahead-transitions: T4 Monitor ON on the target row (strip cell click)
+2026-10-09T20:09:59.793+02:00   T4 before Monitor ON (mixer open) | delta since previous step: adopted=+0 produced=+2800 consumed=+2800 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=271104
+2026-10-09T20:09:59.796+02:00   read-ahead: depth=3 counters(cumulative): adopted=67 produced=37245 consumed=37035 missed=18 staleDiscarded=162 drainReleases=0 discardResets=51 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:09:59.802+02:00 step end ok: readahead-transitions: T4 Monitor ON on the target row (strip cell click) elapsedMs=6
+2026-10-09T20:10:01.323+02:00 step begin: readahead-transitions: T4 observe Monitor ON
+2026-10-09T20:10:01.327+02:00   T4 Monitor ON +1.5 s | delta since previous step: adopted=+1 produced=+2303 consumed=+2303 missed=+0 staleDiscarded=+3 drainReleases=+0 discardResets=+1 missAbandons=+0 | playing=yes playhead=344832
+2026-10-09T20:10:01.329+02:00   read-ahead: depth=3 counters(cumulative): adopted=68 produced=39551 consumed=39338 missed=18 staleDiscarded=165 drainReleases=0 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]; #48 id=51 "Track 1 — kopia 08" inserts=[]
+2026-10-09T20:10:01.332+02:00   T4 monitor on owned ids (16): 1, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47, 51
+2026-10-09T20:10:01.334+02:00   T4: track 4 kind=audio name="Track 4" muted=no off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=ON inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-09T20:10:01.342+02:00 step end ok: readahead-transitions: T4 observe Monitor ON elapsedMs=12
+2026-10-09T20:10:01.581+02:00 step begin: readahead-transitions: T4 Monitor OFF on the target row
+2026-10-09T20:10:01.590+02:00 step end ok: readahead-transitions: T4 Monitor OFF on the target row elapsedMs=1
+2026-10-09T20:10:04.604+02:00 step begin: readahead-transitions: T4 observe Monitor OFF
+2026-10-09T20:10:04.607+02:00   T4 Monitor OFF +3 s | delta since previous step: adopted=+0 produced=+4915 consumed=+4912 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=502528
+2026-10-09T20:10:04.610+02:00   read-ahead: depth=3 counters(cumulative): adopted=68 produced=44463 consumed=44266 missed=18 staleDiscarded=165 drainReleases=0 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]; #48 id=51 "Track 1 — kopia 08" inserts=[]
+2026-10-09T20:10:04.612+02:00   T4 monitor off owned ids (16): 1, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47, 51
+2026-10-09T20:10:04.614+02:00   T4: target re-adopted after Monitor OFF: no (slot taken by another eligible row or cooldown) ? informational
+2026-10-09T20:10:04.618+02:00 step end ok: readahead-transitions: T4 observe Monitor OFF elapsedMs=9
+2026-10-09T20:10:04.864+02:00 step begin: readahead-transitions: T5 Arm the same row (strip cell click)
+2026-10-09T20:10:04.870+02:00 step end ok: readahead-transitions: T5 Arm the same row (strip cell click) elapsedMs=0
+2026-10-09T20:10:07.916+02:00 step begin: readahead-transitions: T5 observe armed
+2026-10-09T20:10:07.920+02:00   T5 armed +3 s | delta since previous step: adopted=+0 produced=+4976 consumed=+4976 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=661248
+2026-10-09T20:10:07.922+02:00   read-ahead: depth=3 counters(cumulative): adopted=68 produced=49439 consumed=49226 missed=18 staleDiscarded=165 drainReleases=0 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]; #48 id=51 "Track 1 — kopia 08" inserts=[]
+2026-10-09T20:10:07.925+02:00   T5 armed owned ids (16): 1, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47, 51
+2026-10-09T20:10:07.928+02:00   T5: row was owned at arm time: no; drainReleases=+0 discardResets=+0
+2026-10-09T20:10:07.934+02:00 step end ok: readahead-transitions: T5 observe armed elapsedMs=12
+2026-10-09T20:10:08.172+02:00 step begin: readahead-transitions: T5 wait with the row armed (must stay un-adopted)
+2026-10-09T20:10:08.178+02:00 step end ok: readahead-transitions: T5 wait with the row armed (must stay un-adopted) elapsedMs=0
+2026-10-09T20:10:11.227+02:00 step begin: readahead-transitions: T5 observe still armed, then disarm + close mixer
+2026-10-09T20:10:11.230+02:00   T5 armed +6 s | delta since previous step: adopted=+0 produced=+4960 consumed=+4960 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=819968
+2026-10-09T20:10:11.233+02:00   read-ahead: depth=3 counters(cumulative): adopted=68 produced=54402 consumed=54202 missed=18 staleDiscarded=165 drainReleases=0 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]; #48 id=51 "Track 1 — kopia 08" inserts=[]
+2026-10-09T20:10:11.247+02:00   T5: disarmed, mixer closed
+2026-10-09T20:10:11.253+02:00 step end ok: readahead-transitions: T5 observe still armed, then disarm + close mixer elapsedMs=20
+2026-10-09T20:10:13.274+02:00 step begin: readahead-transitions: T6a set insert #0 param 0 on up to two owned AmpliTube rows (so the reopen can check it)
+2026-10-09T20:10:13.277+02:00   T6a before param change | delta since previous step: adopted=+0 produced=+3072 consumed=+3072 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=918272
+2026-10-09T20:10:13.279+02:00   read-ahead: depth=3 counters(cumulative): adopted=68 produced=57471 consumed=57258 missed=18 staleDiscarded=165 drainReleases=0 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]; #48 id=51 "Track 1 — kopia 08" inserts=[]
+2026-10-09T20:10:13.284+02:00   T6a: track 11 insert#0 param0 := 0.370 (now reads 0.370) name="Param 1 (2096 params)"
+2026-10-09T20:10:13.286+02:00   T6a: track 17 insert#0 param0 := 0.630 (now reads 0.630) name="Param 1 (2096 params)"
+2026-10-09T20:10:13.291+02:00 step end ok: readahead-transitions: T6a set insert #0 param 0 on up to two owned AmpliTube rows (so the reopen can check it) elapsedMs=11
+2026-10-09T20:10:13.836+02:00 step begin: readahead-transitions: T6b Save while PLAYING (Ctrl+S path)
+2026-10-09T20:10:14.915+02:00   T6b: save requested at playhead 945408
+2026-10-09T20:10:14.920+02:00 step end ok: readahead-transitions: T6b Save while PLAYING (Ctrl+S path) elapsedMs=1076
+2026-10-09T20:10:17.471+02:00 step begin: readahead-transitions: T6b observe after the playing save
+2026-10-09T20:10:17.476+02:00   T6b playing save +2.5 s | delta since previous step: adopted=+16 produced=+5241 consumed=+5248 missed=+0 staleDiscarded=+0 drainReleases=+16 discardResets=+0 missAbandons=+0 | playing=yes playhead=1120000
+2026-10-09T20:10:17.479+02:00   read-ahead: depth=3 counters(cumulative): adopted=84 produced=62719 consumed=62506 missed=18 staleDiscarded=165 drainReleases=16 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:10:17.481+02:00   T6b after save owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47
+2026-10-09T20:10:17.484+02:00   T6b: file written, size=8409336 bytes
+2026-10-09T20:10:17.487+02:00   T6b: playhead advanced 3.65 s in ~2.5 s wall (cycle wrap can make this negative)
+2026-10-09T20:10:17.489+02:00   T6b: drained rows for the capture window: drainReleases=+16 (owned before: 16), re-adopted=+16
+2026-10-09T20:10:17.495+02:00 step end ok: readahead-transitions: T6b observe after the playing save elapsedMs=15
+2026-10-09T20:10:17.725+02:00 step begin: readahead-transitions: T6c pause, then Save while PAUSED
+2026-10-09T20:10:17.732+02:00 step end ok: readahead-transitions: T6c pause, then Save while PAUSED elapsedMs=0
+2026-10-09T20:10:18.760+02:00 step begin: readahead-transitions: T6c save (paused)
+2026-10-09T20:10:19.792+02:00 step end ok: readahead-transitions: T6c save (paused) elapsedMs=1025
+2026-10-09T20:10:21.322+02:00 step begin: readahead-transitions: T6c observe paused save, then resume
+2026-10-09T20:10:21.326+02:00   T6c paused save +1.5 s | delta since previous step: adopted=+0 produced=+391 consumed=+384 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=no playhead=1132288
+2026-10-09T20:10:21.329+02:00   read-ahead: depth=3 counters(cumulative): adopted=84 produced=63103 consumed=62890 missed=18 staleDiscarded=165 drainReleases=16 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:10:21.331+02:00   T6c: file written while paused, size=8409829 bytes
+2026-10-09T20:10:21.333+02:00   T6c: drainReleases=+0 (model: paused save drains nothing; ownership kept)
+2026-10-09T20:10:21.337+02:00 step end ok: readahead-transitions: T6c observe paused save, then resume elapsedMs=9
+2026-10-09T20:10:24.343+02:00 step begin: readahead-transitions: T6c observe resumed after the paused save
+2026-10-09T20:10:24.346+02:00   T6c resumed +3 s | delta since previous step: adopted=+16 produced=+4496 consumed=+4496 missed=+0 staleDiscarded=+0 drainReleases=+16 discardResets=+0 missAbandons=+0 | playing=yes playhead=1276672
+2026-10-09T20:10:24.349+02:00   read-ahead: depth=3 counters(cumulative): adopted=100 produced=67599 consumed=67386 missed=18 staleDiscarded=165 drainReleases=32 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:10:24.351+02:00   T6c resumed owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47
+2026-10-09T20:10:24.356+02:00 step end ok: readahead-transitions: T6c observe resumed after the paused save elapsedMs=7
+2026-10-09T20:10:24.599+02:00 step begin: readahead-transitions: T7 force autosave while playing (existing autosave mechanism)
+2026-10-09T20:10:24.602+02:00   T7 before autosave | delta since previous step: adopted=+0 produced=+383 consumed=+384 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1288960
+2026-10-09T20:10:24.605+02:00   read-ahead: depth=3 counters(cumulative): adopted=100 produced=67983 consumed=67770 missed=18 staleDiscarded=165 drainReleases=32 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:10:24.609+02:00   T7: dirtying edit (rename track 1) -> ok
+2026-10-09T20:10:25.360+02:00   T7: forceAutosaveNow -> true
+2026-10-09T20:10:25.366+02:00 step end ok: readahead-transitions: T7 force autosave while playing (existing autosave mechanism) elapsedMs=760
+2026-10-09T20:10:27.872+02:00 step begin: readahead-transitions: T7 observe after autosave
+2026-10-09T20:10:27.875+02:00   T7 autosave +2.5 s | delta since previous step: adopted=+16 produced=+3850 consumed=+3856 missed=+0 staleDiscarded=+0 drainReleases=+16 discardResets=+0 missAbandons=+0 | playing=yes playhead=1446144
+2026-10-09T20:10:27.878+02:00   read-ahead: depth=3 counters(cumulative): adopted=116 produced=71839 consumed=71626 missed=18 staleDiscarded=165 drainReleases=48 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "RaAutosave 201024" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:10:27.880+02:00   T7 after autosave owned ids (16): 1, 4, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47
+2026-10-09T20:10:27.883+02:00   T7: autosave file C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks-readahead-test_autosave.dalproj exists=yes size=8410391 ageSec=2.6
+2026-10-09T20:10:27.885+02:00   T7: drainReleases=+16 (owned before: 16) re-adopted=+16
+2026-10-09T20:10:27.890+02:00 step end ok: readahead-transitions: T7 observe after autosave elapsedMs=12
+2026-10-09T20:10:28.126+02:00 step begin: readahead-transitions: T8 stop playback (engine load + output summary for the whole run)
+2026-10-09T20:10:28.130+02:00   engine (since baseline): blocks=5207 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=1.155/2.034/13.878 budget%(mean/max)=19.1/130.1 nearOverruns(>70%)=0 overruns(>=100%)=1
+2026-10-09T20:10:28.133+02:00   output (since baseline): peakHold=0.771 oversL/R=0/0 nonFinite=0
+2026-10-09T20:10:28.135+02:00   T8 stopped | delta since previous step: adopted=+0 produced=+391 consumed=+384 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=no playhead=1458432
+2026-10-09T20:10:28.137+02:00   read-ahead: depth=3 counters(cumulative): adopted=116 produced=72223 consumed=72010 missed=18 staleDiscarded=165 drainReleases=48 discardResets=52 missAbandons=3 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "RaAutosave 201024" inserts=[]; #2 id=4 "Track 4" inserts=[Pre:AmpliTube 4]; #6 id=9 "Track 1 — kopia 01" inserts=[]; #8 id=11 "Track 4 — kopia 01" inserts=[Pre:AmpliTube 4]; #12 id=15 "Track 1 — kopia 02" inserts=[]; #14 id=17 "Track 4 — kopia 02" inserts=[Pre:AmpliTube 4]; #18 id=21 "Track 1 — kopia 03" inserts=[]; #20 id=23 "Track 4 — kopia 03" inserts=[Pre:AmpliTube 4]; #24 id=27 "Track 1 — kopia 04" inserts=[]; #26 id=29 "Track 4 — kopia 04" inserts=[Pre:AmpliTube 4]; #30 id=33 "Track 1 — kopia 05" inserts=[]; #32 id=35 "Track 4 — kopia 05" inserts=[Pre:AmpliTube 4]; #36 id=39 "Track 1 — kopia 06" inserts=[]; #38 id=41 "Track 4 — kopia 06" inserts=[Pre:AmpliTube 4]; #42 id=45 "Track 1 — kopia 07" inserts=[]; #44 id=47 "Track 4 — kopia 07" inserts=[Pre:AmpliTube 4]
+2026-10-09T20:10:28.142+02:00 step end ok: readahead-transitions: T8 stop playback (engine load + output summary for the whole run) elapsedMs=9
+2026-10-09T20:10:29.149+02:00 step begin: readahead-transitions: T8 write the reopen-check sidecar (baseline rows / chain identities / changed parameters)
+2026-10-09T20:10:29.159+02:00   T8: sidecar written C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks-readahead-test.readahead-check.txt (101 rows, 50 chains, 2 params)
+2026-10-09T20:10:29.165+02:00 step end ok: readahead-transitions: T8 write the reopen-check sidecar (baseline rows / chain identities / changed parameters) elapsedMs=9
+2026-10-09T20:10:29.508+02:00 step begin: readahead-transitions: summary
+2026-10-09T20:10:29.512+02:00   OBSERVATIONS total: 1 (each listed above as 'OBSERVATION:'; the PASS/FAIL verdict covers hard errors only)
+2026-10-09T20:10:29.515+02:00   next: run the same command with --reopen-check in a fresh process to verify the saved copy
+2026-10-09T20:10:29.520+02:00 step end ok: readahead-transitions: summary elapsedMs=6
+2026-10-09T20:10:29.763+02:00 RESULT: PASS scenario=readahead-transitions totalMs=107431
+2026-10-09T20:10:49.774+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
+2026-10-09T20:11:18.095+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-09T20:11:20.346+02:00 ================================================================
+2026-10-09T20:11:20.349+02:00 scenario start: readahead-transitions iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks.dalproj
+2026-10-09T20:11:20.351+02:00 steps queued: 5 (delete-loop iterations expand at plan time)
+2026-10-09T20:11:20.901+02:00 step begin: readahead-reopen-check: preconditions
+2026-10-09T20:11:20.905+02:00   reopen-check: copy=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks-readahead-test.dalproj size=8409829 mtime=9 Oct 2026 8:10:19pm sidecar=TSE_pt2_100tracks-readahead-test.readahead-check.txt
+2026-10-09T20:11:20.911+02:00 step end ok: readahead-reopen-check: preconditions elapsedMs=3
+2026-10-09T20:11:21.207+02:00 step begin: readahead-reopen-check: load TSE_pt2_100tracks-readahead-test.dalproj
+2026-10-09T20:12:00.237+02:00 step end ok: readahead-reopen-check: load TSE_pt2_100tracks-readahead-test.dalproj elapsedMs=39023
+2026-10-09T20:12:00.284+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-09T20:12:01.887+02:00 step begin: readahead-reopen-check: verify loaded
+2026-10-09T20:12:01.891+02:00   track count after load: 101
+2026-10-09T20:12:01.897+02:00 step end ok: readahead-reopen-check: verify loaded elapsedMs=2
+2026-10-09T20:12:02.167+02:00 step begin: readahead-reopen-check: settle after load (plug-ins ready)
+2026-10-09T20:12:02.174+02:00 step end ok: readahead-reopen-check: settle after load (plug-ins ready) elapsedMs=0
+2026-10-09T20:12:10.201+02:00 step begin: readahead-reopen-check: compare with the sidecar
+2026-10-09T20:12:10.204+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:12:10.208+02:00   reopen-check: track 11 insert#0 param0=0.000 expected 0.370 name="Param 1 (2096 params)" | track 11 kind=audio name="Track 4 — kopia 01" muted=no off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=off inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-09T20:12:10.211+02:00   OBSERVATION: reopen-check: parameter set before the playing save not restored on track 11
+2026-10-09T20:12:10.214+02:00   reopen-check: track 17 insert#0 param0=0.000 expected 0.630 name="Param 1 (2096 params)" | track 17 kind=audio name="Track 4 — kopia 02" muted=no off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=off inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-09T20:12:10.216+02:00   OBSERVATION: reopen-check: parameter set before the playing save not restored on track 17
+2026-10-09T20:12:10.232+02:00   reopen-check: tracks=101 (before 101)
+2026-10-09T20:12:10.235+02:00   reopen-check: session rows compared=101 differing (routing/fader/pan/mute/clips/sends/inputs)=0
+2026-10-09T20:12:10.238+02:00   reopen-check: insert chains compared=50 identity/order/slot diffs=0 state-byte diffs=18 (2 expected from the deliberate parameter change; live plug-ins may re-serialize)
+2026-10-09T20:12:10.240+02:00   reopen-check: parameters compared=2 not restored=2
+2026-10-09T20:12:10.242+02:00   OBSERVATIONS total: 2
+2026-10-09T20:12:10.246+02:00 step end ok: readahead-reopen-check: compare with the sidecar elapsedMs=40
+2026-10-09T20:12:10.761+02:00 RESULT: PASS scenario=readahead-transitions totalMs=50415
+2026-10-09T20:12:30.836+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
+2026-10-09T20:13:08.724+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-09T20:13:10.969+02:00 ================================================================
+2026-10-09T20:13:10.972+02:00 scenario start: readahead-transitions iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks.dalproj
+2026-10-09T20:13:10.975+02:00 steps queued: 39 (delete-loop iterations expand at plan time)
+2026-10-09T20:13:11.525+02:00 step begin: readahead-transitions: copy project to sibling test file
+2026-10-09T20:13:11.536+02:00   test copy: C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks-readahead-test.dalproj
+2026-10-09T20:13:11.542+02:00 step end ok: readahead-transitions: copy project to sibling test file elapsedMs=8
+2026-10-09T20:13:11.832+02:00 step begin: readahead-transitions: load TSE_pt2_100tracks-readahead-test.dalproj
+2026-10-09T20:13:50.568+02:00 step end ok: readahead-transitions: load TSE_pt2_100tracks-readahead-test.dalproj elapsedMs=38728
+2026-10-09T20:13:50.610+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-09T20:13:51.872+02:00 step begin: readahead-transitions: verify loaded
+2026-10-09T20:13:51.876+02:00   track count after load: 101
+2026-10-09T20:13:51.881+02:00 step end ok: readahead-transitions: verify loaded elapsedMs=2
+2026-10-09T20:13:52.149+02:00 step begin: readahead-transitions: settle after load (plug-ins / proxies ready)
+2026-10-09T20:13:52.155+02:00 step end ok: readahead-transitions: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-10-09T20:14:00.174+02:00 step begin: readahead-transitions: preconditions + baseline capture (stopped, nothing adopted)
+2026-10-09T20:14:00.178+02:00   exe=C:\Users\nicla\development\MiniDAWLab-pr7-readahead\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.2.1 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-09T20:14:00.181+02:00   mode: CONTROL (read-ahead disabled; same walk, ownership expectations skipped) depth=0 sampleRate=48000 cycle=on
+2026-10-09T20:14:00.195+02:00   baseline: tracks=101 insert chains=50
+2026-10-09T20:14:00.201+02:00 step end ok: readahead-transitions: preconditions + baseline capture (stopped, nothing adopted) elapsedMs=20
+2026-10-09T20:14:00.838+02:00 step begin: readahead-transitions: T0 play from 17.333 s (handler: seek + play intent)
+2026-10-09T20:14:00.845+02:00 step end ok: readahead-transitions: T0 play from 17.333 s (handler: seek + play intent) elapsedMs=0
+2026-10-09T20:14:06.877+02:00 step begin: readahead-transitions: T0 observe steady state + pick target row
+2026-10-09T20:14:06.880+02:00   T0 steady state after 6 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1121775
+2026-10-09T20:14:06.883+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:06.886+02:00   T0 owned ids (0): 
+2026-10-09T20:14:06.888+02:00   target row: track 4 kind=audio name="Track 4" muted=no off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=off inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-09T20:14:06.892+02:00 step end ok: readahead-transitions: T0 observe steady state + pick target row elapsedMs=9
+2026-10-09T20:14:07.132+02:00 step begin: readahead-transitions: T1 pause (transport controller, Space path)
+2026-10-09T20:14:07.140+02:00 step end ok: readahead-transitions: T1 pause (transport controller, Space path) elapsedMs=0
+2026-10-09T20:14:08.664+02:00 step begin: readahead-transitions: T1 observe paused
+2026-10-09T20:14:08.667+02:00   T1 paused 1.5 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=no playhead=1134063
+2026-10-09T20:14:08.670+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:08.673+02:00   T1 paused owned ids (0): 
+2026-10-09T20:14:08.675+02:00   T1 paused: produced during pause=+0 (worker may fill to depth)
+2026-10-09T20:14:08.679+02:00 step end ok: readahead-transitions: T1 observe paused elapsedMs=9
+2026-10-09T20:14:08.918+02:00 step begin: readahead-transitions: T1 resume at the same position
+2026-10-09T20:14:08.924+02:00 step end ok: readahead-transitions: T1 resume at the same position elapsedMs=0
+2026-10-09T20:14:11.944+02:00 step begin: readahead-transitions: T1 observe resumed
+2026-10-09T20:14:11.948+02:00   T1 resumed 3 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1279471
+2026-10-09T20:14:11.951+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:11.954+02:00   T1 resumed owned ids (0): 
+2026-10-09T20:14:11.959+02:00 step end ok: readahead-transitions: T1 observe resumed elapsedMs=8
+2026-10-09T20:14:12.199+02:00 step begin: readahead-transitions: T2 seek to 25 s while playing
+2026-10-09T20:14:12.205+02:00 step end ok: readahead-transitions: T2 seek to 25 s while playing elapsedMs=0
+2026-10-09T20:14:15.210+02:00 step begin: readahead-transitions: T2 observe after seek
+2026-10-09T20:14:15.214+02:00   T2 seek +3 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1344384
+2026-10-09T20:14:15.218+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:15.221+02:00   T2 after seek owned ids (0): 
+2026-10-09T20:14:15.223+02:00   T2 seek: expected discardResets=0 (one per owned row) and re-adoption
+2026-10-09T20:14:15.228+02:00 step end ok: readahead-transitions: T2 observe after seek elapsedMs=11
+2026-10-09T20:14:15.466+02:00 step begin: readahead-transitions: T2 Stop button (stop intent + seek 0), then seek 17.333 s and play
+2026-10-09T20:14:15.472+02:00 step end ok: readahead-transitions: T2 Stop button (stop intent + seek 0), then seek 17.333 s and play elapsedMs=0
+2026-10-09T20:14:19.498+02:00 step begin: readahead-transitions: T2 observe after stop/restart
+2026-10-09T20:14:19.501+02:00   T2 stop/restart +4 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1025519
+2026-10-09T20:14:19.504+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:19.506+02:00   T2 after restart owned ids (0): 
+2026-10-09T20:14:19.511+02:00 step end ok: readahead-transitions: T2 observe after stop/restart elapsedMs=7
+2026-10-09T20:14:19.754+02:00 step begin: readahead-transitions: T3a seek to 39.0 s (right locator at 41.0 s)
+2026-10-09T20:14:19.761+02:00 step end ok: readahead-transitions: T3a seek to 39.0 s (right locator at 41.0 s) elapsedMs=0
+2026-10-09T20:14:20.978+02:00 step begin: readahead-transitions: T3a observe before the wrap
+2026-10-09T20:14:20.984+02:00   T3a seek +1.2 s (pre-wrap) | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1930880
+2026-10-09T20:14:20.988+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:20.992+02:00   T3a pre-wrap owned ids (0): 
+2026-10-09T20:14:20.997+02:00 step end ok: readahead-transitions: T3a observe before the wrap elapsedMs=10
+2026-10-09T20:14:25.524+02:00 step begin: readahead-transitions: T3b observe after the wrap
+2026-10-09T20:14:25.528+02:00   T3b wrap +4.5 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=180992
+2026-10-09T20:14:25.531+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:25.533+02:00   T3b post-wrap owned ids (0): 
+2026-10-09T20:14:25.535+02:00   T3b: playhead wrapped (cycle continued from the left locator)
+2026-10-09T20:14:25.540+02:00 step end ok: readahead-transitions: T3b observe after the wrap elapsedMs=9
+2026-10-09T20:14:25.781+02:00 step begin: readahead-transitions: T4 open mixer (F3 path) to reach the audio strip cells
+2026-10-09T20:14:25.848+02:00   mixer visible=yes
+2026-10-09T20:14:25.855+02:00 step end ok: readahead-transitions: T4 open mixer (F3 path) to reach the audio strip cells elapsedMs=67
+2026-10-09T20:14:27.385+02:00 step begin: readahead-transitions: T4 Monitor ON on the target row (strip cell click)
+2026-10-09T20:14:27.389+02:00   T4 before Monitor ON (mixer open) | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=270592
+2026-10-09T20:14:27.391+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:27.397+02:00 step end ok: readahead-transitions: T4 Monitor ON on the target row (strip cell click) elapsedMs=6
+2026-10-09T20:14:28.927+02:00 step begin: readahead-transitions: T4 observe Monitor ON
+2026-10-09T20:14:28.930+02:00   T4 Monitor ON +1.5 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=344320
+2026-10-09T20:14:28.933+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:28.936+02:00   T4 monitor on owned ids (0): 
+2026-10-09T20:14:28.938+02:00   T4: track 4 kind=audio name="Track 4" muted=no off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=ON inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-09T20:14:28.942+02:00 step end ok: readahead-transitions: T4 observe Monitor ON elapsedMs=10
+2026-10-09T20:14:29.181+02:00 step begin: readahead-transitions: T4 Monitor OFF on the target row
+2026-10-09T20:14:29.189+02:00 step end ok: readahead-transitions: T4 Monitor OFF on the target row elapsedMs=1
+2026-10-09T20:14:32.201+02:00 step begin: readahead-transitions: T4 observe Monitor OFF
+2026-10-09T20:14:32.204+02:00   T4 Monitor OFF +3 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=501504
+2026-10-09T20:14:32.207+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:32.209+02:00   T4 monitor off owned ids (0): 
+2026-10-09T20:14:32.212+02:00   T4: target re-adopted after Monitor OFF: no (slot taken by another eligible row or cooldown) ? informational
+2026-10-09T20:14:32.216+02:00 step end ok: readahead-transitions: T4 observe Monitor OFF elapsedMs=9
+2026-10-09T20:14:32.457+02:00 step begin: readahead-transitions: T5 Arm the same row (strip cell click)
+2026-10-09T20:14:32.463+02:00 step end ok: readahead-transitions: T5 Arm the same row (strip cell click) elapsedMs=0
+2026-10-09T20:14:35.466+02:00 step begin: readahead-transitions: T5 observe armed
+2026-10-09T20:14:35.471+02:00   T5 armed +3 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=658176
+2026-10-09T20:14:35.474+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:35.477+02:00   T5 armed owned ids (0): 
+2026-10-09T20:14:35.479+02:00   T5: row was owned at arm time: no; drainReleases=+0 discardResets=+0
+2026-10-09T20:14:35.483+02:00 step end ok: readahead-transitions: T5 observe armed elapsedMs=11
+2026-10-09T20:14:35.722+02:00 step begin: readahead-transitions: T5 wait with the row armed (must stay un-adopted)
+2026-10-09T20:14:35.729+02:00 step end ok: readahead-transitions: T5 wait with the row armed (must stay un-adopted) elapsedMs=0
+2026-10-09T20:14:38.742+02:00 step begin: readahead-transitions: T5 observe still armed, then disarm + close mixer
+2026-10-09T20:14:38.745+02:00   T5 armed +6 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=815360
+2026-10-09T20:14:38.747+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:38.761+02:00   T5: disarmed, mixer closed
+2026-10-09T20:14:38.767+02:00 step end ok: readahead-transitions: T5 observe still armed, then disarm + close mixer elapsedMs=19
+2026-10-09T20:14:40.783+02:00 step begin: readahead-transitions: T6a set insert #0 param 0 on up to two owned AmpliTube rows (so the reopen can check it)
+2026-10-09T20:14:40.788+02:00   T6a before param change | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=913664
+2026-10-09T20:14:40.791+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:40.793+02:00   T6a: track 4 insert#0 param0 := 0.370 (now reads 0.370) name="Param 1 (2096 params)"
+2026-10-09T20:14:40.795+02:00   T6a: track 11 insert#0 param0 := 0.630 (now reads 0.630) name="Param 1 (2096 params)"
+2026-10-09T20:14:40.800+02:00 step end ok: readahead-transitions: T6a set insert #0 param 0 on up to two owned AmpliTube rows (so the reopen can check it) elapsedMs=9
+2026-10-09T20:14:41.348+02:00 step begin: readahead-transitions: T6b Save while PLAYING (Ctrl+S path)
+2026-10-09T20:14:42.346+02:00   T6b: save requested at playhead 940800
+2026-10-09T20:14:42.352+02:00 step end ok: readahead-transitions: T6b Save while PLAYING (Ctrl+S path) elapsedMs=996
+2026-10-09T20:14:44.867+02:00 step begin: readahead-transitions: T6b observe after the playing save
+2026-10-09T20:14:44.871+02:00   T6b playing save +2.5 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1109760
+2026-10-09T20:14:44.875+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:44.878+02:00   T6b after save owned ids (0): 
+2026-10-09T20:14:44.880+02:00   T6b: file written, size=8409488 bytes
+2026-10-09T20:14:44.882+02:00   T6b: playhead advanced 3.53 s in ~2.5 s wall (cycle wrap can make this negative)
+2026-10-09T20:14:44.884+02:00   T6b: drained rows for the capture window: drainReleases=+0 (owned before: 0), re-adopted=+0
+2026-10-09T20:14:44.888+02:00 step end ok: readahead-transitions: T6b observe after the playing save elapsedMs=15
+2026-10-09T20:14:45.124+02:00 step begin: readahead-transitions: T6c pause, then Save while PAUSED
+2026-10-09T20:14:45.131+02:00 step end ok: readahead-transitions: T6c pause, then Save while PAUSED elapsedMs=0
+2026-10-09T20:14:46.152+02:00 step begin: readahead-transitions: T6c save (paused)
+2026-10-09T20:14:47.153+02:00 step end ok: readahead-transitions: T6c save (paused) elapsedMs=995
+2026-10-09T20:14:48.679+02:00 step begin: readahead-transitions: T6c observe paused save, then resume
+2026-10-09T20:14:48.682+02:00   T6c paused save +1.5 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=no playhead=1122048
+2026-10-09T20:14:48.687+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:48.689+02:00   T6c: file written while paused, size=8410025 bytes
+2026-10-09T20:14:48.691+02:00   T6c: drainReleases=+0 (model: paused save drains nothing; ownership kept)
+2026-10-09T20:14:48.695+02:00 step end ok: readahead-transitions: T6c observe paused save, then resume elapsedMs=11
+2026-10-09T20:14:51.743+02:00 step begin: readahead-transitions: T6c observe resumed after the paused save
+2026-10-09T20:14:51.746+02:00   T6c resumed +3 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1268480
+2026-10-09T20:14:51.749+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:51.751+02:00   T6c resumed owned ids (0): 
+2026-10-09T20:14:51.756+02:00 step end ok: readahead-transitions: T6c observe resumed after the paused save elapsedMs=7
+2026-10-09T20:14:51.998+02:00 step begin: readahead-transitions: T7 force autosave while playing (existing autosave mechanism)
+2026-10-09T20:14:52.002+02:00   T7 before autosave | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1280768
+2026-10-09T20:14:52.005+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:52.008+02:00   T7: dirtying edit (rename track 1) -> ok
+2026-10-09T20:14:52.700+02:00   T7: forceAutosaveNow -> true
+2026-10-09T20:14:52.704+02:00 step end ok: readahead-transitions: T7 force autosave while playing (existing autosave mechanism) elapsedMs=700
+2026-10-09T20:14:55.208+02:00 step begin: readahead-transitions: T7 observe after autosave
+2026-10-09T20:14:55.211+02:00   T7 autosave +2.5 s | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=yes playhead=1434880
+2026-10-09T20:14:55.214+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:55.216+02:00   T7 after autosave owned ids (0): 
+2026-10-09T20:14:55.222+02:00   T7: autosave file C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks-readahead-test_autosave.dalproj exists=yes size=8410527 ageSec=2.6
+2026-10-09T20:14:55.224+02:00   T7: drainReleases=+0 (owned before: 0) re-adopted=+0
+2026-10-09T20:14:55.229+02:00 step end ok: readahead-transitions: T7 observe after autosave elapsedMs=15
+2026-10-09T20:14:55.463+02:00 step begin: readahead-transitions: T8 stop playback (engine load + output summary for the whole run)
+2026-10-09T20:14:55.466+02:00   engine (since baseline): blocks=5182 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=1.114/2.217/14.563 budget%(mean/max)=20.8/136.5 nearOverruns(>70%)=0 overruns(>=100%)=1
+2026-10-09T20:14:55.469+02:00   output (since baseline): peakHold=0.759 oversL/R=0/0 nonFinite=0
+2026-10-09T20:14:55.471+02:00   T8 stopped | delta since previous step: adopted=+0 produced=+0 consumed=+0 missed=+0 staleDiscarded=+0 drainReleases=+0 discardResets=+0 missAbandons=+0 | playing=no playhead=1447168
+2026-10-09T20:14:55.473+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:14:55.477+02:00 step end ok: readahead-transitions: T8 stop playback (engine load + output summary for the whole run) elapsedMs=9
+2026-10-09T20:14:56.487+02:00 step begin: readahead-transitions: T8 write the reopen-check sidecar (baseline rows / chain identities / changed parameters)
+2026-10-09T20:14:56.499+02:00   T8: sidecar written C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks-readahead-test.readahead-check.txt (101 rows, 50 chains, 2 params)
+2026-10-09T20:14:56.505+02:00 step end ok: readahead-transitions: T8 write the reopen-check sidecar (baseline rows / chain identities / changed parameters) elapsedMs=11
+2026-10-09T20:14:56.845+02:00 step begin: readahead-transitions: summary
+2026-10-09T20:14:56.848+02:00   OBSERVATIONS total: 0 (each listed above as 'OBSERVATION:'; the PASS/FAIL verdict covers hard errors only)
+2026-10-09T20:14:56.851+02:00   next: run the same command with --reopen-check in a fresh process to verify the saved copy
+2026-10-09T20:14:56.856+02:00 step end ok: readahead-transitions: summary elapsedMs=5
+2026-10-09T20:14:57.100+02:00 RESULT: PASS scenario=readahead-transitions totalMs=106131
+2026-10-09T20:15:17.225+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
+2026-10-09T20:15:30.025+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-09T20:15:32.170+02:00 ================================================================
+2026-10-09T20:15:32.173+02:00 scenario start: readahead-transitions iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks.dalproj
+2026-10-09T20:15:32.175+02:00 steps queued: 5 (delete-loop iterations expand at plan time)
+2026-10-09T20:15:32.681+02:00 step begin: readahead-reopen-check: preconditions
+2026-10-09T20:15:32.685+02:00   reopen-check: copy=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks-pr7\TSE_pt2_100tracks-readahead-test.dalproj size=8410025 mtime=9 Oct 2026 8:14:46pm sidecar=TSE_pt2_100tracks-readahead-test.readahead-check.txt
+2026-10-09T20:15:32.690+02:00 step end ok: readahead-reopen-check: preconditions elapsedMs=3
+2026-10-09T20:15:32.989+02:00 step begin: readahead-reopen-check: load TSE_pt2_100tracks-readahead-test.dalproj
+2026-10-09T20:16:11.885+02:00 step end ok: readahead-reopen-check: load TSE_pt2_100tracks-readahead-test.dalproj elapsedMs=38889
+2026-10-09T20:16:11.930+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-09T20:16:13.329+02:00 step begin: readahead-reopen-check: verify loaded
+2026-10-09T20:16:13.333+02:00   track count after load: 101
+2026-10-09T20:16:13.338+02:00 step end ok: readahead-reopen-check: verify loaded elapsedMs=3
+2026-10-09T20:16:13.635+02:00 step begin: readahead-reopen-check: settle after load (plug-ins ready)
+2026-10-09T20:16:13.642+02:00 step end ok: readahead-reopen-check: settle after load (plug-ins ready) elapsedMs=0
+2026-10-09T20:16:21.668+02:00 step begin: readahead-reopen-check: compare with the sidecar
+2026-10-09T20:16:21.673+02:00   read-ahead: disabled (no --experimental-readahead)
+2026-10-09T20:16:21.677+02:00   reopen-check: track 4 insert#0 param0=0.000 expected 0.370 name="Param 1 (2096 params)" | track 4 kind=audio name="Track 4" muted=no off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=off inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-09T20:16:21.679+02:00   OBSERVATION: reopen-check: parameter set before the playing save not restored on track 4
+2026-10-09T20:16:21.681+02:00   reopen-check: track 11 insert#0 param0=0.000 expected 0.630 name="Param 1 (2096 params)" | track 11 kind=audio name="Track 4 — kopia 01" muted=no off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=off inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-09T20:16:21.683+02:00   OBSERVATION: reopen-check: parameter set before the playing save not restored on track 11
+2026-10-09T20:16:21.697+02:00   reopen-check: tracks=101 (before 101)
+2026-10-09T20:16:21.701+02:00   reopen-check: session rows compared=101 differing (routing/fader/pan/mute/clips/sends/inputs)=0
+2026-10-09T20:16:21.705+02:00   reopen-check: insert chains compared=50 identity/order/slot diffs=0 state-byte diffs=18 (2 expected from the deliberate parameter change; live plug-ins may re-serialize)
+2026-10-09T20:16:21.707+02:00   reopen-check: parameters compared=2 not restored=2
+2026-10-09T20:16:21.709+02:00   OBSERVATIONS total: 2
+2026-10-09T20:16:21.713+02:00 step end ok: readahead-reopen-check: compare with the sidecar elapsedMs=37
+2026-10-09T20:16:22.231+02:00 RESULT: PASS scenario=readahead-transitions totalMs=50061
+2026-10-09T20:16:42.306+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
