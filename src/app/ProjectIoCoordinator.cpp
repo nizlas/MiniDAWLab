@@ -80,6 +80,29 @@ namespace
         std::uint64_t loadGeneration_;
     };
 
+    /// Plugin-state capture window around every project write (Save, Save As, autosave): the
+    /// experimental read-ahead worker is quiesced — gapless drain while playing, acknowledged
+    /// pause otherwise — before `exportChain` reads `getStateInformation`, and resumed after
+    /// the file is written (docs/READAHEAD_PROTOTYPE.md §9). A no-op without the CLI flag.
+    class ScopedPluginStateCaptureWindow final
+    {
+    public:
+        explicit ScopedPluginStateCaptureWindow(PlaybackEngine& playbackEngine) noexcept
+            : playbackEngine_(playbackEngine)
+        {
+            playbackEngine_.beginPluginStateCaptureWindow();
+        }
+        ~ScopedPluginStateCaptureWindow() noexcept
+        {
+            playbackEngine_.endPluginStateCaptureWindow();
+        }
+        ScopedPluginStateCaptureWindow(const ScopedPluginStateCaptureWindow&) = delete;
+        ScopedPluginStateCaptureWindow& operator=(const ScopedPluginStateCaptureWindow&) = delete;
+
+    private:
+        PlaybackEngine& playbackEngine_;
+    };
+
     // First-time Save As: abort with a non-empty message if we cannot write without clobbering.
     [[nodiscard]] juce::String firstTimeSaveConflictMessage(const juce::File& projectFolder,
                                                             const juce::File& projectFile)
@@ -558,18 +581,22 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         }
         writeLastOperationBreadcrumb("project save start: "
                                      + session_.getCurrentProjectFile().getFullPathName());
-        const juce::Result r = session_.saveProjectToFile(
-            transport_,
-            session_.getCurrentProjectFile(),
-            sampleRate,
-            &pluginHost_,
-            ctlLookup,
-            snapRoot.enabled,
-            snapRoot.resolutionKey,
-            mainWinBounds,
-            midiEditorWinBounds,
-            midiEditorWorkspace,
-            trackRowHeights);
+        juce::Result r = juce::Result::ok();
+        {
+            const ScopedPluginStateCaptureWindow captureWindow(playbackEngine_);
+            r = session_.saveProjectToFile(
+                transport_,
+                session_.getCurrentProjectFile(),
+                sampleRate,
+                &pluginHost_,
+                ctlLookup,
+                snapRoot.enabled,
+                snapRoot.resolutionKey,
+                mainWinBounds,
+                midiEditorWinBounds,
+                midiEditorWorkspace,
+                trackRowHeights);
+        }
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
@@ -699,18 +726,22 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             trackRowHeights = callbacks_.getTrackRowHeightsForProjectSave();
         }
         writeLastOperationBreadcrumb("project save start: " + projectFile.getFullPathName());
-        const juce::Result r = session_.saveProjectToFile(
-            transport_,
-            projectFile,
-            sampleRate,
-            &pluginHost_,
-            ctlLookup,
-            snapRoot.enabled,
-            snapRoot.resolutionKey,
-            mainWinBounds,
-            midiEditorWinBounds,
-            midiEditorWorkspace,
-            trackRowHeights);
+        juce::Result r = juce::Result::ok();
+        {
+            const ScopedPluginStateCaptureWindow captureWindow(playbackEngine_);
+            r = session_.saveProjectToFile(
+                transport_,
+                projectFile,
+                sampleRate,
+                &pluginHost_,
+                ctlLookup,
+                snapRoot.enabled,
+                snapRoot.resolutionKey,
+                mainWinBounds,
+                midiEditorWinBounds,
+                midiEditorWorkspace,
+                trackRowHeights);
+        }
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
@@ -2060,18 +2091,24 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
     {
         trackRowHeights = callbacks_.getTrackRowHeightsForProjectSave();
     }
-    const juce::Result r = session_.saveProjectToFile(
-        transport_,
-        autosaveFile,
-        sampleRate,
-        &pluginHost_,
-        ctlLookup,
-        snapRoot.enabled,
-        snapRoot.resolutionKey,
-        mainWinBounds,
-        midiEditorWinBounds,
-        midiEditorWorkspace,
-        trackRowHeights);
+    juce::Result r = juce::Result::ok();
+    {
+        // Autosave uses the same bounded capture window as explicit saves: inaudible (gapless
+        // drain while playing), never a callback wait, bounded on the message thread.
+        const ScopedPluginStateCaptureWindow captureWindow(playbackEngine_);
+        r = session_.saveProjectToFile(
+            transport_,
+            autosaveFile,
+            sampleRate,
+            &pluginHost_,
+            ctlLookup,
+            snapRoot.enabled,
+            snapRoot.resolutionKey,
+            mainWinBounds,
+            midiEditorWinBounds,
+            midiEditorWorkspace,
+            trackRowHeights);
+    }
     session_.setCurrentProjectFile(normalProjectFile);
 
     const int elapsedMs = static_cast<int>(juce::Time::getMillisecondCounterHiRes() - t0 + 0.5);
