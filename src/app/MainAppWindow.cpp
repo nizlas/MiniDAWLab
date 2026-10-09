@@ -6998,6 +6998,14 @@ private:
             }
             return inst->getParameters()[0]->getValue();
         };
+        D.insertParam0Name = [this](const TrackId tid, const int i) -> juce::String {
+            juce::AudioPluginInstance* const inst = pluginHost_.liveInstanceAtChainIndexForDiagnostics(tid, i);
+            if (inst == nullptr || inst->getParameters().isEmpty())
+            {
+                return {};
+            }
+            return inst->getParameters()[0]->getName(64) + " (" + juce::String(inst->getParameters().size()) + " params)";
+        };
         D.addUnavailablePlaceholderInsert = [this](const TrackId tid, juce::String& failReason) -> bool {
             PluginTrackChain chain = pluginHost_.hasAnyInsertOnTrack(tid) ? pluginHost_.exportChain(tid) : PluginTrackChain{};
             PluginInsertDescriptor slot;
@@ -7535,6 +7543,40 @@ private:
                 s << " | " << rows;
             }
             return s;
+        };
+        P.readAheadCounters = [this]() -> StabilityRunnerHooks::PerfHooks::ReadAheadCountersView {
+            StabilityRunnerHooks::PerfHooks::ReadAheadCountersView v;
+            readahead::ReadAheadRenderer* const ra = playbackEngine_.experimentalReadAhead();
+            if (ra == nullptr)
+            {
+                return v;
+            }
+            const auto c = ra->countersSnapshot();
+            v.enabled = true;
+            v.depth = ra->depthBlocks();
+            v.adopted = c.adopted;
+            v.produced = c.producedSegments;
+            v.consumed = c.consumedSegments;
+            v.missed = c.missedSegments;
+            v.staleDiscarded = c.staleDiscarded;
+            v.drainReleases = c.drainReleases;
+            v.discardResets = c.discardResets;
+            v.missAbandons = c.missAbandons;
+            return v;
+        };
+        P.readAheadOwnedTrackIds = [this]() -> std::vector<TrackId> {
+            std::vector<TrackId> ids;
+            readahead::ReadAheadRenderer* const ra = playbackEngine_.experimentalReadAhead();
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            for (int i = 0; ra != nullptr && snap != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                const Track& t = snap->getTrack(i);
+                if (t.getKind() == TrackKind::Audio && ra->audioThread_isOwnedForRender(t.getId()))
+                {
+                    ids.push_back(t.getId());
+                }
+            }
+            return ids;
         };
         P.instrumentActivityText = [this]() -> juce::String {
             int live = 0, proxied = 0, idle = 0;
