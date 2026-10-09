@@ -1575,6 +1575,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         rbi.recording = recordRunCapturing || (recorder_ != nullptr && recorder_->isRecording());
         rbi.playbackShift = playbackOffsetSamples_.load(std::memory_order_acquire);
         rbi.arrangementEnd = sessionSnap != nullptr ? sessionSnap->getArrangementExtentSamples() : 0;
+        rbi.planUsable = rp != nullptr && !rp->sourceSteps.empty() && sessionSnap != nullptr;
         rbi.monitorView = monitorPtr;
         readAhead_->audioThread_beginBlock(rbi);
         if (sessionSnap != nullptr)
@@ -1617,13 +1618,15 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             {
                 continue;
             }
-            if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+            // Read-ahead-owned rows consume from their rings instead of taking a payload slot —
+            // checked BEFORE the monitor gate, because a monitored row that is still DRAINING
+            // keeps consuming its queue until the release (IDENTICAL gate order in the renderRun
+            // collection, the serial strip path and the sum loop).
+            if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
             {
                 continue;
             }
-            // Read-ahead-owned rows consume from their rings instead of taking a payload slot
-            // (IDENTICAL gate in the renderRun collection and the sum loop).
-            if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
+            if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
             {
                 continue;
             }
@@ -2415,11 +2418,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             {
                 continue;
             }
-            if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
-            {
-                continue;
-            }
             const TrackId tid = srcTr.getId();
+            // Owned BEFORE the monitor gate (identical order as the collection): a monitored row
+            // still DRAINING keeps consuming its queue until the gapless release.
             if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(tid))
             {
                 readahead::ReadAheadRenderer::ConsumeView rcv;
@@ -2439,6 +2440,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 {
                     readAhead_->audioThread_noteMiss(tid);
                 }
+                continue;
+            }
+            if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+            {
                 continue;
             }
             if (payloadCursor >= audioStripPayloadCount_)
@@ -2645,15 +2650,16 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 {
                     continue;
                 }
-                // Monitor ON: this track's clip playback (and its insert pass here) is replaced by
-                // the live-input monitoring pass in `mixInstrumentsAndFinalizeMaster`.
-                if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+                // Read-ahead-owned row: no live render — the sum loop consumes its ring block
+                // (or counts a miss). Checked BEFORE the monitor gate (a monitored row still
+                // DRAINING keeps consuming); IDENTICAL gate order as the activation pre-count.
+                if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
                 {
                     continue;
                 }
-                // Read-ahead-owned row: no live render — the sum loop consumes its ring block
-                // (or counts a miss). IDENTICAL gate as the activation pre-count.
-                if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
+                // Monitor ON: this track's clip playback (and its insert pass here) is replaced by
+                // the live-input monitoring pass in `mixInstrumentsAndFinalizeMaster`.
+                if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
                 {
                     continue;
                 }
@@ -2716,15 +2722,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 {
                     continue;
                 }
-                // Monitor ON: this track's clip playback (and its insert pass here) is replaced by
-                // the live-input monitoring pass in `mixInstrumentsAndFinalizeMaster`.
-                if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
-                {
-                    continue;
-                }
                 // Read-ahead-owned row on a serial-path block (e.g. payload overflow): consume
                 // the ring block inline at the row's position so the accumulation order matches
-                // the live path; a miss leaves the row silent this block (counted).
+                // the live path; a miss leaves the row silent this block (counted). BEFORE the
+                // monitor gate — a monitored row still DRAINING keeps consuming its queue.
                 if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
                 {
                     readahead::ReadAheadRenderer::ConsumeView rcv;
@@ -2742,6 +2743,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     {
                         readAhead_->audioThread_noteMiss(srcTr.getId());
                     }
+                    continue;
+                }
+                // Monitor ON: this track's clip playback (and its insert pass here) is replaced by
+                // the live-input monitoring pass in `mixInstrumentsAndFinalizeMaster`.
+                if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+                {
                     continue;
                 }
                 // Clear the stage region the strip WRITES ([destFrame, destFrame+audibleRun)):
