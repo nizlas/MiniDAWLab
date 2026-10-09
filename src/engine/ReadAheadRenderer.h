@@ -109,6 +109,9 @@ public:
         bool recording = false;    ///< recorder exists and is recording / capturing
         std::int64_t playbackShift = 0;
         std::int64_t arrangementEnd = 0;
+        /// False = no usable routing plan this block: the engine's plan-less fallback paths have
+        /// no owned-row skip, so ownership must discard-reset BEFORE any rendering decision.
+        bool planUsable = false;
         /// This block's monitored-track view (adopted rows must drain when monitored).
         const playback_mix_helpers::LiveInputMonitorSnapshot* monitorView = nullptr;
     };

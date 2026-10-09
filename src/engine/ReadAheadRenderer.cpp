@@ -165,7 +165,7 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
     }
 
     const bool force = fullResetRequested_.exchange(false, std::memory_order_acq_rel);
-    bool discontinuity = force || !info.playing;
+    bool discontinuity = force || !info.playing || !info.planUsable;
     if (info.playing)
     {
         if (haveExpectedT0_ && info.t0 != expectedT0_)
