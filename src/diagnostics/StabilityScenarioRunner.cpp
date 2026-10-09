@@ -9214,6 +9214,10 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                    + " proxySelected=" + juce::String(proxySelected)
                                    + " workingSet=" + perfMb(baseline->workingSetBytes)
                                    + " private=" + perfMb(baseline->privateBytes));
+                               if (hooks_.perf.readAheadText)
+                               {
+                                   say("read-ahead: " + hooks_.perf.readAheadText());
+                               }
                                return true;
                            },
                            juce::jmax(1000, measureSeconds * 1000) });
@@ -9259,6 +9263,10 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                if (hooks_.perf.renderPoolText)
                                {
                                    say("render pool: " + hooks_.perf.renderPoolText());
+                               }
+                               if (hooks_.perf.readAheadText)
+                               {
+                                   say("read-ahead: " + hooks_.perf.readAheadText());
                                }
                                say("process: cpu=" + juce::String(procCpuPctOfOneCore, 1) + "% of one core ("
                                    + juce::String(cores > 0 ? procCpuPctOfOneCore / (double)cores : 0.0, 1) + "% of " + juce::String(cores)

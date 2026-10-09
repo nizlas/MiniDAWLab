@@ -7480,6 +7480,62 @@ private:
             return s;
         };
         P.setGenerationSerial = [this](const bool serial) { playbackEngine_.setInstrumentRenderSerialForDiagnostics(serial); };
+        P.readAheadText = [this]() -> juce::String {
+            // Diagnostics only (docs/READAHEAD_PROTOTYPE.md §10): cumulative renderer counters plus a
+            // message-thread poll of which audio rows the renderer owns right now. The row-state
+            // reads are relaxed atomics; a row adopted or released during the walk may be listed
+            // one way or the other — fine for a log line, never used for any decision.
+            readahead::ReadAheadRenderer* const ra = playbackEngine_.experimentalReadAhead();
+            if (ra == nullptr)
+            {
+                return "disabled (no --experimental-readahead)";
+            }
+            const auto c = ra->countersSnapshot();
+            juce::String s;
+            s << "depth=" << ra->depthBlocks()
+              << " counters(cumulative): adopted=" << (juce::int64)c.adopted
+              << " produced=" << (juce::int64)c.producedSegments
+              << " consumed=" << (juce::int64)c.consumedSegments
+              << " missed=" << (juce::int64)c.missedSegments
+              << " staleDiscarded=" << (juce::int64)c.staleDiscarded
+              << " drainReleases=" << (juce::int64)c.drainReleases
+              << " discardResets=" << (juce::int64)c.discardResets
+              << " missAbandons=" << (juce::int64)c.missAbandons;
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            int audioRows = 0, owned = 0;
+            juce::String rows;
+            for (int i = 0; snap != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                const Track& t = snap->getTrack(i);
+                if (t.getKind() != TrackKind::Audio)
+                {
+                    continue;
+                }
+                ++audioRows;
+                if (!ra->audioThread_isOwnedForRender(t.getId()))
+                {
+                    continue;
+                }
+                ++owned;
+                rows << (rows.isEmpty() ? "" : "; ") << "#" << i << " id=" << (juce::int64)t.getId()
+                     << " \"" << t.getName() << "\" inserts=[";
+                bool first = true;
+                for (const InsertRowView& r : pluginHost_.getInsertRowsForTrack(t.getId()))
+                {
+                    rows << (first ? "" : ", ") << (r.stage == InsertStage::Pre ? "Pre:" : "Post:") << r.displayName
+                         << (r.unavailable ? "(unavailable)" : "");
+                    first = false;
+                }
+                rows << "]";
+            }
+            s << " | ownedNow=" << owned << " of audioRows=" << audioRows
+              << " (cap " << readahead::ReadAheadRenderer::kMaxRows << ")";
+            if (rows.isNotEmpty())
+            {
+                s << " | " << rows;
+            }
+            return s;
+        };
         P.instrumentActivityText = [this]() -> juce::String {
             int live = 0, proxied = 0, idle = 0;
             if (instrumentRuntimeCoordinator_ != nullptr)

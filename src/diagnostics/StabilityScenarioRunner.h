@@ -783,6 +783,10 @@ struct StabilityRunnerHooks
         std::function<juce::String()> renderPoolText;
         /// Force the serial generation path (`PlaybackEngine::setInstrumentRenderSerialForDiagnostics`).
         std::function<void(bool)> setGenerationSerial;
+        /// Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md): depth, cumulative counters and the
+        /// audio rows owned at the moment of the call with their insert chains. "disabled" without
+        /// the CLI flag. Diagnostics only (message-thread poll of the renderer's atomic row states).
+        std::function<juce::String()> readAheadText;
     };
     PerfHooks perf;
 
