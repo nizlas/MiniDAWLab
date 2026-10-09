@@ -167,3 +167,87 @@ Listen for: the first seconds after play (the measured warm-up misses), a fader 
 on an adopted row (documented late by up to 3 blocks, ~32 ms), monitor on an adopted guitar row,
 and one cycle wrap. The wrap was inside budget in the measurement; 10–11 AmpliTube chains are
 still live there.
+
+## Follow-up the same evening (priming, the two dumps, DAL Mono Delay)
+
+Still on `local/pr7-readahead-verification-2026-10-09`. Depth 3, cap 16 and timeline-order
+selection were not changed. Read-ahead stays experimental and off by default. Original project
+sha1 `3f585fc5f701` still unchanged after these runs.
+
+### Startup gaps
+
+The previous warm-up misses were not steady-state overload. `audioThread_beginBlock` promoted
+every `Scheduled` row to `Ahead` on the next block, and an empty ring was then a counted miss.
+Up to 16 rows were scheduled in one callback; the single worker cannot finish every first
+segment in the gap before that callback, so the rows it had not reached went silent and, after
+two misses, were abandoned. At 512 the worker keeps up once the set has settled, which is why
+the measured window itself had zero misses.
+
+A row now stays on the direct path until its first segment is queued. If the ring is empty and
+the worker has not entered the chain, the prime is declined (live render, no miss) and may be
+offered again. If the worker is already inside the plugin, the callback does not render that
+instance and does not wait; a segment that is still absent at consume is a counted miss. The
+steady-state miss/abandon policy for a row that is already ahead is unchanged.
+
+`ReadAheadPrototypeFocusedTests`: 170 checks, 0 failures, including a worker that never runs
+(every block audible, `missed=0`) and a real worker held off until it is inside the first
+plugin call (the sibling row stays live, `gOverlaps=0`). DAL Mono Delay save is a separate
+invocation of the same exe (`--mono-delay-save`), not part of that 170.
+
+### Same 100-track project, first Play included
+
+Exe rebuilt from this follow-up, SHA-256
+`18DC252C94C1D55B5EED539579F45D2EB1BAB4CB4C5FFB6359FDDC42C37CC3A1`.
+ASIO Fireface USB, 48 kHz, actual `buf 512`, Cubase closed. `--experimental-readahead`, warmup
+0, so the cumulative counters at the window start already include the blocks since Play.
+No new flag-off control: the flag-off path still constructs no read-ahead object.
+
+| | Passage, start 17.333 s, 19 s | Cycle wrap, start 35 s, 12 s |
+|---|---|---|
+| Counters at window start | adopted 42, produced 374, consumed 326, **missed 0, abandons 0** | adopted 16, produced 416, consumed 368, **missed 0, abandons 0** |
+| Counters at window end | adopted 42, produced 28998, consumed 28950, **missed 0, abandons 0** | adopted 16, produced 18485, consumed 18448, **missed 0, abandons 0** |
+| Owned | 16 (8 AmpliTube 4 + 8 insert-free Track 1 copies) | 16, same shape |
+| Callback mean/max | 2.107 / 3.850 ms (19.8 / 36.1% of 10.667 ms) | 1.847 / 9.312 ms (17.3 / 87.3%) |
+| Overruns / late starts | 0 / 0 | 0 / 0 (one block over 70% of budget, none at 100%) |
+| Transport | 843759 → 1759215, wall 19.07 s | 1692288 → 301312 (wrapped), wall 12.03 s |
+| Output | peak 0.757, overs 0, non-finite 0 | peak 0.568, overs 0, non-finite 0 |
+
+`adopted=42` against 16 owned rows is declined-and-reoffered primes, not misses. Both runs
+exited the scenario with RESULT PASS and then hit the known AmpliTube shutdown fault below.
+
+### The two dumps that had no module/offset
+
+Parsed with the minidump exception stream and the exe/PDB from the run that wrote them
+(SHA-256 `59406815…6A3525`, before this follow-up was linked). Both are access violations
+`0xC0000005`, faulting inside `AmpliTube 4.vpa` at offset `0x7675E`, parameter 0 = read.
+The host frames on the faulting thread are the same chain as the two dumps that already had
+a text report (pids 24656 and 38544):
+
+`VST3PluginInstance::~VST3PluginInstance` → `PluginInsertHost::releaseResources` →
+`PluginInsertHost::~PluginInsertHost` → `PlaybackEngine` destructor →
+`MiniDAWLabApplication::shutdown` → `WinMain`.
+
+No `ReadAheadRenderer` frame. Last operation on both is `app shutdown begin`. They are the
+known AmpliTube teardown fault, not a read-ahead lifetime bug. The missing `.txt` is the
+in-process report writer not finishing the metadata file; the dump already contained the
+exception record. This follow-up's two shutdowns (pids 20524 and 48772) wrote the text report
+as well, same module and offset `0x7675E`, same phase.
+
+### DAL Mono Delay save / reopen
+
+AmpliTube "Param 1" still reads back 0.000 after reopen in both the flagged run and the
+direct-path control from the earlier session, so that probe does not prove parameter restore.
+It was not investigated further.
+
+A one-audio-row project (not the original) loaded the installed DAL Mono Delay as a Pre
+insert with Sync off, delay time 250.0 ms, feedback 20.0%, mix 35.0%, both cuts off. With
+read-ahead on, the row was adopted (`produced>0`, `missed=0`, `missAbandons=0`) before the
+writes. Save while playing, save while paused, and the autosave bracket all go through
+`ScopedPluginStateCaptureWindow` + `Session::saveProjectToFile` — the same bracket
+`ProjectIoCoordinator::writeAutosaveNow` uses — and the autosave case restores the current
+project path afterwards. Each file was opened in a fresh process.
+
+All six files (read-ahead and direct, three writes each) restored the six parameters
+bit-for-bit on the normalized value and the plug-in's own text. An impulse through the
+reloaded insert peaked at sample 12000 (250.0 ms) with amplitude 0.350 (the 35% mix),
+within 0 samples of the expected delay, in every file.

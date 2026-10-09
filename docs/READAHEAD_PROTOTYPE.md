@@ -32,10 +32,24 @@ segments ahead and the callback can consume them by exact key.
 > **Invariant: exactly-once, contiguous segment stream per plugin instance** while a row is
 > owned. Every insert instance on a read-ahead row processes the audible segment sequence in
 > order, each segment exactly once, regardless of which thread rendered it or whether the
-> rendered output was ultimately played. Transitions either preserve this (gapless adoption,
-> gapless drain, pause/resume continuation) or are deliberate discontinuities with a bounded,
-> counted, documented state residue (seek, locator/cycle edits, monitor/record handover,
-> miss abandonment).
+> rendered output was ultimately played. Transitions either preserve this (adoption that
+> commits only once the first ahead segment is queued, gapless drain, pause/resume
+> continuation) or are deliberate discontinuities with a bounded, counted, documented state
+> residue (seek, locator/cycle edits, monitor/record handover, miss abandonment).
+
+**Priming.** Offering a row does not by itself take it off the direct path. The adoption
+block still renders live. The worker may start only after that block's join, and its first
+segment is the next block. At the next block begin:
+
+* the row becomes Ahead only when that segment is already queued (or the worker has already
+  fed the instance, so live-rendering it would play from the wrong time);
+* if the ring is empty and the worker has not entered the chain, the prime is **declined**:
+  this block renders live, nothing is counted as a miss, and the row may be offered again
+  later. Adoption must not invent a gap just because the worker has not delivered yet;
+* if the worker is already inside the plugin, the callback does not render that instance and
+  does not wait. A segment that lands before the strip pass is played and the row becomes
+  Ahead. A segment that is still absent is a counted miss — the same miss policy as any
+  other owned row, not a second owner and not hidden silence.
 
 Four distinct positions exist and are never conflated:
 
@@ -172,9 +186,12 @@ Cycle is supported, on the engine's own segmentation rules — no separate DSP p
 
 ## 7. Queue miss, recovery, and leaving the mode
 
-A miss (the audible stream needs a segment the ring cannot supply) contributes **silence for
-that row for that segment** — never a wait, never audio from a wrong position (exact-key
-consume), never concurrent processing. Every miss is counted. What happens next:
+A miss applies once a row is on the consume path (Ahead, or a prime whose worker has already
+entered the chain and whose segment is still absent). A declined prime is not a miss: the
+row never left the direct path. A miss (the audible stream needs a segment the ring cannot
+supply) contributes **silence for that row for that segment** — never a wait, never audio
+from a wrong position (exact-key consume), never concurrent processing. Every miss is
+counted. What happens next:
 
 * **Single miss:** ownership is retained; the consumer's expected sequence number advances,
   so the late result is discarded as stale when it appears and the stream stays aligned. A
