@@ -270,6 +270,8 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& track,
 /// generation stage (before inserts/fader/pan) so audition flows through the identical strip. The
 /// CALLER passes nullptr while the transport plays (audition is never layered over transport
 /// playback, PID-008) and during offline mixdown.
+/// Serial wrapper around `renderInstrumentPostStripToStereoScratchWithChainAccess` (resolves the
+/// entry and the host's shared buffers itself, callback lane).
 void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               const Track& track,
                                               float* stageL,
@@ -279,6 +281,26 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               PluginInsertHost* pluginHost,
                                               ExperimentalInstrumentHost* auditionHost = nullptr,
                                               const SoloMuteView* soloView = nullptr) noexcept;
+
+/// The ONE instrument-strip core body (Stage A2: serial path and render-pool jobs run exactly
+/// this code). Identical semantics to the serial wrapper: the stage segment is CLEARED first;
+/// an OFF track renders nothing; a MUTED track (or fader at 0) still lets the instrument host
+/// process (MIDI consumed, state follows transport) with the insert chain skipped. The caller
+/// owns `access` exclusively while the call runs; the chain's transport context must already be
+/// set for this block (jobs via `audioThread_setEntryTransportContext`, serial paths via
+/// `audioThread_setProcessTransportContext`). The instrument GENERATION stage must already have
+/// run for this block (`audioThread_renderGenerationStageForBlock`) or the host mix step will
+/// self-render (same contract as today's serial path).
+void renderInstrumentPostStripToStereoScratchWithChainAccess(
+    ExperimentalInstrumentHost* host,
+    const Track& track,
+    float* stageL,
+    float* stageR,
+    int destOutFrame0,
+    int numSamples,
+    const AudioStripInsertAccess& access,
+    ExperimentalInstrumentHost* auditionHost = nullptr,
+    const SoloMuteView* soloView = nullptr) noexcept;
 
 /// Group bus input scratch → post-channel-strip in `stageL`/`stageR` (replaces stage for segment).
 void applyBusPostChannelStripFromInputToStage(const Track& busTrack,

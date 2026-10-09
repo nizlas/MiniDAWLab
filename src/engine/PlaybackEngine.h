@@ -536,12 +536,56 @@ private:
     /// (same job code on the callback lane) — rows are NEVER dropped or split across modes.
     static constexpr int kMaxAudioStripJobs = 192;
 
+    // -----------------------------------------------------------------------
+    // Stage A2 — instrument generation + instrument-row strip combined into ONE job
+    // -----------------------------------------------------------------------
+    // On combine-active blocks (transport playing, pool present, buffers prepared) each eligible
+    // live-instrument row's job runs generation (`audioThread_renderGenerationStageForBlock`) and
+    // then the row's strip — Pre inserts, fader/mute, Post inserts, pan — into the row's OWN
+    // stage buffer, in the SAME batch as the Stage A1 audio strip jobs (still one dispatch/join
+    // per device block). The callback consumes the finished stage in the unchanged MIX ORDER row
+    // loop (meter fold + dry-bus/send fan) and must NOT run that row's strip again. Rows that
+    // stay serial by design: proxy-selected hosts (never start Primary from a job), additional
+    // rows sharing an already-claimed host (one generation per instance, strips fan serially),
+    // audition hosts (exist only while stopped — combine never active), payload/job overflow.
+
+    /// One instrument row's combined generation + strip job. Same lifetime rules as
+    /// `AudioStripJobPayload`: everything referenced is retained by the callback past the join.
+    struct InstrumentStripJobPayload
+    {
+        PlaybackEngine* engine = nullptr;
+        const SessionSnapshot* sessionSnap = nullptr;
+        const SoloMuteView* soloView = nullptr;
+        /// Resolved insert chain (null = row has none). Points into the block's acquired map.
+        const PluginAudioThreadMap::Entry* chainEntry = nullptr;
+        ExperimentalInstrumentHost* host = nullptr;
+        float* stageL = nullptr; ///< this job's OWN stage buffer (block capacity)
+        float* stageR = nullptr;
+        int trackIndex = -1;
+        int numSamples = 0;
+        /// Whole-block context at the callback's t0 — the same PositionInfo the serial path
+        /// presents instrument chains via `setInsertProcessContext(t0)` (never segmented).
+        PluginProcessTransportContext insertContext;
+    };
+
+    /// Preallocated combined-job slots. More eligible instrument rows than this = the overflow
+    /// rows keep a generation-only job and their strip runs serially in the MIX ORDER loop
+    /// (exactly today's path) — rows are NEVER dropped or double-processed.
+    static constexpr int kMaxInstrumentStripJobs = 64;
+
     /// [Render-pool job entry] Runs `audioThread_runAudioStripPayload` on the claiming lane.
     static void runAudioStripRenderJob(instrument_render::RenderJob& job, int laneIndex) noexcept;
     /// [One job thread per payload, or the callback lane serially] Render the payload's clip
     /// segments + strip into its own stage buffer using the lane's exclusive chain scratch /
     /// MIDI scratch. No allocation, no locks, no shared-bus writes.
     void audioThread_runAudioStripPayload(AudioStripJobPayload& payload, int laneIndex) noexcept;
+    /// [Render-pool job entry] Runs `audioThread_runInstrumentStripPayload` on the claiming lane.
+    static void runInstrumentStripRenderJob(instrument_render::RenderJob& job, int laneIndex) noexcept;
+    /// [One job thread per payload, or the callback lane serially] Generation stage for the
+    /// payload's host, then the instrument strip core into the payload's own stage buffer using
+    /// the lane's exclusive chain scratch / MIDI scratch. No allocation, no locks, no shared-bus
+    /// writes, never a proxy-selected host (collection keeps those on the serial path).
+    void audioThread_runInstrumentStripPayload(InstrumentStripJobPayload& payload, int laneIndex) noexcept;
     /// [Message thread, device stopped] Pre-size the per-job stage buffers, per-lane insert
     /// scratch and per-lane MIDI scratch for the device block size.
     void ensureAudioStripJobBuffersCapacity(int numSamples) noexcept;
@@ -552,6 +596,12 @@ private:
     /// Per-job stage buffers: channels 2k / 2k+1 belong to payload k.
     juce::AudioBuffer<float> audioStripStageBuffer_;
     int audioStripStageCapacity_ = 0;
+    /// Stage A2 combined instrument jobs for the current block (same per-block lifetime rules).
+    std::array<InstrumentStripJobPayload, kMaxInstrumentStripJobs> instrumentStripPayloads_{};
+    int instrumentStripPayloadCount_ = 0; ///< [audio thread] valid for the current block only
+    /// Per-job stage buffers: channels 2k / 2k+1 belong to combined instrument payload k.
+    juce::AudioBuffer<float> instrumentStripStageBuffer_;
+    int instrumentStripStageCapacity_ = 0;
     /// Per-LANE insert chain scratch + MIDI scratch (lane = render-pool worker index, last lane =
     /// callback). A job runs entirely on one lane, so these are exclusive while it runs.
     juce::AudioBuffer<float> insertLaneScratch_;

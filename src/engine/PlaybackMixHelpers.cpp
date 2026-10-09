@@ -1032,6 +1032,39 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               ExperimentalInstrumentHost* auditionHost,
                                               const SoloMuteView* const soloView) noexcept
 {
+    // Serial wrapper: resolve the chain entry and the host's shared buffers, then run the same
+    // strip core the render-pool jobs run (one DSP implementation, Stage A2).
+    AudioStripInsertAccess access;
+    std::shared_ptr<const PluginAudioThreadMap> map; // keeps the entry alive for this call
+    if (pluginHost != nullptr)
+    {
+        map = pluginHost->audioThread_acquireMapForBlock();
+        if (map != nullptr)
+        {
+            access.host = pluginHost;
+            access.entry = PluginInsertHost::audioThread_findEntry(*map, track.getId());
+            access.chainScratch = pluginHost->audioThread_getScratchWritePointers();
+            access.chainScratchCapacity = pluginHost->audioThread_sharedChainScratchCapacity();
+            access.chainMidiScratch = &pluginHost->audioThread_sharedChainMidiScratch();
+            access.laneIndex = PluginInsertHost::kCallbackProcessingLane;
+        }
+    }
+    renderInstrumentPostStripToStereoScratchWithChainAccess(host, track, stageL, stageR,
+                                                            destOutFrame0, numSamples, access,
+                                                            auditionHost, soloView);
+}
+
+void renderInstrumentPostStripToStereoScratchWithChainAccess(
+    ExperimentalInstrumentHost* host,
+    const Track& track,
+    float* stageL,
+    float* stageR,
+    const int destOutFrame0,
+    const int numSamples,
+    const AudioStripInsertAccess& access,
+    ExperimentalInstrumentHost* auditionHost,
+    const SoloMuteView* const soloView) noexcept
+{
     if (host == nullptr || numSamples <= 0 || stageL == nullptr || stageR == nullptr)
     {
         return;
@@ -1048,15 +1081,17 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
     const float storedFaderGain = track.getChannelFaderGain();
     const float effectiveGain = effectiveMuted ? 0.0f : juce::jmax(0.0f, storedFaderGain);
 
-    const TrackId trackId = track.getId();
-    const bool useInsert
-        = pluginHost != nullptr && pluginHost->audioThread_hasActivePluginForTrack(trackId);
+    // Same gate as `audioThread_hasActivePluginForTrack`, resolved on the caller's entry.
+    const bool useInsert = access.host != nullptr && access.entry != nullptr
+                           && PluginInsertHost::audioThread_entryHasActiveSlot(*access.entry);
 
     if (useInsert && effectiveGain > 0.0f)
     {
-        pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, numSamples);
-        if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+        if (access.buffersUsable())
         {
+            float* const* scratch = access.chainScratch;
+            clearStereoScratch(scratch[0], scratch[1],
+                               juce::jmin(numSamples, access.chainScratchCapacity));
             mixExperimentalInstrumentAfterTracks(
                 host, scratch, 2, numSamples, 1.0f, kTrackStereoPanCenter);
             if (auditionHost != nullptr && auditionHost != host)
@@ -1065,14 +1100,21 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                 mixExperimentalInstrumentAfterTracks(
                     auditionHost, scratch, 2, numSamples, 1.0f, kTrackStereoPanCenter);
             }
-            pluginHost->audioThread_processChainForTrack(trackId, InsertStage::Pre, numSamples);
+            access.host->audioThread_processEntryChain(*access.entry, InsertStage::Pre, numSamples,
+                                                       scratch, access.chainScratchCapacity,
+                                                       *access.chainMidiScratch, access.laneIndex);
             scaleStereoScratch(scratch, numSamples, effectiveGain);
-            pluginHost->audioThread_processChainForTrack(trackId, InsertStage::Post, numSamples);
+            access.host->audioThread_processEntryChain(*access.entry, InsertStage::Post, numSamples,
+                                                       scratch, access.chainScratchCapacity,
+                                                       *access.chainMidiScratch, access.laneIndex);
             multiplyStereoScratchLR(scratch,
                                     numSamples,
                                     trackPanLawGainLeft(track.getStereoPan()),
                                     trackPanLawGainRight(track.getStereoPan()));
-            addStereoScratchToStereoScratch(
+            // Chain data lives at scratch[0, numSamples): add it at the stage's destination
+            // offset (dest-offset-only — see `addChainScratchToStageAtDest`; all current callers
+            // pass destOutFrame0 == 0, identical to the legacy source-and-dest-offset add).
+            addChainScratchToStageAtDest(
                 stageL, stageR, scratch[0], scratch[1], destOutFrame0, numSamples);
         }
         return;
