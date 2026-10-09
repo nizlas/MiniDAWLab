@@ -1,5 +1,6 @@
 // =============================================================================
-// AudioStripParallelFocusedTests — Stage A1: parallel audio-row channel strips
+// AudioStripParallelFocusedTests — Stage A1 (parallel audio-row channel strips)
+//                                + Stage A2 (combined instrument generation + strip jobs)
 // =============================================================================
 // Drives the PRODUCTION PlaybackEngine callback (stub device geometry) with the transport PLAYING
 // over deterministic audio clips, REAL PluginInsertHost chains carrying deterministic test insert
@@ -18,6 +19,17 @@
 //   * the capacity limit (> kMaxAudioStripJobs rows) falls back to the SERIAL strip path without
 //     dropping any row; `--instrument-workers 0` renders through the same job code serially;
 //   * the shared strip helpers still serve the OFFLINE mixdown path (bit-equal to realtime).
+// Stage A2 additions:
+//   * instrument rows with Pre+Post inserts render serial/parallel bit-identically; their chains
+//     always see the FULL device block at the callback's position (never clip segmentation), the
+//     wrap block included;
+//   * a MUTED instrument row still generates (host processes) while its chain is skipped; an OFF
+//     instrument row processes nothing;
+//   * two rows published against ONE host instance: exactly one generation per block (one job),
+//     both rows' strips fan exactly once (second row on the documented serial exception);
+//   * more instrument rows than combined-payload slots: overflow rows keep generation-only jobs +
+//     serial strips — every row exactly once, serial/parallel identical;
+//   * instrument-row chain swaps join the A1 stress (publish-before-destroy under running jobs).
 // Device-free (stub geometry), deterministic, no file I/O.
 // =============================================================================
 
@@ -376,6 +388,17 @@ public:
     return std::make_shared<const AudioClip>(std::move(buf), kRate, "test-const");
 }
 
+/// Placeholder controller (same convention as InstrumentParallelFocusedTests): the stubs at the
+/// bottom of this file are no-ops, and the members the PLAY-edge diagnostics read through it
+/// (domain TrackId, atomic render-snapshot pointer) see zero-initialized storage (= invalid id /
+/// null snapshot). The storage must cover the WHOLE object: a too-small array makes those reads
+/// hit adjacent statics (observed: an atomic shared_ptr load spinning forever on a garbage bit).
+[[nodiscard]] InstrumentTrackController* placeholderController()
+{
+    static std::uint64_t storage[(sizeof(InstrumentTrackController) + 7) / 8 + 8] = {};
+    return reinterpret_cast<InstrumentTrackController*>(storage);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Harness: Session + Transport + PluginInsertHost + PlaybackEngine; the "device" is the test
 // calling the production callback. Audio rows carry deterministic clips; insert instances are
@@ -401,6 +424,15 @@ struct Harness
 
     Harness() : engine(transport, session, nullptr, nullptr, &pluginHost)
     {
+        // Production wiring (Main.cpp, Stability Slice 3): after the host publishes a realtime map
+        // that dropped live instances, DRAIN the in-flight callback before they are destroyed.
+        // Without this hook `removePlugin` destroys immediately after the publish, racing any
+        // in-flight job that still holds the old map's entry (the combined A2 jobs widened that
+        // window enough for the stress to hit it; the protection under test is the production
+        // publish → drain → destroy sequence, so the harness must model it).
+        pluginHost.setRealtimeDrainAfterPublish([this] {
+            (void)engine.waitForAudioCallbackExit(250.0);
+        });
         engine.setExperimentalInstrumentDeviceLifecycleHooks(
             [this](const double sr, const int bs) {
                 for (auto& r : instRows) { if (r.host) { r.host->prepareForDevice(sr, bs); } }
@@ -470,15 +502,6 @@ struct Harness
         {
             return;
         }
-        // Placeholder controller (same convention as InstrumentParallelFocusedTests): the stubs at
-        // the bottom of this file are no-ops, and the members the PLAY-edge diagnostics read
-        // through it (domain TrackId, atomic render-snapshot pointer) see zero-initialized storage
-        // (= invalid id / null snapshot). The storage must cover the WHOLE object: a too-small
-        // array makes those reads hit adjacent statics (observed: an atomic shared_ptr load
-        // spinning forever on a garbage lock bit).
-        static std::uint64_t placeholderControllerStorage[(sizeof(InstrumentTrackController) + 7) / 8 + 8] = {};
-        auto* const placeholderController
-            = reinterpret_cast<InstrumentTrackController*>(placeholderControllerStorage);
         std::vector<ExperimentalInstrumentPlaybackEntry> entries;
         for (size_t i = 0; i < instRows.size(); ++i)
         {
@@ -487,7 +510,7 @@ struct Harness
                 continue;
             }
             entries.push_back(ExperimentalInstrumentPlaybackEntry{ instRows[i].tid, instRows[i].host.get(),
-                                                                   placeholderController, nullptr });
+                                                                   placeholderController(), nullptr });
         }
         engine.publishExperimentalInstrumentPlaybackSnapshot(
             std::make_shared<const ExperimentalInstrumentPlaybackSnapshot>(
@@ -589,10 +612,13 @@ private:
     return n;
 }
 
-/// Mixed fixture shared by several tests: 8 audio rows + 2 instrument rows.
-///   row0: plain; row1: MUTED with a Post insert; row2: OFF with a Pre insert; row3: Pre+Post
+/// Mixed fixture shared by several tests: 8 audio rows + 4 instrument rows.
+/// Audio: row0: plain; row1: MUTED with a Post insert; row2: OFF with a Pre insert; row3: Pre+Post
 ///   inserts (stateful Pre — order/continuity sensitive); row4: pan −0.6, fader 0.5;
 ///   row5: routed to a Group; row6: send → Group (0.4); row7: plain, second noise lane.
+/// Instruments (Stage A2 — combined generation + strip jobs): inst0: Pre+Post inserts (stateful
+///   Pre); inst1: routed to the Group + send → Group (0.3); inst2: MUTED with a Post insert (host
+///   must keep generating, chain skipped); inst3: OFF with a Pre insert (nothing processes).
 struct MixedFixture
 {
     Harness h;
@@ -601,6 +627,12 @@ struct MixedFixture
     TestInsertEffect* offRowInsert = nullptr;
     TestInsertEffect* preInsert = nullptr;
     TestInsertEffect* postInsert = nullptr;
+    TestInsertEffect* instPreInsert = nullptr;
+    TestInsertEffect* instPostInsert = nullptr;
+    TestInsertEffect* mutedInstInsert = nullptr;
+    TestInsertEffect* offInstInsert = nullptr;
+    /// Instrument rows that generate while playing (inst0..inst2; the OFF row never processes).
+    static constexpr int kLiveInstrumentRows = 3;
 
     explicit MixedFixture(const int instrumentBusy = 60000)
     {
@@ -631,14 +663,40 @@ struct MixedFixture
         h.session.setTrackChannelFaderGain(groupTid, 0.7f);
         h.addInstrumentRow(instrumentBusy, 52);
         h.addInstrumentRow(instrumentBusy, 59);
+        h.addInstrumentRow(instrumentBusy, 64);
+        h.addInstrumentRow(instrumentBusy, 45);
+        const bool iRouted = h.session.setTrackRoutedOutput(h.instRows[1].tid, groupTid);
+        const bool iSent = h.session.insertTrackSend(h.instRows[1].tid, 0, groupTid, 0.3f);
+        jassert(iRouted && iSent);
+        juce::ignoreUnused(iRouted, iSent);
+        h.session.setTrackMuted(h.instRows[2].tid, true);
+        h.session.setTrackOff(h.instRows[3].tid, true);
         h.finishSetup();
         mutedRowInsert = h.installInsert(h.audioTids[1], InsertStage::Post, 0.5f, false);
         offRowInsert = h.installInsert(h.audioTids[2], InsertStage::Pre, 0.5f, false);
         preInsert = h.installInsert(h.audioTids[3], InsertStage::Pre, 0.8f, true);
         postInsert = h.installInsert(h.audioTids[3], InsertStage::Post, 0.9f, false);
+        instPreInsert = h.installInsert(h.instRows[0].tid, InsertStage::Pre, 0.8f, true);
+        instPostInsert = h.installInsert(h.instRows[0].tid, InsertStage::Post, 0.9f, false);
+        mutedInstInsert = h.installInsert(h.instRows[2].tid, InsertStage::Post, 0.5f, false);
+        offInstInsert = h.installInsert(h.instRows[3].tid, InsertStage::Pre, 0.5f, false);
         h.noteOnAll();
     }
 };
+
+/// All recorded chain calls of `fx` processed a FULL device block (instrument chains must never
+/// see clip segmentation — the strip presents the host's complete block at the callback's t0).
+[[nodiscard]] bool allCallsFullBlock(const TestInsertEffect* fx)
+{
+    for (int i = 0; i < fx->callCount(); ++i)
+    {
+        if (fx->call(i).numSamples != kBlock)
+        {
+            return false;
+        }
+    }
+    return fx->callCount() > 0;
+}
 
 // ---------------------------------------------------------------------------------------------
 void testSerialVsParallelIdenticalMixedSession()
@@ -663,13 +721,16 @@ void testSerialVsParallelIdenticalMixedSession()
     expect(statsB.parallelBlocks > 0, "parallel: blocks were dispatched to the pool");
     expect(statsB.jobsRunByWorkers > 0, "parallel: worker threads ran jobs");
     // ONE combined batch per playing block: one strip job per audio row (muted + Off rows included
-    // as trivial/gated jobs; the default session's empty row too) + 2 instrument generation jobs.
-    // The stop-edge callback after the loop dispatches the 2 instrument jobs once more (legacy
-    // dispatch site — no audio collection while stopped).
-    const std::uint64_t jobsPerBlock = (std::uint64_t)countAudioRows(b.h) + 2;
+    // as trivial/gated jobs; the default session's empty row too) + one COMBINED job per live
+    // instrument row (A2: generation + strip — replaces the generation job 1:1, so the job count
+    // is unchanged; the OFF instrument row gets no job). The stop-edge callback after the loop
+    // dispatches the live instruments' generation-only jobs once more (legacy dispatch site — no
+    // collection while stopped).
+    const std::uint64_t jobsPerBlock
+        = (std::uint64_t)countAudioRows(b.h) + MixedFixture::kLiveInstrumentRows;
     expect(statsB.jobsRunByCallback + statsB.jobsRunByWorkers
-               == (std::uint64_t)kBlocks * jobsPerBlock + 2,
-           "parallel: exactly one combined batch per playing block (all audio rows + 2 instruments)");
+               == (std::uint64_t)kBlocks * jobsPerBlock + MixedFixture::kLiveInstrumentRows,
+           "parallel: exactly one combined batch per playing block (audio rows + live instruments)");
 
     expect(peakOf(outSerial) > 0.01, "fixture produces audible output");
     const double diff = maxAbsDiff(outSerial, outParallel);
@@ -685,11 +746,40 @@ void testSerialVsParallelIdenticalMixedSession()
                "live row's Pre and Post inserts processed every playing block");
         expect(f->preInsert->samplesProcessed() == (std::uint64_t)kBlocks * kBlock,
                "live row's Pre insert covered exactly every playing sample (no dup/loss)");
-        for (const auto& r : f->h.instRows)
+        // A2: live instruments generate exactly once per callback — kBlocks combined jobs + the
+        // stop-edge legacy generation (idempotent per block; never a second processBlock).
+        for (int i = 0; i < MixedFixture::kLiveInstrumentRows; ++i)
         {
-            expect(r.instrument != nullptr && r.instrument->blocksProcessed.load() > 0,
-                   "instrument generated in the same combined batch");
+            const auto& r = f->h.instRows[(size_t)i];
+            expect(r.instrument != nullptr
+                       && r.instrument->blocksProcessed.load() == (std::uint64_t)kBlocks + 1,
+                   "live instrument generated exactly once per callback (combined batch + stop edge)");
         }
+        // A2: the instrument row's Pre+Post chains process the FULL block every callback (kBlocks
+        // combined jobs + the stop-edge serial strip) — never clip segmentation, no dup/loss.
+        expect(allCallsFullBlock(f->instPreInsert) && allCallsFullBlock(f->instPostInsert),
+               "instrument chain always processed FULL device blocks (no segmentation)");
+        expect(f->instPreInsert->samplesProcessed() == (std::uint64_t)(kBlocks + 1) * kBlock
+                   && f->instPostInsert->samplesProcessed() == (std::uint64_t)(kBlocks + 1) * kBlock,
+               "instrument Pre and Post chains covered every callback's samples exactly once");
+        // A2: the combined job presents the chain the callback's t0 — the playing blocks' calls
+        // advance by exactly one block per callback (same PositionInfo sequence as the serial path).
+        {
+            bool positionsOk = f->instPreInsert->callCount() >= kBlocks;
+            for (int c = 0; positionsOk && c < kBlocks; ++c)
+            {
+                positionsOk = f->instPreInsert->call(c).timeInSamples == (std::int64_t)c * kBlock;
+            }
+            expect(positionsOk,
+                   "instrument chain saw the callback's block position every playing block");
+        }
+        expect(f->h.instRows[2].instrument->blocksProcessed.load() > 0,
+               "MUTED instrument row: host still generated (MIDI consumed, state follows transport)");
+        expect(f->mutedInstInsert->callCount() == 0,
+               "MUTED instrument row: chain never processed (gain-0 skip preserved)");
+        expect(f->h.instRows[3].instrument->blocksProcessed.load() == 0,
+               "OFF instrument row: host never processed");
+        expect(f->offInstInsert->callCount() == 0, "OFF instrument row: chain never processed");
     }
     expect(gOverlaps.load() == 0, "no insert or instrument instance ever processed concurrently");
     expect(gInstrumentDoubleProcess.load() == 0, "no instrument processed twice in one block");
@@ -705,8 +795,11 @@ void testWorkersZeroSameJobCode()
     const std::vector<float> outZero = z.h.runPlayingBlocks(kBlocks, /*serialHint*/ false);
     const auto st = z.h.engine.instrumentRenderPoolStats();
     expect(st.parallelBlocks == 0 && st.serialBlocks > 0, "override 0: every batch ran serially");
-    const std::uint64_t jobsPerBlock = (std::uint64_t)countAudioRows(z.h) + 2;
-    expect(st.jobsRunByCallback == (std::uint64_t)kBlocks * jobsPerBlock + 2 && st.jobsRunByWorkers == 0,
+    const std::uint64_t jobsPerBlock
+        = (std::uint64_t)countAudioRows(z.h) + MixedFixture::kLiveInstrumentRows;
+    expect(st.jobsRunByCallback
+                   == (std::uint64_t)kBlocks * jobsPerBlock + MixedFixture::kLiveInstrumentRows
+               && st.jobsRunByWorkers == 0,
            "override 0: ALL jobs of every block ran on the callback lane through the job code");
 
     instrument_render::setConfiguredWorkerCountOverride(4);
@@ -723,30 +816,58 @@ void testCycleWrapSegments()
     constexpr std::int64_t kLocR = 3000; // span 2000; from 0 the wrap block is [2560,3072): 440 + 72
     constexpr int kBlocks = 40;          // several wraps
 
-    const auto buildCycleHarness = [](Harness& h, TestInsertEffect** fxOut) {
+    const auto buildCycleHarness = [](Harness& h, TestInsertEffect** fxOut,
+                                      TestInsertEffect** instFxOut) {
         constexpr int kClipLen = kBlock * 64;
         h.addAudioTrackWithClip(makeNoiseClip(11, kClipLen)); // dry row (clip-content ground truth)
         h.addAudioTrackWithClip(makeNoiseClip(22, kClipLen)); // insert row (playhead + coverage)
+        // A2: an instrument row in the same cycling batch — its combined job must present the
+        // chain the FULL block at the callback's t0 even when the AUDIO rows split at the wrap.
+        h.addInstrumentRow(2000, 57);
         h.session.setLeftLocatorAtSample(kLocL);
         h.session.setRightLocatorAtSample(kLocR);
         h.transport.requestCycleEnabled(true);
         h.finishSetup();
         *fxOut = h.installInsert(h.audioTids[1], InsertStage::Pre, 0.7f, true);
+        *instFxOut = h.installInsert(h.instRows[0].tid, InsertStage::Pre, 0.6f, true);
+        h.noteOnAll();
     };
 
     Harness hs;
     TestInsertEffect* fxS = nullptr;
-    buildCycleHarness(hs, &fxS);
+    TestInsertEffect* instFxS = nullptr;
+    buildCycleHarness(hs, &fxS, &instFxS);
     const std::vector<float> outSerial = hs.runPlayingBlocks(kBlocks, /*serialHint*/ true);
 
     Harness hp;
     TestInsertEffect* fxP = nullptr;
-    buildCycleHarness(hp, &fxP);
+    TestInsertEffect* instFxP = nullptr;
+    buildCycleHarness(hp, &fxP, &instFxP);
     const std::vector<float> outParallel = hp.runPlayingBlocks(kBlocks, /*serialHint*/ false);
 
     expect(peakOf(outSerial) > 0.01, "cycle fixture produces audible output");
     expect(maxAbsDiff(outSerial, outParallel) == 0.0,
            "cycle: serial-hint and parallel output bit-identical across all wraps (stateful insert)");
+
+    // A2: the instrument chain is NEVER segmented by the wrap — one full-block call per callback,
+    // and the wrap block's call sits at the block's t0 (2560) while the AUDIO chain in the same
+    // block saw the 440/72 split (checked below).
+    for (TestInsertEffect* instFx : { instFxS, instFxP })
+    {
+        expect(allCallsFullBlock(instFx),
+               "cycle: instrument chain always processed FULL blocks (never the 440/72 split)");
+        bool sawWrapBlockCall = false;
+        for (int i = 0; i < instFx->callCount(); ++i)
+        {
+            if (instFx->call(i).timeInSamples == 2560 && instFx->call(i).numSamples == kBlock)
+            {
+                sawWrapBlockCall = true;
+                break;
+            }
+        }
+        expect(sawWrapBlockCall,
+               "cycle: instrument chain saw the wrap block at its callback position (t0=2560)");
+    }
 
     // Per-segment playhead context + exact coverage on the first wrap block ([2560,3072) → 440 at
     // t=2560, then 72 at t=1000). The insert chain must see BOTH segment positions in order.
@@ -886,6 +1007,136 @@ void testCapacityFallbackNeverDropsRows()
     expect(worstRel < 1.0e-4, "over-capacity serial fallback rendered ALL 200 rows (none dropped)");
 }
 
+void testSharedHostTwoRowsSingleGeneration()
+{
+    std::printf("\n-- A2: two rows on ONE host instance — one generation job, both strips exactly once --\n");
+    instrument_render::setConfiguredWorkerCountOverride(4);
+    constexpr int kBlocks = 16;
+
+    const auto build = [](Harness& h) {
+        h.addAudioTrackWithClip(makeNoiseClip(5, kBlock * 64));
+        (void)h.addInstrumentRow(60000, 52); // owns the shared host
+        (void)h.addInstrumentRow(-1, 0);     // second ROW — published against row 0's host below
+        h.finishSetup();
+        std::vector<ExperimentalInstrumentPlaybackEntry> entries;
+        entries.push_back(ExperimentalInstrumentPlaybackEntry{ h.instRows[0].tid,
+                                                               h.instRows[0].host.get(),
+                                                               placeholderController(), nullptr });
+        entries.push_back(ExperimentalInstrumentPlaybackEntry{ h.instRows[1].tid,
+                                                               h.instRows[0].host.get(),
+                                                               placeholderController(), nullptr });
+        h.engine.publishExperimentalInstrumentPlaybackSnapshot(
+            std::make_shared<const ExperimentalInstrumentPlaybackSnapshot>(
+                ExperimentalInstrumentPlaybackSnapshot{ std::move(entries) }));
+        h.instRows[0].host->enqueueMidiMessageFromMessageThread(
+            juce::MidiMessage::noteOn(1, 52, (juce::uint8)100));
+    };
+
+    Harness hs;
+    build(hs);
+    const std::vector<float> outSerial = hs.runPlayingBlocks(kBlocks, /*serialHint*/ true);
+
+    Harness hp;
+    build(hp);
+    const std::vector<float> outParallel = hp.runPlayingBlocks(kBlocks, /*serialHint*/ false);
+
+    expect(peakOf(outSerial) > 0.01, "shared-host fixture produces audible output");
+    expect(maxAbsDiff(outSerial, outParallel) == 0.0,
+           "shared host: serial-hint and parallel output bit-identical");
+    for (Harness* h : { &hs, &hp })
+    {
+        // Exactly ONE job per block for the shared instance (first row combined, second row on
+        // the documented serial exception) — generation exactly once per callback, never twice.
+        const auto st = h->engine.instrumentRenderPoolStats();
+        const std::uint64_t jobsPerBlock = (std::uint64_t)countAudioRows(*h) + 1;
+        expect(st.jobsRunByCallback + st.jobsRunByWorkers == (std::uint64_t)kBlocks * jobsPerBlock + 1,
+               "shared host: ONE job per block for the shared instance (audio rows + 1)");
+        expect(h->instRows[0].instrument->blocksProcessed.load() == (std::uint64_t)kBlocks + 1,
+               "shared host: generated exactly once per callback (both rows read one generation)");
+    }
+
+    // Both rows carry identical strip settings (gain 1, pan center, no inserts), so the device
+    // output must be exactly TWICE a single-row reference — the combined-job strip (row 0) and
+    // the serial-exception strip (row 1) compute the identical row contribution.
+    Harness h1;
+    h1.addAudioTrackWithClip(makeNoiseClip(5, kBlock * 64));
+    (void)h1.addInstrumentRow(60000, 52);
+    h1.finishSetup();
+    h1.publishInstruments();
+    h1.instRows[0].host->enqueueMidiMessageFromMessageThread(
+        juce::MidiMessage::noteOn(1, 52, (juce::uint8)100));
+    const std::vector<float> outOne = h1.runPlayingBlocks(kBlocks, /*serialHint*/ false);
+    // Subtract the audio row's own contribution: both fixtures carry the SAME audio clip, so
+    // (shared − one) must equal one instrument-row contribution == (one − silence of that row)...
+    // Simpler and exact: shared == one + oneInstrumentRow, and both instrument rows are equal,
+    // so shared − one must equal one − audioOnly. Build the audio-only reference.
+    Harness h0;
+    h0.addAudioTrackWithClip(makeNoiseClip(5, kBlock * 64));
+    h0.finishSetup();
+    const std::vector<float> outAudioOnly = h0.runPlayingBlocks(kBlocks, /*serialHint*/ false);
+    double worst = 0.0;
+    for (size_t i = 0; i < outParallel.size(); ++i)
+    {
+        const double sharedInst = (double)outParallel[i] - (double)outOne[i];
+        const double singleInst = (double)outOne[i] - (double)outAudioOnly[i];
+        worst = std::max(worst, std::fabs(sharedInst - singleInst));
+    }
+    std::printf("[info] shared-host second row vs single-row reference max |diff| = %.3g\n", worst);
+    expect(worst <= 1.0e-6,
+           "the serial-exception row contributes the identical strip output as the combined row");
+}
+
+void testCombinedPayloadOverflowFallsBackPerRow()
+{
+    std::printf("\n-- A2 capacity: > kMaxInstrumentStripJobs rows — overflow rows generation-only + serial strip --\n");
+    instrument_render::setConfiguredWorkerCountOverride(4);
+    constexpr int kRows = 70; // > 64 combined-payload slots; every row still gets a generation job
+    constexpr int kBlocks = 6;
+
+    const auto build = [](Harness& h) {
+        h.addAudioTrackWithClip(makeNoiseClip(9, kBlock * 32));
+        for (int i = 0; i < kRows; ++i)
+        {
+            (void)h.addInstrumentRow(4000, 36 + (i % 32));
+        }
+        h.finishSetup();
+        h.noteOnAll();
+    };
+
+    Harness hs;
+    build(hs);
+    const std::vector<float> outSerial = hs.runPlayingBlocks(kBlocks, /*serialHint*/ true);
+
+    Harness hp;
+    build(hp);
+    const std::vector<float> outParallel = hp.runPlayingBlocks(kBlocks, /*serialHint*/ false);
+    const auto st = hp.engine.instrumentRenderPoolStats();
+    expect(st.parallelBlocks > 0, "overflow fixture exercised the parallel batch");
+
+    expect(peakOf(outSerial) > 0.01, "overflow fixture produces audible output");
+    expect(maxAbsDiff(outSerial, outParallel) == 0.0,
+           "overflow: serial-hint and parallel output bit-identical (rows 65+ serial strips)");
+    for (Harness* h : { &hs, &hp })
+    {
+        // Combined payloads cap at 64 but the JOB table still carries one generation per host —
+        // the job count is unchanged and every row generates exactly once per callback.
+        const auto s = h->engine.instrumentRenderPoolStats();
+        const std::uint64_t jobsPerBlock = (std::uint64_t)countAudioRows(*h) + kRows;
+        expect(s.jobsRunByCallback + s.jobsRunByWorkers
+                   == (std::uint64_t)kBlocks * jobsPerBlock + kRows,
+               "overflow: one job per row per block (combined OR generation-only; none dropped)");
+        bool allExact = true;
+        for (const auto& r : h->instRows)
+        {
+            allExact = allExact
+                       && r.instrument != nullptr
+                       && r.instrument->blocksProcessed.load() == (std::uint64_t)kBlocks + 1;
+        }
+        expect(allExact, "overflow: all 70 rows generated exactly once per callback (no dup/loss)");
+    }
+    expect(gInstrumentDoubleProcess.load() == 0, "overflow: no instrument processed twice in one block");
+}
+
 void testChainSwapAndDeviceCycleUnderJobs()
 {
     std::printf("\n-- chain removal/swap + device stop/start under running jobs --\n");
@@ -921,7 +1172,11 @@ void testChainSwapAndDeviceCycleUnderJobs()
     {
         // INSERT chain swap on a row whose strip runs inside jobs: production removal publishes a
         // map without the instance, then the test seam installs a fresh one (publish-before-use).
-        const TrackId tid = h.audioTids[(size_t)(3 + (iter % 4)) % h.audioTids.size()];
+        // Every 5th iteration targets an INSTRUMENT row's chain (A2: the chain processed inside
+        // the combined generation+strip job).
+        const TrackId tid = (iter % 5) == 4
+                                ? h.instRows[(size_t)(iter % 3)].tid
+                                : h.audioTids[(size_t)(3 + (iter % 4)) % h.audioTids.size()];
         h.pluginHost.removePlugin(tid);
         if (!h.engine.waitForAudioCallbackExit(1000.0)) { ++drainTimeouts; }
         (void)h.installInsert(tid, (iter % 2) == 0 ? InsertStage::Pre : InsertStage::Post, 0.6f,
@@ -1026,6 +1281,8 @@ int main()
     testCycleWrapSegments();
     testMonitoredRowGetsNoClipJob();
     testCapacityFallbackNeverDropsRows();
+    testSharedHostTwoRowsSingleGeneration();
+    testCombinedPayloadOverflowFallsBackPerRow();
     testChainSwapAndDeviceCycleUnderJobs();
     testOfflineHelpersStillWork();
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
