@@ -1,15 +1,21 @@
 # Parallel audio processing and read-ahead pre-processing — architecture and implementation plan (2026-10-09)
 
-> **Status: plan only.** Nothing in this document is implemented. It is the steering
-> negotiation required by `docs/ARCHITECTURE_PRINCIPLES.md` ("Architecture is negotiated in
-> documents before it is asserted in code") for the two backlog items in
+> **Status: Stage A1 implemented (on branch, not merged); everything else plan only.**
+> Slice **A1** (§3/§5: per-track insert playhead + per-lane chain scratch decomposition,
+> audio-row strip jobs in one combined batch with instrument generation, serial fan-out in
+> plan order) is implemented on `cursor/parallel-audio-readahead-plan-da54` together with the
+> focused suite `AudioStripParallelFocusedTests`. Local verification on the user's machine
+> (Windows/ASIO Release, AmpliTube project, listening + perf A/B) **remains outstanding**.
+> **A2 and Stage B are NOT implemented** — Stage B (§4) is a design draft with unresolved
+> transitions. This document remains the steering negotiation required by
+> `docs/ARCHITECTURE_PRINCIPLES.md` for the two backlog items in
 > [`docs/PHASE_PLAN.md`](PHASE_PLAN.md):
 > *Parallel processing of independent audio channels and whole insert chains* (Stage A) and
 > *ASIO-Guard-like pre-processing for paths that need no live response* (Stage B).
 >
 > **Reviewed revision:** `f11c0fb` ("1.2.1: proxy stays Current after save/reopen", main).
-> All file/line references below are against that revision. No production code, no new
-> diagnostics and no broad test runs were part of producing this plan.
+> All file/line references below are against that revision (A1's code deviations from the
+> surveyed state are the implementation on the branch itself).
 
 ---
 

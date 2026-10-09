@@ -529,6 +529,74 @@ endif()
 juce_generate_juce_header(InstrumentParallelFocusedTests)
 
 # -----------------------------------------------------------------------------
+# AudioStripParallelFocusedTests: Stage A1 — parallel audio-row channel strips (one render-pool job
+# per routing-plan audio row: clip segments + pre-gain + Pre/Post inserts + fader + pan into the
+# row's own stage buffer; callback sums in plan order after the join). The PRODUCTION PlaybackEngine
+# callback with the transport PLAYING, REAL PluginInsertHost chains carrying deterministic test
+# insert processors (host test seam, no VST3) and REAL instrument hosts in the same combined batch:
+# serial vs parallel bit-identity, cycle-wrap split blocks (segment order, per-segment playhead,
+# clip-content regression for the staged-path offset defects), monitored rows, Mute/Off, chain
+# swap + device stop/start under jobs, the >192-row serial-fallback capacity rule, 0-worker serial
+# mode through the job code, and offline mixdown parity. Device-free, deterministic.
+# -----------------------------------------------------------------------------
+juce_add_console_app(AudioStripParallelFocusedTests PRODUCT_NAME "AudioStripParallelFocusedTests")
+target_sources(AudioStripParallelFocusedTests PRIVATE
+    tests/selftest/AudioStripParallelFocusedTestsMain.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/diagnostics/PlaybackUiLoadLog.cpp
+    src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
+    src/diagnostics/DrumNameDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/PlaybackEngine.cpp
+    src/engine/InstrumentRenderPool.cpp
+    src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
+    src/engine/RoutingPlanBuilder.cpp
+    src/engine/RecorderService.cpp
+    src/engine/CountInClickOutput.cpp
+    src/engine/LiveMidiInputBus.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/ExperimentalInstrumentHost.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/plugins/Vst3ChildProcessScan.cpp
+    src/plugins/PluginDiscovery.cpp
+    src/plugins/InstrumentCatalog.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
+    src/transport/Transport.cpp)
+target_include_directories(AudioStripParallelFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(AudioStripParallelFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_USE_MP3AUDIOFORMAT=1)
+target_link_libraries(AudioStripParallelFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_cryptography
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(AudioStripParallelFocusedTests PRIVATE /wd4458)
+endif()
+juce_generate_juce_header(AudioStripParallelFocusedTests)
+
+# -----------------------------------------------------------------------------
 # LiveMidiRecordingFocusedTests: live MIDI input slice — the realtime LiveMidiInputBus (device-thread
 # push, routing by device slot / channel filter, delivery with sample offsets and the row's output
 # mapping, live-note ownership across setting changes / Monitor off / device loss / host swap,
