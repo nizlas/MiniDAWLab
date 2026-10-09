@@ -413,9 +413,38 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
         }
         if (state == RowState::Scheduled)
         {
-            // The scheduled block is over (its join published the block serial); from here on
-            // the worker owns the chain and the callback consumes.
-            row.state.store((int)RowState::Ahead, std::memory_order_release);
+            // Monitor/record must win even during a prime: the direct path changes semantics
+            // this same block, so a queued or in-flight clip segment must not play.
+            const bool handover = (info.monitorView != nullptr && info.monitorView->contains(row.trackId))
+                                  || (blockRecordingTrackId_ != kInvalidTrackId
+                                      && row.trackId == blockRecordingTrackId_);
+            if (handover)
+            {
+                audioThread_discardResetRow(row);
+                continue;
+            }
+            // Commit to the consume path only when this block's first segment is already
+            // queued, or the worker has already fed the instance (ring holds something, so
+            // live-rendering would use a chain that is no longer at this position). An empty
+            // ring whose worker has not entered declines back to live: that is the startup
+            // case where consumption used to begin before the single worker could deliver,
+            // and it must not become silence. If the worker has entered, stay exclusive —
+            // no live render, no wait in this callback.
+            row.primingExclusive = false;
+            const bool ringHasSegment = row.head.load(std::memory_order_acquire)
+                                        != row.tail.load(std::memory_order_acquire);
+            if (audioThread_primingHeadMatches(row, info) || ringHasSegment)
+            {
+                row.state.store((int)RowState::Ahead, std::memory_order_release);
+            }
+            else if (audioThread_tryDeclineUncommittedPrime(row))
+            {
+                continue;
+            }
+            else
+            {
+                row.primingExclusive = true;
+            }
         }
         const auto current = (RowState)row.state.load(std::memory_order_relaxed);
         if (current == RowState::Ahead || current == RowState::Draining)
@@ -541,6 +570,7 @@ void ReadAheadRenderer::audioThread_offerAdoption(const TrackId trackId, const i
         row.tail.store(0, std::memory_order_release);
         row.workerAckedStop.store(false, std::memory_order_release);
         row.workerSelfStopped.store(false, std::memory_order_release);
+        row.primingExclusive = false;
         row.stopProduce.store(false, std::memory_order_seq_cst);
         row.state.store((int)RowState::Scheduled, std::memory_order_release);
         // The release publish the worker synchronizes with: every field above is visible once
@@ -564,7 +594,13 @@ bool ReadAheadRenderer::audioThread_isOwnedForRender(const TrackId trackId) cons
         return false;
     }
     const auto state = (RowState)row->state.load(std::memory_order_relaxed);
-    return state == RowState::Ahead || state == RowState::Draining || state == RowState::Abandoning;
+    if (state == RowState::Ahead || state == RowState::Draining || state == RowState::Abandoning)
+    {
+        return true;
+    }
+    // Priming row whose worker has already entered the chain: the live strip must skip it.
+    // tryConsume plays the segment if it has landed, otherwise counts the miss.
+    return state == RowState::Scheduled && row->primingExclusive;
 }
 
 int ReadAheadRenderer::audioThread_exportExcludedTrackIds(TrackId* const out) const noexcept
@@ -595,10 +631,11 @@ bool ReadAheadRenderer::audioThread_tryConsume(const TrackId trackId, const std:
     }
     row->consumeTouched = true;
     const auto state = (RowState)row->state.load(std::memory_order_relaxed);
-    if (state != RowState::Ahead && state != RowState::Draining)
+    const bool primingConsume = state == RowState::Scheduled && row->primingExclusive;
+    if (!primingConsume && state != RowState::Ahead && state != RowState::Draining)
     {
         cMissed_.fetch_add(1, std::memory_order_relaxed);
-        return false; // Abandoning: silent until the worker lets go (counted)
+        return false; // Abandoning, or a Scheduled row the live path still owns
     }
     const auto miss = [&]() noexcept {
         // The audible stream advanced past this segment: the expected sequence moves on, so a
@@ -628,6 +665,13 @@ bool ReadAheadRenderer::audioThread_tryConsume(const TrackId trackId, const std:
         if (s.seq == row->consumeSeq && s.start == timelineStartAudible && s.run == run
             && s.destFrame == destFrame)
         {
+            if (primingConsume)
+            {
+                // The in-flight prime landed before the strip pass. From here the row is
+                // ahead: the worker keeps the chain, the callback keeps consuming.
+                row->primingExclusive = false;
+                row->state.store((int)RowState::Ahead, std::memory_order_release);
+            }
             out.stageL = s.dataL;
             out.stageR = s.dataR;
             return true;
@@ -687,6 +731,7 @@ void ReadAheadRenderer::audioThread_discardResetRow(Row& row) noexcept
 {
     // `stopProduce` stays set until the next adoption re-arms the row, so a worker that raced
     // past the `workerActive` check aborts after claiming `busy` without touching the ring.
+    row.primingExclusive = false;
     row.stopProduce.store(true, std::memory_order_seq_cst);
     cDiscardResets_.fetch_add(1, std::memory_order_relaxed);
     if (row.busy.load(std::memory_order_seq_cst) == 0)
@@ -751,6 +796,54 @@ void ReadAheadRenderer::audioThread_addCooldown(const TrackId trackId) noexcept
     }
 }
 
+bool ReadAheadRenderer::audioThread_primingHeadMatches(const Row& row, const BlockBeginInfo& info) const noexcept
+{
+    const std::uint32_t h = row.head.load(std::memory_order_acquire);
+    if (h == row.tail.load(std::memory_order_acquire))
+    {
+        return false;
+    }
+    const Slot& s = row.slots[(size_t)(h % (std::uint32_t)depth_)];
+    if (s.generation != row.generation || s.seq != row.consumeSeq)
+    {
+        return false;
+    }
+    // Same segmentation the engine will consume this block (first segment only; a wrap's
+    // second segment is a later tryConsume once the row is Ahead).
+    const SegStep seg = stepSegment(info.t0, 0, info.numSamples, info.cycleActive, info.locLeft,
+                                    info.locRight, info.arrangementEnd);
+    if (seg.freeze || seg.run <= 0)
+    {
+        return false;
+    }
+    const std::int64_t audible = seg.start + row.playbackShift;
+    return s.start == audible && s.run == seg.run && s.destFrame == seg.destFrame;
+}
+
+bool ReadAheadRenderer::audioThread_tryDeclineUncommittedPrime(Row& row) noexcept
+{
+    // Ring is empty (caller checked). Claim the stop BEFORE re-reading the worker's claim,
+    // matching discardResetRow's Dekker pair. A worker that has not entered observes the stop
+    // and never touches the plugin; this block then renders the row live.
+    if (row.inPlugin.load(std::memory_order_seq_cst) != 0 || row.busy.load(std::memory_order_seq_cst) != 0)
+    {
+        return false;
+    }
+    row.stopProduce.store(true, std::memory_order_seq_cst);
+    if (row.inPlugin.load(std::memory_order_seq_cst) != 0 || row.busy.load(std::memory_order_seq_cst) != 0)
+    {
+        // The worker committed between the two loads. Do not leave the stop set: the segment
+        // it is about to publish is the one this block wants to play, and production must
+        // continue afterwards. The caller holds the row exclusive instead.
+        row.stopProduce.store(false, std::memory_order_seq_cst);
+        return false;
+    }
+    row.primingExclusive = false;
+    row.workerActive.store(false, std::memory_order_release);
+    row.state.store((int)RowState::Live, std::memory_order_release);
+    return true;
+}
+
 bool ReadAheadRenderer::audioThread_isCoolingDown(const TrackId trackId) const noexcept
 {
     for (const auto& cd : cooldowns_)
@@ -791,6 +884,12 @@ int ReadAheadRenderer::workerScanOnce() noexcept
     for (auto& row : rows_)
     {
         if (!row.workerActive.load(std::memory_order_acquire))
+        {
+            continue;
+        }
+        // Test-only gate, checked BEFORE the busy claim so the callback can still decline
+        // the prime and render live. Production leaves the flag clear.
+        if (!row.workerStarted && deferPrimeForTests_.load(std::memory_order_acquire) != 0)
         {
             continue;
         }
@@ -908,9 +1007,13 @@ bool ReadAheadRenderer::workerRenderOneSegment(Row& row) noexcept
 
     // THE production strip core — identical DSP to the live A1 path. The recording row is
     // never owned (immediate handover), so there is no omitted clip-playback track.
+    // `inPlugin` covers exactly this call: the callback's decline path treats it as
+    // exclusive ownership and does not live-render the same instance.
+    row.inPlugin.store(1, std::memory_order_seq_cst);
     playback_mix_helpers::renderAudioTrackPostStripToStereoScratchWithChainAccess(
         *snap, startAudible, seg.run, seg.destFrame, slot.dataL, slot.dataR, access,
         kInvalidTrackId, end, row.trackIndex, deps_.preGainRamp, soloView);
+    row.inPlugin.store(0, std::memory_order_seq_cst);
 
     slot.start = startAudible;
     slot.run = seg.run;

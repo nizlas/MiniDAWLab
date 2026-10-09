@@ -9,16 +9,24 @@
 // thread (default priority — deliberately NOT the pool's pro-audio priority) — separate from the
 // InstrumentRenderPool that must meet the current audio deadline — renders FUTURE segments of
 // adopted audio rows through the production strip core into per-row SPSC rings. The audio
-// callback consumes ready segments by exact key; a not-ready segment is a MISS (silence that
-// segment, counted, never a wait). Two consecutive missed segments abandon the row back to the
-// live path (with a re-adoption cooldown) — the mode is left when it does not hold.
+// callback consumes ready segments by exact key. A row is not switched onto that consume path
+// until the worker has queued the next block's segment; if the worker has not entered the
+// chain, the prime is declined and the callback keeps rendering live (no miss, no silence).
+// Once the row is ahead, a not-ready segment is a MISS (silence that segment, counted, never
+// a wait). Two consecutive missed segments abandon the row back to the live path (with a
+// re-adoption cooldown) — the mode is left when it does not hold.
 //
 // INVARIANT (the whole point): exactly-once, contiguous AUDIBLE SEGMENT STREAM per insert
 // instance while owned. The engine's segmentation (linear blocks, cycle-wrap splits, short
 // blocks at loop/arrangement limits) is a deterministic function of block-stable inputs; the
 // worker replicates it exactly (`stepSegment`), so producer and consumer walk the same sequence:
-//   * adoption is gapless by construction (the worker's first segment is the block after the
-//     row's last live-rendered block, gated on a MONOTONE callback block serial — wrap-safe);
+//   * adoption stays on the direct path until that next segment is actually queued. The
+//     worker's first segment is still the block after the row's last live-rendered block,
+//     gated on a MONOTONE callback block serial (wrap-safe). An uncommitted prime (worker
+//     has not entered the chain, ring empty) is declined: this block renders live, and it
+//     is not a miss. A prime whose worker is already inside the plugin stays exclusive —
+//     the callback does not render that instance and does not wait; if the segment is still
+//     absent at consume, that one segment is a counted miss;
 //   * pause/resume at the same position CONTINUES the queue (no discard, no re-feed);
 //   * draining release is gapless (worker stops producing, callback consumes the queue dry);
 //   * monitor/record handover and deliberate transport jumps (seek, stop-button, cycle/locator
@@ -133,6 +141,13 @@ public:
     {
         pauseAckTimeoutMs_.store(juce::jmax(1, timeoutMs), std::memory_order_relaxed);
     }
+    /// [Test only] While set, the worker does not claim a row it has not started. The callback
+    /// therefore sees an uncommitted prime and keeps the row on the direct path. Production
+    /// never sets this.
+    void setDeferPrimeForTests(bool defer) noexcept
+    {
+        deferPrimeForTests_.store(defer ? 1 : 0, std::memory_order_release);
+    }
     /// [Any thread] The next `audioThread_beginBlock` performs a full discard reset (used after
     /// offline-export windows; the callback thread itself performs the transitions).
     void requestFullReset() noexcept;
@@ -169,14 +184,18 @@ public:
     /// [Audio thread, once per callback, BEFORE the A1 pre-count] Performs every ownership
     /// transition for this block: geometry/offset/position discontinuities (discard reset),
     /// miss abandonment, consume-absence release, monitor/record handover (discard), armed /
-    /// near-end / capture-hold / self-stop drains, drain completions, Scheduled -> Ahead
-    /// commits. Pause (`playing == false` at an unchanged position) is NOT a discontinuity.
+    /// near-end / capture-hold / self-stop drains, drain completions. A Scheduled row commits
+    /// to Ahead only when its first segment is already queued; otherwise an uncommitted prime
+    /// returns to Live (direct path, no miss) and a prime the worker has already entered stays
+    /// exclusive for this block. Pause (`playing == false` at an unchanged position) is NOT a
+    /// discontinuity.
     void audioThread_beginBlock(const BlockBeginInfo& info) noexcept;
 
     /// [Audio thread, after beginBlock] Offer adoption of an eligible row (the ENGINE applies
     /// the A1 eligibility gates; the renderer applies the model gates: headroom, non-negative
     /// audible positions, armed/recording exclusion, cooldown, capacity). The row renders live
-    /// THIS block (Scheduled) and is consumed from the ring from the next block on.
+    /// THIS block (Scheduled). The next block consumes from the ring only if that segment is
+    /// queued; otherwise the prime is declined or, if the worker has entered, held exclusive.
     void audioThread_offerAdoption(TrackId trackId, int trackIndex) noexcept;
 
     /// [Audio thread] True = the engine must NOT render this row live this block (collect /
@@ -290,6 +309,12 @@ private:
         std::atomic<bool> workerAckedStop{ false };
         std::atomic<bool> workerActive{ false };  ///< worker-side view: row has work
         std::atomic<bool> workerSelfStopped{ false };  ///< row vanished / hit a limit on the worker side
+        /// Set only around the production strip call, so the callback can tell "about to enter
+        /// or inside the plugin" from a busy claim that has not touched the chain.
+        std::atomic<int> inPlugin{ 0 };
+        /// Callback-only: this Scheduled row must not be live-rendered because the worker has
+        /// already committed to its first segment and that segment is not queued yet.
+        bool primingExclusive = false;
     };
 
     /// One step of the engine's deterministic segmentation (transport domain) — replicates
@@ -319,6 +344,13 @@ private:
     // Callback-thread helpers.
     void audioThread_discardResetRow(Row& row) noexcept;
     void audioThread_purgeRing(Row& row) noexcept;
+    /// True when the ring head is the exact first segment of this block (the key tryConsume
+    /// will request). False when the ring is empty or the head is a different segment.
+    [[nodiscard]] bool audioThread_primingHeadMatches(const Row& row, const BlockBeginInfo& info) const noexcept;
+    /// Dekker decline of a prime the worker has not entered. True = row is Live again and this
+    /// block renders it directly (no miss, no discard count). False = the worker committed
+    /// during the check; the caller must keep the row exclusive.
+    [[nodiscard]] bool audioThread_tryDeclineUncommittedPrime(Row& row) noexcept;
     void audioThread_refreshOwnedFlags() noexcept;
     void audioThread_addCooldown(TrackId trackId) noexcept;
     [[nodiscard]] bool audioThread_isCoolingDown(TrackId trackId) const noexcept;
@@ -365,6 +397,7 @@ private:
     std::atomic<std::uint64_t> pauseEpoch_{ 0 };
     std::atomic<std::uint64_t> pauseAckedEpoch_{ 0 };
     std::atomic<int> pauseAckTimeoutMs_{ 2000 };
+    std::atomic<int> deferPrimeForTests_{ 0 };
     bool deviceParkHeld_ = true;  ///< message-thread bookkeeping of the between-devices park depth
 
     /// Depth + epoch acquire; true only on real acknowledgment (balanced release on failure).
