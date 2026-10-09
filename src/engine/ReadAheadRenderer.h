@@ -38,8 +38,13 @@
 //     segment.
 //   * Message-thread `pauseWorkerAndWait` / `resumeWorker` bracket windows that need the worker
 //     provably outside every chain (plugin retire destroy, offline export, device stop, the
-//     plugin-state capture window). `beginStateCaptureHold`/`endStateCaptureHold` additionally
-//     gate adoption off and gaplessly drain owned rows while playback consumption runs.
+//     plugin-state capture window). The pause is DEPTH-COUNTED with an epoch handshake: only a
+//     REAL acknowledgment (the worker observed the request while outside every chain, after the
+//     request was made) returns success; a timeout returns false and confers NO exclusivity —
+//     callers must then abort, defer, or keep waiting, never proceed. An aborted caller's
+//     release cannot resume the worker while another caller still holds a pause.
+//     `beginStateCaptureHold`/`endStateCaptureHold` additionally gate adoption off and
+//     gaplessly drain owned rows while playback consumption runs.
 //   * No allocation and no locks on the audio thread; the worker allocates nothing after
 //     `prepareForDevice` (shared_ptr refcounts aside, same discipline as the callback).
 // =============================================================================
@@ -101,15 +106,33 @@ public:
     // Message-thread lifecycle
     // ---------------------------------------------------------------------
     /// [Message thread, no callback running] Allocate per-row slot buffers + worker scratch for
-    /// the device block size and resume the worker.
+    /// the device block size and resume the worker. Requires a real worker acknowledgment; if
+    /// none arrives (worker stuck inside a plugin render from an earlier device session) the
+    /// buffers are left UNTOUCHED and the renderer stays dormant (`prepared_ == false`: the
+    /// callback never engages it) — resources are never resized/freed under a live render.
     void prepareForDevice(double sampleRate, int blockSizeSamples);
-    /// [Message thread, no callback running] Pause the worker and hard-reset all ownership.
+    /// [Message thread, no callback running] Acknowledged pause + hard ownership reset, then the
+    /// renderer stays parked until the next `prepareForDevice`. The host releases plugin
+    /// resources right after this returns, so it WAITS (bounded attempts, unbounded total, with
+    /// diagnostics) until the worker really acknowledged: a plugin stuck inside the worker's
+    /// render stalls device stop with resources retained — it never proceeds into
+    /// `releaseResources` while the worker may still be inside a processBlock.
     void releaseForDevice() noexcept;
-    /// [Message thread] Bounded pause: returns once the worker acknowledged (it holds no chain,
-    /// no map and no snapshot while paused). Used around plugin-retire destroys, offline export
-    /// and the state-capture window. In pump mode this only sets the flag (shared thread).
-    void pauseWorkerAndWait() noexcept;
+    /// [Message thread] Bounded pause request. Returns TRUE only on a real acknowledgment: the
+    /// worker observed the request while outside every chain/map/snapshot, and stays parked
+    /// until the matching `resumeWorker`. Returns FALSE on timeout — the request is withdrawn
+    /// (balanced) and the caller gained NO exclusivity: it must abort, defer or retry; it must
+    /// not touch or free worker-reachable resources. Pauses nest (depth-counted): an aborted or
+    /// finished caller can never resume the worker under another caller still holding a pause.
+    /// In pump mode there is no worker thread and the pause succeeds trivially (shared thread).
+    [[nodiscard]] bool pauseWorkerAndWait() noexcept;
     void resumeWorker() noexcept;
+    /// [Test only] Shrink/restore the acknowledgment timeout so timeout paths are testable with
+    /// a deliberately blocked worker. Same decision logic as production, smaller bound.
+    void setPauseAckTimeoutMsForTests(int timeoutMs) noexcept
+    {
+        pauseAckTimeoutMs_.store(juce::jmax(1, timeoutMs), std::memory_order_relaxed);
+    }
     /// [Any thread] The next `audioThread_beginBlock` performs a full discard reset (used after
     /// offline-export windows; the callback thread itself performs the transitions).
     void requestFullReset() noexcept;
@@ -332,6 +355,25 @@ private:
     std::atomic<bool> prepared_{ false };
     std::atomic<int> captureHold_{ 0 };
 
+    // Depth-counted pause with an epoch handshake (see the threading notes above). The worker
+    // parks while `pauseDepth_ > 0` and, while parked, publishes the latest request epoch as its
+    // acknowledgment. A waiter that sees `pauseAckedEpoch_ >= its epoch` KNOWS the worker was in
+    // the parked branch (outside every chain) after the request existed — and the worker stays
+    // parked for as long as the waiter holds its depth. This replaces the v2 bool pair, whose
+    // stale acknowledgment could be observed just as the worker re-entered a scan.
+    std::atomic<int> pauseDepth_{ 1 };  ///< starts parked; `prepareForDevice` releases the park
+    std::atomic<std::uint64_t> pauseEpoch_{ 0 };
+    std::atomic<std::uint64_t> pauseAckedEpoch_{ 0 };
+    std::atomic<int> pauseAckTimeoutMs_{ 2000 };
+    bool deviceParkHeld_ = true;  ///< message-thread bookkeeping of the between-devices park depth
+
+    /// Depth + epoch acquire; true only on real acknowledgment (balanced release on failure).
+    [[nodiscard]] bool acquireWorkerPause(int timeoutMs) noexcept;
+    /// Acquire that never gives up (bounded attempts, diagnostics, unbounded total). Used where
+    /// the very next step frees or reconfigures worker-reachable resources.
+    void acquireWorkerPauseBlocking(const char* why) noexcept;
+    void releaseWorkerPause() noexcept;
+
     // Callback-private continuity + block state (audio thread only, block-stable after beginBlock).
     std::int64_t expectedNextT0_ = std::numeric_limits<std::int64_t>::min();
     bool haveExpectedNextT0_ = false;
@@ -360,8 +402,6 @@ private:
     // Worker thread control.
     std::thread workerThread_;
     std::atomic<bool> workerShouldExit_{ false };
-    std::atomic<bool> pauseRequested_{ false };
-    std::atomic<bool> pauseAcked_{ false };
 
     // Counters (relaxed; diagnostics only — never surfaced in UI).
     std::atomic<std::int64_t> cAdopted_{ 0 };

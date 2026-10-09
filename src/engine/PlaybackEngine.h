@@ -272,19 +272,32 @@ public:
     /// focused tests (no worker thread; the test drives it via `experimentalReadAhead()`).
     void enableExperimentalReadAheadForTests(int depthBlocks);
     [[nodiscard]] readahead::ReadAheadRenderer* experimentalReadAhead() noexcept { return readAhead_.get(); }
-    /// [Message thread] Bounded pause+resume of the read-ahead worker — the publish-before-
-    /// destroy hook calls this AFTER the new insert map is published and the callback was waited
-    /// out: an acknowledged pause proves the worker is outside every chain render that could
-    /// still reference retired instances; after the resume it only ever acquires the new map.
+    /// [Message thread] Pause+resume of the read-ahead worker — the publish-before-destroy hook
+    /// calls this AFTER the new insert map is published and the callback was waited out: an
+    /// acknowledged pause proves the worker is outside every chain render that could still
+    /// reference retired instances; after the resume it only ever acquires the new map.
     /// Ownership and queues survive (model doc §8) — chain edits late-apply like other controls.
+    /// Returns only after a REAL acknowledgment (bounded attempts, unbounded total, with
+    /// diagnostics): the retired instances are destroyed right after the hook, so a worker stuck
+    /// inside a plugin render STALLS the chain edit with resources retained — publish-before-
+    /// destroy holds on the failure path too, it never proceeds into the destroy on a timeout.
     void pauseReadAheadWorkerAfterChainPublish() noexcept;
     /// [Message thread] Plugin-state capture window for Save / Save As / autosave (model doc
     /// §9): gates adoption off, gaplessly drains owned rows while playback consumption runs
-    /// (bounded wait; skipped when the transport is not playing because nothing consumes), then
-    /// pauses the worker. `getStateInformation` inside the window reads instances processed by
-    /// the audio callback only — the A1/A2 save concurrency class. Never blocks the callback.
-    void beginPluginStateCaptureWindow() noexcept;
+    /// (bounded wait; a Playing -> Paused/Stopped transition during the wait resolves to the
+    /// paused-capture semantics instead of stalling), then requires an ACKNOWLEDGED worker
+    /// pause. Returns true only when the window is really established; on false (drain stalled —
+    /// e.g. no callbacks running — or no worker acknowledgment) every hold is released again and
+    /// the caller MUST NOT capture plugin state or write the project file as if it succeeded.
+    /// `endPluginStateCaptureWindow` must be called only after a successful begin.
+    /// Never blocks the audio callback; the wait runs on the caller's (message) thread only.
+    [[nodiscard]] bool beginPluginStateCaptureWindow() noexcept;
     void endPluginStateCaptureWindow() noexcept;
+    /// [Test only] Shrink/restore the drain wait bound so the failure path is testable.
+    void setStateCaptureDrainTimeoutMsForTests(const int timeoutMs) noexcept
+    {
+        stateCaptureDrainTimeoutMs_.store(juce::jmax(1, timeoutMs), std::memory_order_relaxed);
+    }
 
     [[nodiscard]] instrument_render::InstrumentRenderPool::Stats instrumentRenderPoolStats() const noexcept
     {
@@ -639,6 +652,8 @@ private:
 
     /// Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md); null unless explicitly enabled.
     std::unique_ptr<readahead::ReadAheadRenderer> readAhead_;
+    /// State-capture drain wait bound (ms); test-shrinkable, same decision logic as production.
+    std::atomic<int> stateCaptureDrainTimeoutMs_{ 500 };
     /// [Audio thread, block-stable after the read-ahead block begin] Owned rows excluded from the
     /// global transport-context refresh, and this block's consume keys — one per `renderRun`
     /// segment (a cycle-wrap block has two: up to the right locator, then from the left locator

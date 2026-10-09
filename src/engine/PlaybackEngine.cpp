@@ -382,30 +382,61 @@ void PlaybackEngine::pauseReadAheadWorkerAfterChainPublish() noexcept
         // still reference the retired instances; after the resume it only ever acquires the
         // newly published map (fresh per segment). Ownership and queues survive — chain edits
         // late-apply like every other control (model doc §6/§8).
-        readAhead_->pauseWorkerAndWait();
+        //
+        // The retired instances are destroyed RIGHT AFTER this hook returns, so only a real
+        // acknowledgment may let it return (publish-before-destroy on the failure path too). A
+        // worker stuck inside a plugin render stalls the edit with the instances retained; a
+        // timeout NEVER falls through into the destroy. Between attempts the worker may start
+        // new segments — those acquire the newly published map and cannot reach retired
+        // instances; only the one render in flight at publish time is waited out.
+        bool reported = false;
+        while (!readAhead_->pauseWorkerAndWait())
+        {
+            if (!reported)
+            {
+                reported = true;
+                juce::Logger::writeToLog("[read-ahead] chain publish: worker pause not "
+                                         "acknowledged — retire waits (instances retained)");
+            }
+        }
         readAhead_->resumeWorker();
     }
 }
 
-void PlaybackEngine::beginPluginStateCaptureWindow() noexcept
+bool PlaybackEngine::beginPluginStateCaptureWindow() noexcept
 {
     if (readAhead_ == nullptr)
     {
-        return;
+        return true; // direct path: the existing A1/A2 save behavior, no window needed
     }
     readAhead_->beginStateCaptureHold();
-    // Gapless drain of every owned row — it needs playback consumption, so it is attempted only
-    // while the transport is playing (paused/stopped saves capture with the worker paused and
-    // nobody processing; model doc §9). Bounded message-thread wait, never touches the callback.
-    if (transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing)
+    // Gapless drain of every owned row — it needs playback consumption, so it is waited on only
+    // while the transport is playing; a Playing -> Paused/Stopped transition DURING the wait
+    // resolves to the paused-capture semantics (rows stay owned, worker paused, documented
+    // <= depth state lead) instead of stalling into the timeout. Bounded message-thread wait,
+    // never touches the audio callback. A timeout (stalled/stopped device while the intent
+    // claims Playing, or overload) fails the window: the hold is released and the caller must
+    // not capture state or write the file as if it succeeded.
+    const auto deadline = std::chrono::steady_clock::now()
+                          + std::chrono::milliseconds(
+                              stateCaptureDrainTimeoutMs_.load(std::memory_order_relaxed));
+    while (readAhead_->audioThread_anyOwned()
+           && transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing)
     {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-        while (readAhead_->audioThread_anyOwned() && std::chrono::steady_clock::now() < deadline)
+        if (std::chrono::steady_clock::now() > deadline)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            readAhead_->endStateCaptureHold();
+            return false;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    readAhead_->pauseWorkerAndWait();
+    if (!readAhead_->pauseWorkerAndWait())
+    {
+        // No real acknowledgment: no exclusivity against the worker, so no capture. Unwind.
+        readAhead_->endStateCaptureHold();
+        return false;
+    }
+    return true;
 }
 
 void PlaybackEngine::endPluginStateCaptureWindow() noexcept
@@ -3180,10 +3211,21 @@ bool PlaybackEngine::beginOfflineRenderGate() noexcept
     const bool becameActive = offlineRenderGateDepth_.fetch_add(1, std::memory_order_seq_cst) == 0;
     if (becameActive && readAhead_ != nullptr)
     {
-        // The offline render processes the SAME live chains on the message thread: pause the
-        // read-ahead worker for the whole gate and reset ownership at the next live block
-        // (docs/READAHEAD_PROTOTYPE.md §8).
-        readAhead_->pauseWorkerAndWait();
+        // The offline render processes the SAME live chains on the message thread: an
+        // ACKNOWLEDGED pause is mandatory before any offline block may touch them (concurrent
+        // processBlock on one instance otherwise). The pause is held for the whole gate
+        // (released in endOfflineRenderGate); a worker stuck inside a plugin render stalls the
+        // export start rather than overlapping it (docs/READAHEAD_PROTOTYPE.md §8).
+        bool reported = false;
+        while (!readAhead_->pauseWorkerAndWait())
+        {
+            if (!reported)
+            {
+                reported = true;
+                juce::Logger::writeToLog("[read-ahead] offline gate: worker pause not "
+                                         "acknowledged — export start waits");
+            }
+        }
         readAhead_->requestFullReset();
     }
     return becameActive;

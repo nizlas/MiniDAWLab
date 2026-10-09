@@ -35,9 +35,8 @@ ReadAheadRenderer::ReadAheadRenderer(const Deps& deps, const int depthBlocks, co
     , depth_(juce::jlimit(kMinDepth, kMaxDepth, depthBlocks))
     , pumpMode_(!spawnWorkerThread)
 {
-    // The worker starts PAUSED; `prepareForDevice` (which allocates the buffers it renders
-    // into) resumes it.
-    pauseRequested_.store(true, std::memory_order_release);
+    // The worker starts PARKED (pauseDepth_ initialized to 1 — the "between devices" park);
+    // `prepareForDevice` (which allocates the buffers it renders into) releases the park.
     if (!pumpMode_)
     {
         workerThread_ = std::thread([this] { workerThreadMain(); });
@@ -60,7 +59,20 @@ ReadAheadRenderer::~ReadAheadRenderer()
 void ReadAheadRenderer::prepareForDevice(const double sampleRate, const int blockSizeSamples)
 {
     juce::ignoreUnused(sampleRate);
-    pauseWorkerAndWait();
+    prepared_.store(false, std::memory_order_release);
+    if (!acquireWorkerPause(pauseAckTimeoutMs_.load(std::memory_order_relaxed)))
+    {
+        // No real acknowledgment (a worker stuck inside a plugin render from an earlier device
+        // session). The slot/scratch buffers it may still be writing into must NOT be resized or
+        // freed, and the rows it may still claim must not be reset. The renderer stays DORMANT
+        // (`prepared_ == false`: `audioThread_beginBlock` no-ops and nothing is ever adopted);
+        // the park depth, when held, keeps the pause requested so the worker parks the moment
+        // its render returns. The next device start retries.
+        jassertfalse;
+        juce::Logger::writeToLog("[read-ahead] prepareForDevice: worker pause not acknowledged — "
+                                 "renderer stays dormant for this device session");
+        return;
+    }
     const int bs = juce::jmax(16, blockSizeSamples);
     if (bs > slotCapacitySamples_)
     {
@@ -101,13 +113,23 @@ void ReadAheadRenderer::prepareForDevice(const double sampleRate, const int bloc
     blockSerial_ = 0;
     joinedSerial_.store(std::numeric_limits<std::int64_t>::min(), std::memory_order_release);
     prepared_.store(true, std::memory_order_release);
-    resumeWorker();
+    if (deviceParkHeld_)
+    {
+        releaseWorkerPause(); // the between-devices park
+        deviceParkHeld_ = false;
+    }
+    releaseWorkerPause(); // this call's own acquire — worker runs once no one else holds a pause
 }
 
 void ReadAheadRenderer::releaseForDevice() noexcept
 {
-    pauseWorkerAndWait();
     prepared_.store(false, std::memory_order_release);
+    // The host releases plugin resources right after this returns (`releaseResources` on live
+    // instances), and the row reset below rewrites state a claiming worker reads: only a REAL
+    // acknowledgment may let this proceed. A plugin stuck inside the worker's render stalls
+    // device stop with all resources retained — the same guarantee JUCE's device teardown gives
+    // against the audio callback, provided here for the worker.
+    acquireWorkerPauseBlocking("releaseForDevice");
     for (auto& row : rows_)
     {
         row.workerActive.store(false, std::memory_order_release);
@@ -119,33 +141,75 @@ void ReadAheadRenderer::releaseForDevice() noexcept
     }
     anyNonLive_.store(false, std::memory_order_release);
     haveExpectedNextT0_ = false;
-    // Stays paused until the next prepareForDevice.
+    // Stays parked until the next prepareForDevice: keep exactly one park depth.
+    if (deviceParkHeld_)
+    {
+        releaseWorkerPause(); // fold this call's acquire into the already-held park
+    }
+    else
+    {
+        deviceParkHeld_ = true; // this call's acquire becomes the park
+    }
 }
 
-void ReadAheadRenderer::pauseWorkerAndWait() noexcept
+bool ReadAheadRenderer::pauseWorkerAndWait() noexcept
 {
-    pauseRequested_.store(true, std::memory_order_seq_cst);
+    return acquireWorkerPause(pauseAckTimeoutMs_.load(std::memory_order_relaxed));
+}
+
+bool ReadAheadRenderer::acquireWorkerPause(const int timeoutMs) noexcept
+{
+    pauseDepth_.fetch_add(1, std::memory_order_seq_cst);
     if (pumpMode_ || !workerThread_.joinable())
     {
-        return; // pump mode: the pump and this caller share the message thread
+        return true; // pump mode: the pump and this caller share the message thread
     }
-    // Bounded wait: the ack is set between segment renders (never while a row is claimed), so
-    // an acked worker holds no chain, no map and no snapshot. One segment render bounds latency.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-    while (!pauseAcked_.load(std::memory_order_acquire))
+    const std::uint64_t epoch = pauseEpoch_.fetch_add(1, std::memory_order_seq_cst) + 1;
+    // The worker publishes the latest request epoch from its PARKED branch only (it holds no
+    // chain, no map and no snapshot there). Seeing `acked >= epoch` therefore proves the worker
+    // parked after this request existed — and it stays parked while our depth is held.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(juce::jmax(1, timeoutMs));
+    while (pauseAckedEpoch_.load(std::memory_order_acquire) < epoch)
     {
         if (std::chrono::steady_clock::now() > deadline)
         {
-            jassertfalse; // worker unresponsive — diagnostics only, callers proceed regardless
-            break;
+            // No acknowledgment: withdraw this request (balanced). The caller gained NO
+            // exclusivity and must abort, defer or retry — never proceed. Other holders'
+            // depths (if any) remain untouched.
+            pauseDepth_.fetch_sub(1, std::memory_order_seq_cst);
+            return false;
         }
         sleepBrieflyMicros(100);
+    }
+    return true;
+}
+
+void ReadAheadRenderer::acquireWorkerPauseBlocking(const char* why) noexcept
+{
+    bool reported = false;
+    while (!acquireWorkerPause(pauseAckTimeoutMs_.load(std::memory_order_relaxed)))
+    {
+        if (!reported)
+        {
+            reported = true;
+            jassertfalse; // debug visibility; the SAFE behavior below is to keep waiting
+            juce::Logger::writeToLog(juce::String("[read-ahead] ") + why
+                                     + ": worker pause not acknowledged — waiting (resources "
+                                       "are retained until the worker lets go)");
+        }
     }
 }
 
 void ReadAheadRenderer::resumeWorker() noexcept
 {
-    pauseRequested_.store(false, std::memory_order_release);
+    releaseWorkerPause();
+}
+
+void ReadAheadRenderer::releaseWorkerPause() noexcept
+{
+    const int previous = pauseDepth_.fetch_sub(1, std::memory_order_seq_cst);
+    jassert(previous > 0);
+    juce::ignoreUnused(previous);
 }
 
 void ReadAheadRenderer::requestFullReset() noexcept
@@ -632,9 +696,10 @@ void ReadAheadRenderer::audioThread_discardResetRow(Row& row) noexcept
         row.state.store((int)RowState::Live, std::memory_order_release);
         return;
     }
-    // The worker is inside this row's render: it finishes its segment, observes the stop and
-    // acks; the next block begin purges and frees the row. The row is silent meanwhile
-    // (consume misses) — never rendered live concurrently.
+    // The worker is inside this row's render: the row stays Abandoning (silent, never rendered
+    // live concurrently) until the IN-FLIGHT PLUGIN CALL RETURNS and the worker's stop is
+    // observed at a block begin. That is typically well under one block, but it is bounded only
+    // by the plugin's processBlock duration — no fixed block count is guaranteed (model doc §5).
     row.state.store((int)RowState::Abandoning, std::memory_order_release);
 }
 
@@ -863,13 +928,17 @@ void ReadAheadRenderer::workerThreadMain() noexcept
 {
     while (!workerShouldExit_.load(std::memory_order_acquire))
     {
-        if (pauseRequested_.load(std::memory_order_acquire))
+        if (pauseDepth_.load(std::memory_order_seq_cst) > 0)
         {
-            pauseAcked_.store(true, std::memory_order_release);
+            // Parked: outside every chain, map and snapshot. Publishing the latest request
+            // epoch here (and only here) is what makes the acknowledgment REAL — see
+            // `acquireWorkerPause`. Re-published every parked iteration so later requests are
+            // acknowledged while parked.
+            pauseAckedEpoch_.store(pauseEpoch_.load(std::memory_order_seq_cst),
+                                   std::memory_order_release);
             sleepBrieflyMicros(200);
             continue;
         }
-        pauseAcked_.store(false, std::memory_order_relaxed);
         if (workerScanOnce() == 0)
         {
             sleepBrieflyMicros(300); // self-paced: the callback never signals (no RT syscalls)
@@ -880,15 +949,10 @@ void ReadAheadRenderer::workerThreadMain() noexcept
 int ReadAheadRenderer::testPumpWorkerOnce() noexcept
 {
     jassert(pumpMode_);
-    if (!pumpMode_ || pauseRequested_.load(std::memory_order_acquire))
+    if (!pumpMode_ || pauseDepth_.load(std::memory_order_seq_cst) > 0)
     {
-        if (pauseRequested_.load(std::memory_order_acquire))
-        {
-            pauseAcked_.store(true, std::memory_order_release);
-        }
         return 0;
     }
-    pauseAcked_.store(false, std::memory_order_relaxed);
     return workerScanOnce();
 }
 
