@@ -88,8 +88,13 @@ no "rewind" of plugin state is ever claimed or attempted.
 
 **Stop while the worker is mid-segment:** nothing special — ownership transitions always
 wait for the claim to clear (`busy == 0`) or the worker's acknowledgment; a row whose worker
-is still inside a render is `Abandoning` (silent for that row, counted) for at most one
-block before it goes live.
+is still inside a render is `Abandoning` (silent for that row, counted, never processed
+concurrently or live). Three moments are distinct and only the first is block-bounded: the
+handover is *requested* at a block begin; the worker *releases* when its in-flight plugin
+call returns and the stop is observed; direct rendering *resumes* at the first block begin
+after that observation. The release is typically well under one block but is bounded only by
+the plugin's `processBlock` duration — **no fixed block count is guaranteed** for the
+`Abandoning` span.
 
 **Frozen playhead (arrangement end, count-in):** the expected-position check and the
 consume-absence check (a row that is owned but was never offered a consume this block left
@@ -136,11 +141,12 @@ Cycle is supported, on the engine's own segmentation rules — no separate DSP p
 * **Monitor enabled on an owned row = immediate handover**, not a drain: the direct path
   switches instantly (clip playback suppressed, live input through the chain), so the row
   takes a discard release and the monitor pass processes it the **same block** when the
-  worker is idle, at most one block later (`Abandoning`, counted) when the worker was
-  mid-segment. v1 drained instead, which over-played ≤ depth clip blocks the direct path
-  would have suppressed and delayed input onset by the same amount — v2 removes both.
-  The residue is the standard bounded state lead (≤ depth segments of clip material in the
-  chain's tails at monitor onset), documented, counted.
+  worker is idle. When the worker was mid-segment on that row, the row is `Abandoning`
+  (silent, counted) until the in-flight plugin call returns — usually the next block, but
+  per §3 that span has **no guaranteed block bound**. v1 drained instead, which over-played
+  ≤ depth clip blocks the direct path would have suppressed and delayed input onset by the
+  same amount — v2 removes both. The residue is the standard bounded state lead (≤ depth
+  segments of clip material in the chain's tails at monitor onset), documented, counted.
 * **If recording starts on a row that is somehow still owned** (armed during the same block,
   degenerate), the row takes the same immediate discard release, so the recording track's
   clip-playback omission applies from the first recording block.
@@ -175,10 +181,13 @@ consume), never concurrent processing. Every miss is counted. What happens next:
   transient hiccup costs exactly the missed segments, then ring hits resume.
 * **Two consecutive missed segments on a row = the mode does not hold:** the row leaves
   read-ahead (discard release, counted separately as a miss abandonment) and renders live
-  again from the next block — correct position, single owner, no hidden run of silent
-  blocks. The instance's fed stream has a bounded gap (≤ the missed segments) at the point
-  the audible stream already went silent; no additional audible artifact is introduced by
-  leaving.
+  again — correct position, single owner, no hidden run of silent blocks. The instance's fed
+  stream has a bounded gap (≤ the missed segments) at the point the audible stream already
+  went silent; no additional audible artifact is introduced by leaving. **The threshold does
+  not bound the total silence by itself:** when the abandoning reset hits a worker that is
+  still inside a render of that row, the row stays `Abandoning` (silent) until that plugin
+  call returns (§3) — live rendering resumes at the first block begin after the release,
+  typically immediately, but with no guaranteed block bound under a stalled plugin.
 * **Re-adoption cooldown** (~64 blocks) prevents a struggling worker from flapping between
   adopt and abandon.
 * Real overload is not hidden and not promised away: a genuine underrun is counted and the
@@ -191,17 +200,34 @@ user interface.
 
 ## 8. Lifetime and exclusive access
 
+**The pause contract:** the worker pause is depth-counted with an epoch handshake. A pause
+request succeeds **only on a real acknowledgment** — the worker observed the request while
+provably outside every chain, map and snapshot, and stays parked for as long as the
+requester holds its pause. A timeout confers **no exclusivity**: the request is withdrawn
+and the caller must abort, defer, or keep holding resources until a real acknowledgment —
+"proceed anyway" does not exist. Nested holders are independent: an aborted or finished
+operation can never resume the worker under another operation still holding a pause. A
+plugin call that never returns therefore stalls the *operation* (resources retained), never
+the audio callback, and is never killed or overlapped.
+
 * **Publish-before-destroy + worker pause:** `PluginInsertHost` publishes the new map, then
   runs the drain hook (production `Main.cpp` and the test harness): wait out the in-flight
-  callback, pause the read-ahead worker until acknowledged (the worker holds no chain, map
-  or snapshot while paused), resume. Retired instances are destroyed only after the hook, and
-  the worker re-acquires the newly published map fresh per segment, so it can never touch a
-  destroyed instance. Ownership is **not** reset by chain edits (v1 full-reset here; v2
-  keeps the queue — see §6).
-* **Offline export:** raising the offline gate pauses the worker and requests a full reset;
-  the gate's early return keeps every callback away from the chains until it drops.
-* **Device stop/start:** stop pauses the worker and hard-resets all ownership before the
-  host releases resources; start re-prepares buffers and resumes.
+  callback (the existing A1/A2 bounded callback drain, unchanged), then wait for an
+  **acknowledged** worker pause — the hook does not return, and the retired instances are
+  not destroyed, until the worker really let go. Between attempts the worker may start new
+  segments; those acquire the newly published map fresh and cannot reach retired instances.
+  Ownership is **not** reset by chain edits (v1 full-reset here; v2 keeps the queue — §6).
+* **Offline export:** raising the offline gate waits for an acknowledged pause (held for the
+  whole gate — the offline render processes the same chains on the message thread) and
+  requests a full reset; the gate's early return keeps every callback away from the chains
+  until it drops.
+* **Device stop:** waits for an acknowledged pause before resetting ownership and before the
+  host's `releaseResources` runs — a stuck worker render stalls device stop with resources
+  retained (the counterpart of JUCE's own guarantee that no audio callback runs during
+  teardown). **Device start:** requires the acknowledgment before resizing the worker's
+  buffers; if it never comes, the buffers are left untouched and the renderer stays dormant
+  for the device session (`prepared_ == false`: nothing is ever adopted) — it retries at the
+  next device start. Shutdown joins the worker thread outright.
 * **Structure changes:** the worker verifies per segment that the adopted track index still
   resolves to the adopted TrackId and self-stops otherwise; a row whose consume disappears
   (removed from the routing plan) is released within one block by the consume-absence check.
@@ -212,27 +238,53 @@ user interface.
 ## 9. Save / Save As / autosave — the state-capture window
 
 All three paths (`ProjectIoCoordinator` → `Session::saveProjectToFile` → `exportChain` →
-`getStateInformation`) are bracketed by the engine's **plugin-state capture window**:
+`getStateInformation`) are bracketed by the engine's **plugin-state capture window**
+(`ScopedPluginStateCaptureWindow`), whose result **gates the write**. The window separates
+three different protections — only the first two are guarantees this feature can make:
 
-* **During playback:** the window requests a gapless draining release of every owned row and
-  waits (bounded, message thread) until none is owned, then pauses the worker. Capture then
-  reads `getStateInformation` from instances that are processed by the audio callback only,
-  **exactly at the audible position** — the same concurrency class and the same state
-  meaning as an A1/A2 save during playback today. The drain is inaudible (that is its
-  defining property) and adoption resumes after the window closes.
-* **While paused/stopped:** nothing consumes, so no drain is attempted; the worker is paused
-  (acknowledged) and capture reads instances that nobody is processing. The captured state
-  corresponds to the end of the instance's contiguous fed stream, which may be ≤ depth
-  segments past the paused playhead — a defined, bounded, documented capture point (generic
-  plugin state is parameters/preset data; DSP tails are not restorable sample-exactly by any
-  host path, including A1/A2's).
-* Captured **parameters are always current** — rendered-but-unplayed segments hold old
-  parameter *audio*, never the saved state; nothing stale is serialized from prepared jobs.
+1. **Concurrent-access protection (against the worker only):** a successful window holds an
+   *acknowledged* worker pause — the new writer this feature introduced is provably outside
+   every chain while `getStateInformation` runs. The **audio callback is NOT paused**: during
+   a playing save the callback keeps processing the instances while they are serialized.
+   That is exactly the pre-existing direct-path save concurrency class (A1/A2 today reads
+   `getStateInformation` on the message thread while the callback runs `processBlock`); the
+   window **restores** that class, it does not improve on it.
+2. **Parameter revision:** captured parameters are always current — rendered-but-unplayed
+   segments hold old parameter *audio*, never the saved state; nothing stale is serialized
+   from prepared segments.
+3. **Time-dependent DSP state:** after a successful drain there is **no read-ahead-induced
+   state lead** — at the capture point the instance's processed history ends at the audibly
+   consumed stream (and during a playing save it keeps advancing live while serialization
+   runs, exactly as on the direct path). This is *not* a sample-exact DSP checkpoint; generic
+   plugin state is parameters/preset data, and DSP tails are not restorable sample-exactly by
+   any host path, A1/A2's included.
+
+Window mechanics per transport state:
+
+* **During playback:** adoption is gated off and every owned row takes a gapless draining
+  release as consumption proceeds (bounded message-thread wait); then the acknowledged worker
+  pause. The drain is inaudible — a successful window changes nothing audible.
+* **While paused/stopped:** nothing consumes, so no drain is attempted (a Playing → Paused
+  transition *during* the wait resolves to this branch instead of stalling); the worker pause
+  is still required and acknowledged. The captured state corresponds to the end of the
+  instance's contiguous fed stream, ≤ depth segments past the paused playhead — a defined,
+  bounded, documented capture point.
 * Unavailable-plugin placeholders re-emit their saved blobs byte-for-byte, unchanged.
-* An explicit Save reports completion only after the file is written (unchanged); autosave
-  uses the same bounded window — no audible stops, no unbounded callback waits (the window
-  never blocks the audio thread; it only gates adoption and waits on its own message
-  thread, capped).
+
+**Failure contract (the window can fail):** when the drain cannot complete (e.g. the
+transport claims Playing but no callbacks arrive — stalled or stopped device — or sustained
+overload) or the worker never acknowledges its pause, `beginPluginStateCaptureWindow`
+returns **false** after releasing every hold it took (no stuck adoption gate, no stuck
+pause). Nothing is captured and nothing is written:
+
+* **Explicit Save / Save As** fails with an error (the normal save-failure dialog), does
+  **not** mark the project clean, and leaves the existing project file byte-for-byte
+  untouched (the write is never started; the writer itself is atomic temp+move besides).
+* **Autosave** is deferred: the failure leaves the dirty flag and any previous autosave
+  untouched, and the existing autosave tick cadence retries later — no tight retry loop, no
+  dialogs.
+* The audio callback is never blocked by any of this; the window only gates adoption and
+  waits on the message thread, capped.
 
 ## 10. What the counters mean (internal only)
 
@@ -249,8 +301,13 @@ discarded or missed. "Exactly once" is claimed only for stable playback and the 
 
 The focused tests (`ReadAheadPrototypeFocusedTests`) drive the production callback with
 deterministic, state-dependent test inserts (feedback state + per-call position/size
-recording + state serialization that embeds the probe's processed-sample count). Linux
-results verify **logic, audio data and lifetime** only: bit-identity with the direct path
-(linear and cycle), pause/resume continuation, exactly-once streams, the save capture
-window, miss/abandon recovery, monitor/record handover and chain-edit lifetime. They say
-**nothing** about Windows/ASIO performance, real third-party plugins, or audible quality.
+recording + state serialization that embeds the probe's processed-sample count, plus a
+holdable probe that parks *inside* `processBlock` under test control). Linux results verify
+**logic, audio data and lifetime** only: bit-identity with the direct path (linear and
+cycle), pause/resume continuation, exactly-once streams, the save capture window including
+its failure contract (failed drain/pause ⇒ no capture, file untouched, dirty retained,
+later retry succeeds), the pause acknowledgment contract under a deliberately blocked worker
+(timeout ⇒ explicit failure and no exclusivity; late acknowledgment ⇒ clean recovery; chain
+retire and device stop wait for the real release), miss/abandon recovery, monitor/record
+handover and chain-edit lifetime. They say **nothing** about Windows/ASIO performance, real
+third-party plugins, or audible quality.
