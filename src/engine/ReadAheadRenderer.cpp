@@ -2,7 +2,13 @@
 
 #include "engine/ReadAheadRenderer.h"
 
+#include "engine/ReadAheadStartupConfig.h"
+
 #include <chrono>
+
+static_assert(readahead::kReadAheadDepthMin == readahead::ReadAheadRenderer::kMinDepth
+                  && readahead::kReadAheadDepthMax == readahead::ReadAheadRenderer::kMaxDepth,
+              "startup depth clamp must match the renderer");
 
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"

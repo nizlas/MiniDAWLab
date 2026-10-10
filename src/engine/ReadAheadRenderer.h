@@ -4,8 +4,9 @@
 // ReadAheadRenderer.h / ReadAheadRenderer.cpp — experimental audio-row read-ahead (Stage B, model v2)
 // =============================================================================
 //
-// Model: docs/READAHEAD_PROTOTYPE.md. OFF by default; exists only when the process was started
-// with `--experimental-readahead[=N]` (or a test created it in pump mode). One dedicated worker
+// Model: docs/READAHEAD_PROTOTYPE.md. Exists only when the process depth is greater than 0
+// (`ReadAheadStartupConfig.h`: start argument, then the saved checkbox, then on at depth 3)
+// or a test created it in pump mode. One dedicated worker
 // thread (default priority — deliberately NOT the pool's pro-audio priority) — separate from the
 // InstrumentRenderPool that must meet the current audio deadline — renders FUTURE segments of
 // adopted audio rows through the production strip core into per-row SPSC rings. The audio
@@ -76,8 +77,9 @@ class Session;
 namespace readahead
 {
 
-/// Process-wide CLI configuration (`--experimental-readahead[=N]`); 0 = disabled (default).
-/// Message thread, before the engine is constructed (same pattern as the render-pool override).
+/// Process-wide depth consumed by the engine constructor. Starts at 0, so a test that never
+/// calls the startup resolver builds no renderer. The application sets it from
+/// `ReadAheadStartupConfig` before constructing the engine (0 = off for this process).
 void setConfiguredReadAheadDepth(int depthBlocksOrZero) noexcept;
 [[nodiscard]] int configuredReadAheadDepth() noexcept;
 

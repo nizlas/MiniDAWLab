@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.3.0 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -110,6 +110,7 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/RoutingPlanBuilder.cpp
     src/engine/PlaybackEngine.cpp
     src/engine/ReadAheadRenderer.cpp
+    src/engine/ReadAheadStartupConfig.cpp
     src/engine/InstrumentRenderPool.cpp
     src/app/AudioMixdownExporter.cpp
     src/app/AudioMixdownProgressWindow.cpp
@@ -125,6 +126,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/TimelineRulerView.cpp
     src/ui/TimelineLocatorPainter.cpp
     src/ui/LatencySettingsView.cpp
+    src/ui/ReadAheadPreferenceSection.cpp
     src/ui/CollapsibleSideStrip.cpp
     src/ui/InspectorPanControl.cpp
     src/ui/InspectorView.cpp
@@ -602,7 +604,8 @@ juce_generate_juce_header(AudioStripParallelFocusedTests)
 
 # -----------------------------------------------------------------------------
 # ReadAheadPrototypeFocusedTests: experimental audio-row read-ahead prototype (Stage B,
-# docs/READAHEAD_PROTOTYPE.md; OFF by default, CLI `--experimental-readahead`). The PRODUCTION
+# docs/READAHEAD_PROTOTYPE.md). These tests set the depth themselves; the app's
+# default-on choice lives in ReadAheadStartupFocusedTests. The PRODUCTION
 # PlaybackEngine callback + a deterministic PUMP-mode read-ahead renderer (the test is the worker)
 # with a STATE-DEPENDENT probe insert recording playhead positions: flag-off bit-identity in stable
 # playback (adoption included), exactly-once contiguous streams, delayed-worker miss = counted
@@ -667,6 +670,30 @@ if (MSVC)
     target_compile_options(ReadAheadPrototypeFocusedTests PRIVATE /wd4458)
 endif()
 juce_generate_juce_header(ReadAheadPrototypeFocusedTests)
+
+# -----------------------------------------------------------------------------
+# ReadAheadStartupFocusedTests: the 1.3.1 on/off choice only (not the renderer).
+# Isolated preference files, CLI priority, and the Audio Settings checkbox section
+# in a real native window. Does not open an audio device.
+# -----------------------------------------------------------------------------
+juce_add_console_app(ReadAheadStartupFocusedTests PRODUCT_NAME "ReadAheadStartupFocusedTests")
+target_sources(ReadAheadStartupFocusedTests PRIVATE
+    tests/selftest/ReadAheadStartupFocusedTestsMain.cpp
+    src/engine/ReadAheadStartupConfig.cpp
+    src/ui/ReadAheadPreferenceSection.cpp)
+target_include_directories(ReadAheadStartupFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ReadAheadStartupFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(ReadAheadStartupFocusedTests
+    PRIVATE
+        juce::juce_core
+        juce::juce_events
+        juce::juce_graphics
+        juce::juce_gui_basics
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+juce_generate_juce_header(ReadAheadStartupFocusedTests)
 
 # -----------------------------------------------------------------------------
 # LiveMidiRecordingFocusedTests: live MIDI input slice — the realtime LiveMidiInputBus (device-thread

@@ -8,7 +8,9 @@
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
 #include "transport/Transport.h"
+#include "engine/ReadAheadStartupConfig.h"
 #include "ui/LatencySettingsView.h"
+#include "ui/ReadAheadPreferenceSection.h"
 
 namespace
 {
@@ -25,11 +27,15 @@ public:
         // list is always bounded by the device's real channel count. Outputs stay a fixed stereo
         // pair — that is the product's output format and imposes no input limit.
         : selector_(dm, 0, 64, 2, 2, false, false, false, false)
+        , readAheadSection_(readahead::defaultReadAheadPreferenceFile(),
+                            playbackEngine.experimentalReadAhead() != nullptr,
+                            readahead::publishedReadAheadProcessConfig().commandLineOverride)
         , latencyView_(latencyStore, playbackEngine)
     {
         addAndMakeVisible(selector_);
+        addAndMakeVisible(readAheadSection_);
         addAndMakeVisible(latencyView_);
-        setSize(640, 680);
+        setSize(640, 860);
     }
 
     void resized() override
@@ -47,7 +53,9 @@ public:
         const int selectorH = juce::jmax(1, selector_.getHeight());
         selector_.setBounds(area.getX(), topY, w, selectorH);
 
-        const int latencyY = topY + selectorH + kGapBelowSelectorPx;
+        const int sectionY = topY + selectorH + kGapBelowSelectorPx;
+        readAheadSection_.setBounds(area.getX(), sectionY, w, ReadAheadPreferenceSection::kPreferredHeightPx);
+        const int latencyY = sectionY + ReadAheadPreferenceSection::kPreferredHeightPx + kGapBelowSelectorPx;
         const int latencyH = juce::jmax(1, area.getBottom() - latencyY);
         latencyView_.setBounds(area.getX(), latencyY, w, latencyH);
     }
@@ -56,6 +64,7 @@ public:
 
 private:
     juce::AudioDeviceSelectorComponent selector_;
+    ReadAheadPreferenceSection readAheadSection_;
     LatencySettingsView latencyView_;
 };
 

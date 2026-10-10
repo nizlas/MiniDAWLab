@@ -264,9 +264,9 @@ public:
         return instrumentRenderPool_ != nullptr ? instrumentRenderPool_->workerCount() : 0;
     }
     // -----------------------------------------------------------------------
-    // Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md). OFF by default: `readAhead_` exists
-    // only when the process started with `--experimental-readahead[=N]` (ctor reads the global
-    // config) or a test created it in pump mode. Null = byte-for-byte the A1/A2 paths.
+    // Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md). `readAhead_` exists only when
+    // `configuredReadAheadDepth()` is greater than 0 at construction (the startup resolver,
+    // or a test), or a test created it in pump mode. Null = the A1/A2 paths with no read-ahead.
     // -----------------------------------------------------------------------
     /// [Message thread, BEFORE the device starts] Create a deterministic PUMP-mode renderer for
     /// focused tests (no worker thread; the test drives it via `experimentalReadAhead()`).
