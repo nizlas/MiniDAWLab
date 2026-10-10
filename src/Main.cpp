@@ -55,6 +55,7 @@
 #include "domain/PlacedClip.h"
 #include "engine/CountInClickOutput.h"
 #include "engine/PlaybackEngine.h"
+#include "engine/ReadAheadStartupConfig.h"
 #include "engine/RecorderService.h"
 #include "plugins/PluginInsertHost.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -155,23 +156,36 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // before the engine is constructed; absent = the conservative machine default.
     {
         const juce::StringArray args = getCommandLineParameterArray();
-        // Experimental read-ahead prototype (docs/READAHEAD_PROTOTYPE.md): OFF by default; no
-        // settings panel. `--experimental-readahead` (depth 3) or `--experimental-readahead=N`.
-        for (const juce::String& arg : args)
+        // Read-ahead (docs/READAHEAD_PROTOTYPE.md). The renderer is unchanged; this only
+        // chooses the depth before the engine is constructed. Priority: start argument,
+        // then the saved Audio Settings checkbox, then on at depth 3. See
+        // ReadAheadStartupConfig.h. A start argument is not written back to the file.
         {
-            if (arg == "--experimental-readahead" || arg.startsWith("--experimental-readahead="))
+            const readahead::ReadAheadProcessConfig readAheadConfig = readahead::resolveReadAheadProcessConfig(
+                args, readahead::defaultReadAheadPreferenceFile());
+            readahead::publishReadAheadProcessConfig(readAheadConfig);
+            readahead::setConfiguredReadAheadDepth(readAheadConfig.activeDepth);
+            if (readAheadConfig.conflictingArguments)
             {
-                int depth = 3;
-                if (arg.containsChar('='))
-                {
-                    depth = juce::jlimit(readahead::ReadAheadRenderer::kMinDepth,
-                                         readahead::ReadAheadRenderer::kMaxDepth,
-                                         arg.fromFirstOccurrenceOf("=", false, false).getIntValue());
-                }
-                readahead::setConfiguredReadAheadDepth(depth);
-                juce::Logger::writeToLog("[engine] EXPERIMENTAL read-ahead enabled, depth "
-                                         + juce::String(depth) + " blocks");
-                break;
+                juce::Logger::writeToLog("[engine] read-ahead start arguments conflict; the last one wins");
+            }
+            juce::String why = "default";
+            if (readAheadConfig.commandLineOverride)
+            {
+                why = "start argument";
+            }
+            else if (readAheadConfig.hasSavedChoice)
+            {
+                why = "saved setting";
+            }
+            if (readAheadConfig.activeDepth > 0)
+            {
+                juce::Logger::writeToLog("[engine] read-ahead on, depth " + juce::String(readAheadConfig.activeDepth)
+                                         + " (" + why + ")");
+            }
+            else
+            {
+                juce::Logger::writeToLog("[engine] read-ahead off (" + why + ")");
             }
         }
         for (int i = 0; i + 1 < args.size(); ++i)

@@ -9371,8 +9371,9 @@ void StabilityScenarioRunner::appendReadAheadTransitionsSteps(const StabilitySce
         std::int64_t playheadAtPause = 0;
         int observations = 0;
         int trackCountBefore = 0;
-        /// Started WITHOUT `--experimental-readahead`: the same transport / save / reopen walk runs as
-        /// an A control (ownership expectations are skipped; the target is the first AmpliTube row).
+        /// Read-ahead off for this process (`--no-readahead`, or a saved Off): the same transport /
+        /// save / reopen walk runs as an A control (ownership expectations are skipped; the target
+        /// is the first AmpliTube row). Detected from the engine, not from the argument text.
         bool control = false;
     };
     auto S = std::make_shared<State>();

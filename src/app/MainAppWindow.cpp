@@ -7496,7 +7496,7 @@ private:
             readahead::ReadAheadRenderer* const ra = playbackEngine_.experimentalReadAhead();
             if (ra == nullptr)
             {
-                return "disabled (no --experimental-readahead)";
+                return "disabled";
             }
             const auto c = ra->countersSnapshot();
             juce::String s;

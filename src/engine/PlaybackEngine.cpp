@@ -349,8 +349,8 @@ PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderS
     const int workers = override >= 0 ? override : instrument_render::defaultWorkerCount();
     instrumentRenderPool_ = std::make_unique<instrument_render::InstrumentRenderPool>();
     instrumentRenderPool_->setWorkerCount(workers);
-    // Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md): exists ONLY with the CLI flag
-    // `--experimental-readahead[=N]`; absent flag = no renderer = the exact A1/A2 paths.
+    // Read-ahead (docs/READAHEAD_PROTOTYPE.md): the constructor only reads the depth already
+    // published by ReadAheadStartupConfig. Depth 0 builds no renderer (the A1/A2 paths).
     const int readAheadDepth = readahead::configuredReadAheadDepth();
     if (readAheadDepth > 0)
     {

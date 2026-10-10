@@ -1,10 +1,21 @@
 # Read-ahead prototype — state/time model and transitions (Stage B prototype, v2)
 
-**Status: experimental, OFF by default.** Enabled only with the CLI flag
-`--experimental-readahead` (optional depth: `--experimental-readahead=N`, N = 2..8 queued
-segments, default 3). Without the flag the engine contains **no** read-ahead objects and every
-code path is byte-for-byte the A1/A2 behavior. This is DAL's own pre-processing of eligible
-audio tracks; it is **not** an integration with Steinberg's ASIO-Guard.
+**Status: experimental. On by default from 1.3.1** when Audio Settings has no saved choice.
+The renderer, row selection, depth cap and thread model are unchanged. What changed is only
+how the process depth is chosen, before the engine is constructed (`ReadAheadStartupConfig.h`):
+
+1. An explicit start argument. `--experimental-readahead` (depth 3) or
+   `--experimental-readahead=N` (N clamped to 2..8) turns it on. `--no-readahead` turns it
+   off. If several of these appear, **the last one wins**. A start argument applies only to
+   this process and is not written to the preference file.
+2. The saved checkbox in Audio Settings (`%APPDATA%\MiniDAWLab\read-ahead.xml`).
+3. No saved choice: **on, depth 3**. A 1.3.0 install has no preference file, so the first
+   start after upgrading is on.
+
+Depth 0 still builds no read-ahead objects; those paths stay the A1/A2 behaviour. The
+checkbox changes the next start only. Parallel strip processing does not read this setting.
+This is DAL's own pre-processing of eligible audio tracks; it is **not** an integration with
+Steinberg's ASIO-Guard.
 
 This is the v2 model. v1 (the first prototype commit) treated every transport pause as a
 discontinuity and gated cycle off entirely; v2 replaces those with a coherent stream model
