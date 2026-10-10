@@ -1,15 +1,15 @@
 # Track automation, stage 1: Channel Volume and Pan (2026-10-10)
 
 > **Status: planned, not implemented.** This document is the steering plan for the first
-> automation stage. It does not change production code, the project format, or the
-> experimental read-ahead flag. Implementation starts only after this plan is reviewed.
+> automation stage. It does not change production code, the project format, or the 1.3.1
+> read-ahead startup policy. Implementation starts only after this plan is reviewed.
 >
-> **Reviewed revision:** `405e09bc111000a060e5fe33df0cb1177c9942c6` (`v1.3.0`, `origin/main`).
-> Parallel audio/instrument strips (A1/A2) and the experimental read-ahead prototype are on
-> this revision. Read-ahead stays off unless the process is started with
-> `--experimental-readahead`. Project format is still `kCurrentVersion = 28`
-> (`src/io/ProjectFile.h`). An implementation of this plan will need a later format bump;
-> this planning change does not make one.
+> **Reviewed revision:** `3a6f3384b80dac6ff7663b538beb4dc446fbff0e` (`v1.3.1`, `origin/main`).
+> Parallel audio/instrument strips (A1/A2) and the read-ahead prototype are on this
+> revision. Read-ahead is on at depth 3 unless Audio Settings has a saved Off or the
+> process was started with `--no-readahead` (`ReadAheadStartupConfig.h`). Project format
+> is still `kCurrentVersion = 28` (`src/io/ProjectFile.h`). An implementation of this plan
+> will need a later format bump; this planning change does not make one.
 >
 > File and function references below are against that revision.
 
@@ -44,13 +44,14 @@ law. Neither moves.
 - A second write mode (Latch, Touch/Latch, Trim, or a dedicated automation lane record arm).
 - Independent Read/Write per lane.
 - Moving the fader to after the Post inserts, changing the pan law, or changing read-ahead's
-  default, depth cap, row selection, or thread model.
+  1.3.1 startup policy (Audio Settings checkbox, default on at depth 3, CLI override),
+  depth cap, row selection, or thread model.
 - Making ordinary manual fader/pan edits undoable. Today they are not; this stage does not
   change that. Only a finished automation gesture is an undo step.
 - A general automation framework, bezier editor, or tempo-mapped automation.
 - Rewriting `docs/CURRENT_ARCHITECTURE.md` or the historical wording of the parallel /
-  read-ahead backlog rows. Those rows predate 1.3.0; the code on `405e09b` is the baseline
-  this plan uses.
+  read-ahead backlog rows. Those rows predate 1.3.0; the code on `3a6f338` (1.3.1) is the
+  baseline this plan uses.
 
 ## 3. What the code does today
 
@@ -149,7 +150,11 @@ is a step. Moving automation has to ramp inside the block or it will zipper.
 
 ### 3.8 Read-ahead
 
-`docs/READAHEAD_PROTOTYPE.md` (shipped, off by default). The worker renders the **whole
+`docs/READAHEAD_PROTOTYPE.md` (shipped). Since 1.3.1 the process depth is chosen in
+`ReadAheadStartupConfig` before the engine is constructed: a start argument
+(`--experimental-readahead[=N]`, `--no-readahead`, last one wins), else the saved Audio
+Settings checkbox (`%APPDATA%\MiniDAWLab\read-ahead.xml`), else on at depth 3. Depth 0
+still builds no renderer. The worker, when present, renders the **whole
 strip**, so fader and pan are baked into the queued segment. §6: a fader, pre-gain, pan,
 mute, solo, or plugin-parameter edit is heard late by at most `depth` segments, because
 those segments were already rendered. Discarding the queue on every such edit was rejected
@@ -531,8 +536,8 @@ the published curve snapshot. Not at the UI playhead.
 - While a gesture is active, that track is not offered for adoption. After release, the
   normal offer rules apply and new segments evaluate the curve that now includes the
   stroke and the return ramp.
-- This exclusion is per gesture. It does not change the flag's default, the depth cap,
-  which rows are eligible when idle, or the thread model.
+- This exclusion is per gesture. It does not change the 1.3.1 startup policy, the depth
+  cap, which rows are eligible when idle, or the thread model.
 - Stage 1 does **not** need a blanket "never read-ahead a track that has automation".
   Only an in-progress gesture pulls the row back to the live callback.
 
@@ -588,8 +593,8 @@ commits that ring.
 ## 6. Implementation order
 
 The stage is delivered when slices 1–3 are all in. Slice 1 alone is not a release.
-Slice 4 is part of the same stage because read-ahead is already on by flag; it does not
-wait for a later product version.
+Slice 4 is part of the same stage because read-ahead is already in the product (on at
+depth 3 unless saved Off or `--no-readahead`); it does not wait for a later version.
 
 **Slice 1 — model, evaluator, playback, export.** Address, anchor, points, bend, pure
 evaluator, snapshot publish, project round-trip behind the new format version, block
@@ -677,6 +682,6 @@ not reopen them silently.
 | Manual fader edits with Read off | Stay non-undoable |
 | MIDI | No Volume or Pan lanes |
 | Stereo Out | Volume and Pan, because the strip already has both |
-| Read-ahead | Evaluate at segment time; discard only on gesture; flag and cap unchanged |
+| Read-ahead | Evaluate at segment time; discard only on gesture; 1.3.1 startup policy and cap unchanged |
 | Proxies | Volume/Pan do not enter the fingerprint |
 | Format | Bump when the feature is implemented, not in this planning change |
