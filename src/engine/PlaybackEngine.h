@@ -276,6 +276,10 @@ public:
 
     /// [Message thread] Live Volume/Pan gesture. The audio thread stamps the values.
     TrackAutomationRuntime& trackAutomation() noexcept { return automationRuntime_; }
+
+    /// [Message thread] Copy the project's timeline rate for the audio callback.
+    /// The callback does not read `Session::timelineSampleRate_` itself.
+    void refreshAutomationTimelineRate() noexcept;
     /// [Message thread] Pause+resume of the read-ahead worker — the publish-before-destroy hook
     /// calls this AFTER the new insert map is published and the callback was waited out: an
     /// acknowledged pause proves the worker is outside every chain render that could still
@@ -772,6 +776,7 @@ private:
     std::atomic<std::uint32_t> loadWindowNearOverruns_{ 0 };
     std::atomic<std::uint32_t> loadWindowOverruns_{ 0 };
     std::atomic<double> deviceSampleRateForDiagnostics_{ 0.0 };
+    std::atomic<double> automationTimelineRate_{ 0.0 };
 
     PlaybackIntent lastTransportIntentInCallback_ = PlaybackIntent::Stopped;
 

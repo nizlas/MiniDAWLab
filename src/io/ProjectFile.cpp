@@ -126,14 +126,20 @@ namespace
             points.add(juce::var(po.get()));
         }
         o->setProperty("points", juce::var(points));
-        if (!curve.control.empty())
+        if (!curve.shape.empty())
         {
-            juce::Array<juce::var> controls;
-            for (const float c : curve.control)
+            juce::Array<juce::var> shapes;
+            for (const TrackAutomationShape& shape : curve.shape)
             {
-                controls.add(static_cast<double>(c));
+                juce::DynamicObject::Ptr so = new juce::DynamicObject();
+                so->setProperty("u", static_cast<double>(shape.kneeU));
+                so->setProperty("y", static_cast<double>(shape.kneeY));
+                so->setProperty("t0", static_cast<double>(shape.tan0));
+                so->setProperty("tk", static_cast<double>(shape.tanKnee));
+                so->setProperty("t1", static_cast<double>(shape.tan1));
+                shapes.add(juce::var(so.get()));
             }
-            o->setProperty("c", juce::var(controls));
+            o->setProperty("s", juce::var(shapes));
         }
         return juce::var(o.get());
     }
@@ -173,14 +179,51 @@ namespace
                 curve.points.push_back(point);
             }
         }
-        const juce::var controls = v.getProperty("c", {});
-        if (controls.isArray())
+        const juce::var shapes = v.getProperty("s", {});
+        if (shapes.isArray())
         {
-            for (const juce::var& cv : *controls.getArray())
+            for (const juce::var& sv : *shapes.getArray())
             {
-                if (cv.isDouble() || cv.isInt() || cv.isInt64())
+                if (!sv.isObject())
                 {
-                    curve.control.push_back(static_cast<float>(static_cast<double>(cv)));
+                    continue;
+                }
+                TrackAutomationShape shape;
+                const auto readNum = [&sv](const char* key, const float fallback) {
+                    const juce::var n = sv.getProperty(key, {});
+                    if (n.isDouble() || n.isInt() || n.isInt64())
+                    {
+                        return static_cast<float>(static_cast<double>(n));
+                    }
+                    return fallback;
+                };
+                shape.kneeU = readNum("u", 0.5f);
+                shape.kneeY = readNum("y", 0.0f);
+                shape.tan0 = readNum("t0", 0.0f);
+                shape.tanKnee = readNum("tk", 0.0f);
+                shape.tan1 = readNum("t1", 0.0f);
+                curve.shape.push_back(shape);
+            }
+        }
+        else
+        {
+            const juce::var controls = v.getProperty("c", {});
+            if (controls.isArray())
+            {
+                std::vector<float> legacy;
+                for (const juce::var& cv : *controls.getArray())
+                {
+                    if (cv.isDouble() || cv.isInt() || cv.isInt64())
+                    {
+                        legacy.push_back(static_cast<float>(static_cast<double>(cv)));
+                    }
+                }
+                curve.shape.resize(legacy.size());
+                for (size_t i = 0; i < legacy.size() && i + 1 < curve.points.size(); ++i)
+                {
+                    curve.shape[i] = trackAutomationShapeFromLegacyControl(curve.points[i].value,
+                                                                          curve.points[i + 1].value,
+                                                                          legacy[i]);
                 }
             }
         }

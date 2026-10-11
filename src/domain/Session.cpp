@@ -1410,8 +1410,13 @@ bool Session::setTrackMidiInputAssignment(const TrackId trackId,
 bool Session::setTrackAutomation(const TrackId trackId,
                                  TrackAutomationState state,
                                  const float* const manualGain,
-                                 const float* const manualPan) noexcept
+                                 const float* const manualPan,
+                                 uint32_t* const publishedRevision) noexcept
 {
+    if (publishedRevision != nullptr)
+    {
+        *publishedRevision = 0;
+    }
     if (trackId == kInvalidTrackId)
     {
         return false;
@@ -1426,6 +1431,9 @@ bool Session::setTrackAutomation(const TrackId trackId,
     {
         return false;
     }
+    const uint32_t published = current->getTrack(idx).getAutomation().revision + 1u;
+    state.revision = published == 0u ? 1u : published;
+    const uint32_t revisionNow = state.revision;
     std::shared_ptr<const SessionSnapshot> next
         = SessionSnapshot::withTrackAutomation(*current, trackId, std::move(state));
     if (next == nullptr)
@@ -1446,6 +1454,10 @@ bool Session::setTrackAutomation(const TrackId trackId,
         return false;
     }
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    if (publishedRevision != nullptr)
+    {
+        *publishedRevision = revisionNow;
+    }
     return true;
 }
 

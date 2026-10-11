@@ -2955,8 +2955,9 @@ double TrackLanesView::automationPlayheadSeconds() const noexcept
     {
         return automationPlayheadSeconds_();
     }
-    const double rate = session_.timelineSampleRateOr(48000.0);
-    return static_cast<double>(transport_.readPlayheadSamplesForUi()) / (rate > 0.0 ? rate : 48000.0);
+    const double rate = trackAutomationTimelineRate(session_.getTimelineSampleRate(),
+                                                    effectiveDisplaySampleRate(deviceManager_));
+    return static_cast<double>(transport_.readPlayheadSamplesForUi()) / rate;
 }
 
 void TrackLanesView::fillAutomationHeader(TrackHeaderModel& model, const TrackId trackId) const
@@ -3191,10 +3192,11 @@ void TrackLanesView::layoutAutomationLanesForRow(const TrackId trackId,
         widget->setVisible(!rect.isEmpty());
         widget->setBounds(rect);
         widget->setCurve(curve, manual, colour);
-        const double rate = session_.timelineSampleRateOr(48000.0);
+        const double rate = trackAutomationTimelineRate(session_.getTimelineSampleRate(),
+                                                        effectiveDisplaySampleRate(deviceManager_));
         widget->setTimeMap(timelineViewport_.getSamplesPerPixel(),
                            timelineViewport_.getVisibleStartSamples(),
-                           rate > 0.0 ? rate : 48000.0);
+                           rate);
         widget->setPlayheadSeconds(automationPlayheadSeconds());
         juce::ignoreUnused(headerW);
     };

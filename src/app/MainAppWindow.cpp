@@ -28,6 +28,7 @@
 #include "app/TransportLayoutHelper.h"
 #include "app/TransportPlayPauseStopController.h"
 #include "app/SoloCoordinator.h"
+#include "app/TrackAutomationCommitBatch.h"
 #include "app/UndoRedoCoordinator.h"
 #include "app/ShortcutDiagnostics.h"
 #include "app/TransportControlsFactory.h"
@@ -506,7 +507,10 @@ public:
                     }
                 },
                 [this] { syncViewportFromSession(); },
-                [this] { trackLanesView.syncTracksFromSession(); },
+                [this] {
+                    trackLanesView.syncTracksFromSession();
+                    playbackEngine_.trackAutomation().messageThread_snapshotReplaced();
+                },
                 [this] { rulerView.repaint(); },
                 [this] { trackLanesView.repaint(); },
                 [this] { refreshInstrumentUi(); },
@@ -2190,6 +2194,12 @@ public:
                         liveMidiInputCoordinator_->clearRuntimeStateForProjectReplace();
                     }
                     trackLanesView.clearAutomationWriteFlags();
+                    playbackEngine_.trackAutomation().messageThread_reset();
+                    automationGestureId_ = 0;
+                    automationPresses_ = 0;
+                    automationReleasedIds_.clear();
+                    automationGroups_.clear();
+                    automationDrain_.clear();
                     proxyRenderScheduler_.notifyProjectChanged();
                     if (proxyUpdatePolicyService_ != nullptr)
                     {
@@ -6106,125 +6116,240 @@ private:
             [this]() { mini_daw_app_dialogs::showMidiChannelsHelpDialog(*this); });
     }
 
+    void serviceAutomationGestures()
+    {
+        playbackEngine_.refreshAutomationTimelineRate();
+        auto& runtime = playbackEngine_.trackAutomation();
+        bool overflow = false;
+        TrackId overflowTrack = kInvalidTrackId;
+        int overflowParam = 0;
+        if (runtime.consumeOverflow(overflowTrack, overflowParam))
+        {
+            overflow = true;
+        }
+        TrackId capturingIds[kTrackAutomationSlots] = {};
+        int capturingParams[kTrackAutomationSlots] = {};
+        uint32_t capturingGestures[kTrackAutomationSlots] = {};
+        const int capturingCount = runtime.capturingParameters(
+            capturingIds, capturingParams, capturingGestures, kTrackAutomationSlots);
+        const double horizon = runtime.drainHorizon();
+        for (int i = 0; i < capturingCount; ++i)
+        {
+            TrackAutomationPoint drained[256] = {};
+            const int got = runtime.drainBefore(capturingIds[i], capturingParams[i], horizon, drained, 256);
+            if (got <= 0)
+            {
+                continue;
+            }
+            AutomationDrainPrefix* prefix = nullptr;
+            for (AutomationDrainPrefix& row : automationDrain_)
+            {
+                if (row.trackId == capturingIds[i] && row.parameterId == capturingParams[i]
+                    && row.gestureId == capturingGestures[i])
+                {
+                    prefix = &row;
+                    break;
+                }
+            }
+            if (prefix == nullptr)
+            {
+                automationDrain_.push_back({});
+                prefix = &automationDrain_.back();
+                prefix->trackId = capturingIds[i];
+                prefix->parameterId = capturingParams[i];
+                prefix->gestureId = capturingGestures[i];
+            }
+            prefix->points.insert(prefix->points.end(), drained, drained + got);
+        }
+        TrackId commitTrack = kInvalidTrackId;
+        int commitParam = 0;
+        // The commit holds the whole ring. It stays on the heap so a timer tick
+        // on the message thread does not spend that space on the stack.
+        const auto commit = std::make_unique<TrackAutomationCommit>();
+        while (runtime.takeCommit(commitTrack, commitParam, *commit))
+        {
+            const auto stroke = std::make_unique<TrackAutomationStroke>();
+            stroke->trackId = commitTrack;
+            stroke->parameterId = commitParam;
+            stroke->commit = *commit;
+            for (AutomationDrainPrefix& row : automationDrain_)
+            {
+                if (row.trackId == commitTrack && row.parameterId == commitParam && row.gestureId == commit->gestureId)
+                {
+                    stroke->samples.insert(stroke->samples.end(), row.points.begin(), row.points.end());
+                    row.points.clear();
+                }
+            }
+            for (int i = 0; i < commit->eventCount; ++i)
+            {
+                stroke->samples.push_back(commit->events[static_cast<size_t>(i)]);
+            }
+            if (commit->incomplete)
+            {
+                overflow = true;
+            }
+            trackAutomationCollectStroke(automationGroups_, std::move(*stroke));
+        }
+        const auto wasReleased = [this](const uint32_t id) {
+            return std::find(automationReleasedIds_.begin(), automationReleasedIds_.end(), id)
+                   != automationReleasedIds_.end();
+        };
+        for (TrackAutomationUndoGroup& group : automationGroups_)
+        {
+            if (wasReleased(group.gestureId))
+            {
+                group.userReleased = true;
+            }
+        }
+        std::vector<TrackAutomationUndoGroup> ready;
+        std::vector<TrackAutomationUndoGroup> keep;
+        for (TrackAutomationUndoGroup& group : automationGroups_)
+        {
+            if (trackAutomationGroupReady(group, runtime.gestureBusy(group.gestureId)))
+            {
+                ready.push_back(std::move(group));
+            }
+            else
+            {
+                keep.push_back(std::move(group));
+            }
+        }
+        automationGroups_ = std::move(keep);
+        if (overflow)
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                "Automation",
+                "The automation gesture was cut short because the recorder could not keep up. "
+                "The part that was captured is kept. It is not a complete recording.");
+        }
+        for (const TrackAutomationUndoGroup& group : ready)
+        {
+            automationReleasedIds_.erase(
+                std::remove(automationReleasedIds_.begin(), automationReleasedIds_.end(), group.gestureId),
+                automationReleasedIds_.end());
+            const bool anyWrite = std::any_of(group.strokes.begin(), group.strokes.end(), [](const TrackAutomationStroke& stroke) {
+                return stroke.commit.writeEnabled && !stroke.samples.empty();
+            });
+            if (!anyWrite || undoRedoCoordinator_ == nullptr)
+            {
+                continue;
+            }
+            undoRedoCoordinator_->executeUndoableSessionEdit("Channel automation", [this, group] {
+                std::vector<TrackId> tracks;
+                for (const TrackAutomationStroke& stroke : group.strokes)
+                {
+                    if (std::find(tracks.begin(), tracks.end(), stroke.trackId) == tracks.end())
+                    {
+                        tracks.push_back(stroke.trackId);
+                    }
+                }
+                bool any = false;
+                auto& live = playbackEngine_.trackAutomation();
+                for (const TrackId trackId : tracks)
+                {
+                    const auto snap = session.loadSessionSnapshotForAudioThread();
+                    if (snap == nullptr)
+                    {
+                        for (const TrackAutomationStroke& stroke : group.strokes)
+                        {
+                            if (stroke.trackId == trackId && stroke.commit.writeEnabled)
+                            {
+                                live.noteRejected(trackId, stroke.parameterId, stroke.commit.revision);
+                            }
+                        }
+                        continue;
+                    }
+                    const int idx = snap->findTrackIndexById(trackId);
+                    if (idx < 0)
+                    {
+                        for (const TrackAutomationStroke& stroke : group.strokes)
+                        {
+                            if (stroke.trackId == trackId && stroke.commit.writeEnabled)
+                            {
+                                live.noteRejected(trackId, stroke.parameterId, stroke.commit.revision);
+                            }
+                        }
+                        continue;
+                    }
+                    TrackAutomationState state = snap->getTrack(idx).getAutomation();
+                    std::optional<float> manualGain;
+                    std::optional<float> manualPan;
+                    for (const TrackAutomationStroke& stroke : group.strokes)
+                    {
+                        if (stroke.trackId != trackId || !stroke.commit.writeEnabled || stroke.samples.empty())
+                        {
+                            continue;
+                        }
+                        const TrackAutomationCommit& written = stroke.commit;
+                        TrackAutomationCurve& curve = stroke.parameterId == kTrackAutomationPanId ? state.pan : state.volume;
+                        if (!curve.anchorSet)
+                        {
+                            curve.anchorSet = true;
+                            curve.anchor = written.preTouchValue;
+                        }
+                        std::vector<TrackAutomationPoint> recorded = stroke.samples;
+                        double rampEnd = written.releaseSeconds;
+                        if (written.readEnabled)
+                        {
+                            rampEnd = written.rampEndSeconds;
+                            recorded.push_back(TrackAutomationPoint{ rampEnd, written.rampEndValue });
+                        }
+                        const double touch = written.touchStartSeconds >= 0.0 ? written.touchStartSeconds
+                                                                              : written.releaseSeconds;
+                        if (!(rampEnd > touch))
+                        {
+                            rampEnd = touch + 1.0e-4;
+                        }
+                        trackAutomationPunch(curve, touch, rampEnd, recorded, stroke.parameterId);
+                        if (stroke.parameterId == kTrackAutomationVolumeId)
+                        {
+                            state.volumeLaneVisible = true;
+                            if (!written.readEnabled)
+                            {
+                                manualGain = written.releaseValue;
+                            }
+                        }
+                        else
+                        {
+                            state.panLaneVisible = true;
+                            if (!written.readEnabled)
+                            {
+                                manualPan = written.releaseValue;
+                            }
+                        }
+                    }
+                    uint32_t published = 0;
+                    const bool ok = session.setTrackAutomation(trackId,
+                                                               std::move(state),
+                                                               manualGain ? &*manualGain : nullptr,
+                                                               manualPan ? &*manualPan : nullptr,
+                                                               &published);
+                    for (const TrackAutomationStroke& stroke : group.strokes)
+                    {
+                        if (stroke.trackId != trackId || !stroke.commit.writeEnabled)
+                        {
+                            continue;
+                        }
+                        if (ok)
+                        {
+                            live.noteRequiredRevision(trackId, stroke.parameterId, stroke.commit.revision, published);
+                        }
+                        else
+                        {
+                            live.noteRejected(trackId, stroke.parameterId, stroke.commit.revision);
+                        }
+                    }
+                    any = any || ok;
+                }
+                return any;
+            });
+        }
+    }
+
     void timerCallback() override
     {
-        struct AutomationCommitItem
-        {
-            TrackId trackId = kInvalidTrackId;
-            int parameterId = 0;
-            TrackAutomationCommit commit;
-        };
-        std::vector<AutomationCommitItem> automationCommits;
-        {
-            TrackId commitTrack = kInvalidTrackId;
-            int commitParam = 0;
-            TrackAutomationCommit commit;
-            while (playbackEngine_.trackAutomation().takeAnyCommit(commitTrack, commitParam, commit))
-            {
-                automationCommits.push_back(AutomationCommitItem{ commitTrack, commitParam, commit });
-            }
-        }
-        std::vector<AutomationCommitItem> automationWrites;
-        for (const AutomationCommitItem& item : automationCommits)
-        {
-            if (item.commit.writeEnabled && item.commit.eventCount > 0)
-            {
-                automationWrites.push_back(item);
-            }
-        }
-        if (!automationWrites.empty() && undoRedoCoordinator_ != nullptr)
-        {
-            undoRedoCoordinator_->executeUndoableSessionEdit(
-                "Channel automation",
-                [this, automationWrites] {
-                    std::vector<TrackId> tracks;
-                    for (const AutomationCommitItem& item : automationWrites)
-                    {
-                        if (std::find(tracks.begin(), tracks.end(), item.trackId) == tracks.end())
-                        {
-                            tracks.push_back(item.trackId);
-                        }
-                    }
-                    bool any = false;
-                    for (const TrackId trackId : tracks)
-                    {
-                        const auto snap = session.loadSessionSnapshotForAudioThread();
-                        if (snap == nullptr)
-                        {
-                            continue;
-                        }
-                        const int idx = snap->findTrackIndexById(trackId);
-                        if (idx < 0)
-                        {
-                            continue;
-                        }
-                        TrackAutomationState state = snap->getTrack(idx).getAutomation();
-                        std::optional<float> manualGain;
-                        std::optional<float> manualPan;
-                        for (const AutomationCommitItem& item : automationWrites)
-                        {
-                            if (item.trackId != trackId)
-                            {
-                                continue;
-                            }
-                            const TrackAutomationCommit& commit = item.commit;
-                            const int parameterId = item.parameterId;
-                            TrackAutomationCurve& curve = parameterId == kTrackAutomationPanId ? state.pan : state.volume;
-                            if (!curve.anchorSet)
-                            {
-                                curve.anchorSet = true;
-                                curve.anchor = commit.preTouchValue;
-                            }
-                            std::vector<TrackAutomationPoint> recorded;
-                            recorded.reserve(static_cast<size_t>(commit.eventCount) + 1u);
-                            for (int i = 0; i < commit.eventCount; ++i)
-                            {
-                                recorded.push_back(commit.events[static_cast<size_t>(i)]);
-                            }
-                            double rampEnd = commit.releaseSeconds;
-                            if (commit.readEnabled)
-                            {
-                                rampEnd = commit.rampEndSeconds;
-                                recorded.push_back(TrackAutomationPoint{ rampEnd, commit.rampEndValue });
-                            }
-                            const double touch = commit.touchStartSeconds >= 0.0 ? commit.touchStartSeconds
-                                                                                 : commit.releaseSeconds;
-                            if (!(rampEnd > touch))
-                            {
-                                rampEnd = touch + 1.0e-4;
-                            }
-                            trackAutomationPunch(curve, touch, rampEnd, recorded, parameterId);
-                            if (parameterId == kTrackAutomationVolumeId)
-                            {
-                                state.volumeLaneVisible = true;
-                                if (!commit.readEnabled)
-                                {
-                                    manualGain = commit.releaseValue;
-                                }
-                            }
-                            else
-                            {
-                                state.panLaneVisible = true;
-                                if (!commit.readEnabled)
-                                {
-                                    manualPan = commit.releaseValue;
-                                }
-                            }
-                        }
-                        if (session.setTrackAutomation(trackId, std::move(state),
-                                                       manualGain ? &*manualGain : nullptr,
-                                                       manualPan ? &*manualPan : nullptr))
-                        {
-                            any = true;
-                        }
-                    }
-                    return any;
-                });
-        }
-        for (const AutomationCommitItem& item : automationCommits)
-        {
-            playbackEngine_.trackAutomation().notePublished(item.trackId, item.parameterId, item.commit.revision);
-        }
+        serviceAutomationGestures();
         // Secondary watchdog heartbeat: keeps the stall detector alive when playback (and thereby
         // the 60 Hz overlay frame callback) is stopped.
         ui_hang_watchdog::heartbeat();
@@ -6778,12 +6903,18 @@ private:
         inspectorView_.refreshFromSession();
     }
 
+    [[nodiscard]] double automationHostSeconds() const
+    {
+        return juce::Time::getMillisecondCounterHiRes() * 0.001;
+    }
+
     void automationGestureUpdate(const TrackId id, const int parameter, const float value)
     {
         auto& runtime = playbackEngine_.trackAutomation();
+        const double hostSeconds = automationHostSeconds();
         if (runtime.isCapturing(id, parameter))
         {
-            runtime.push(id, parameter, value);
+            runtime.push(id, parameter, value, hostSeconds);
             return;
         }
         const auto snap = session.loadSessionSnapshotForAudioThread();
@@ -6801,27 +6932,43 @@ private:
         {
             return;
         }
+        if (automationPresses_ <= 0 || automationGestureId_ == 0)
+        {
+            automationGestureId_ = ++automationGestureSerial_;
+            automationPresses_ = 0;
+        }
+        ++automationPresses_;
         const TrackAutomationCurve& curve = parameter == kTrackAutomationPanId ? state.pan : state.volume;
         const float manual = parameter == kTrackAutomationPanId ? track.getStereoPan()
                                                                 : track.getChannelFaderGain();
-        runtime.begin(id, parameter, write && playing, read, value, curve, manual);
+        runtime.begin(id, parameter, write && playing, read, value, hostSeconds, automationGestureId_, curve, manual);
     }
 
     void automationGestureEnd(const TrackId id, const int parameter)
     {
-        playbackEngine_.trackAutomation().requestRelease(id, parameter);
+        playbackEngine_.trackAutomation().requestRelease(id, parameter, automationHostSeconds());
+        if (automationPresses_ > 0)
+        {
+            --automationPresses_;
+        }
+        if (automationPresses_ == 0 && automationGestureId_ != 0)
+        {
+            automationReleasedIds_.push_back(automationGestureId_);
+            automationGestureId_ = 0;
+        }
     }
 
     [[nodiscard]] double automationPlayheadSeconds() const
     {
-        double rate = 48000.0;
+        double deviceRate = 48000.0;
         if (juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice())
         {
             if (dev->getCurrentSampleRate() > 0.0)
             {
-                rate = dev->getCurrentSampleRate();
+                deviceRate = dev->getCurrentSampleRate();
             }
         }
+        const double rate = trackAutomationTimelineRate(session.getTimelineSampleRate(), deviceRate);
         return static_cast<double>(transport.readPlayheadSamplesForUi()) / rate;
     }
 
@@ -8492,6 +8639,19 @@ private:
     UiPlayheadClock uiPlayheadClock_;
     TimelineRulerView rulerView;
     TrackLanesView trackLanesView;
+    uint32_t automationGestureSerial_ = 1;
+    uint32_t automationGestureId_ = 0;
+    int automationPresses_ = 0;
+    std::vector<uint32_t> automationReleasedIds_;
+    std::vector<TrackAutomationUndoGroup> automationGroups_;
+    struct AutomationDrainPrefix
+    {
+        TrackId trackId = kInvalidTrackId;
+        int parameterId = 0;
+        uint32_t gestureId = 0;
+        std::vector<TrackAutomationPoint> points;
+    };
+    std::vector<AutomationDrainPrefix> automationDrain_;
     /// Repaint-storm fix: viewport-change repaints (ruler + lanes + instrument row) are marked once
     /// per message batch instead of once per wheel/drag event. Declared after the views it flushes
     /// so it is destroyed (and its pending update cancelled) before they are.

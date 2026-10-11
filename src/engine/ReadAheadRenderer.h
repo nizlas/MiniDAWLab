@@ -212,6 +212,9 @@ public:
         /// as monitor: queued segments were rendered from the pre-gesture curve.
         const TrackId* automationHoldTracks = nullptr;
         int automationHoldCount = 0;
+        /// Project timeline rate for this block. The worker converts segment
+        /// samples with this, the same rate the live clock uses.
+        double automationTimelineRate = 0.0;
     };
     /// [Audio thread, once per callback, BEFORE the A1 pre-count] Performs every ownership
     /// transition for this block: geometry/offset/position discontinuities (discard reset),
@@ -399,6 +402,7 @@ private:
     Deps deps_{};
     const int depth_;
     double deviceSampleRate_ = 48000.0;
+    std::atomic<double> automationTimelineRate_{ 0.0 };
     const bool pumpMode_;
 
     std::array<Row, kMaxRows> rows_{};

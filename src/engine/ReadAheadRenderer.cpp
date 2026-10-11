@@ -345,6 +345,10 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
     blockPlaybackShift_ = info.playbackShift;
     blockArmedTrackId_ = info.armedTrackId;
     blockRecordingTrackId_ = info.recordingTrackId;
+    if (info.automationTimelineRate > 0.0)
+    {
+        automationTimelineRate_.store(info.automationTimelineRate, std::memory_order_relaxed);
+    }
     adoptionAllowedThisBlock_ = false;
     if (!prepared_.load(std::memory_order_acquire))
     {
@@ -1133,7 +1137,8 @@ bool ReadAheadRenderer::workerRenderOneSegment(Row& row) noexcept
     // exclusive ownership and does not live-render the same instance.
     row.inPlugin.store(1, std::memory_order_seq_cst);
     ChannelAutomationClock segmentClock;
-    segmentClock.engineRate = deviceSampleRate_ > 0.0 ? deviceSampleRate_ : 48000.0;
+    segmentClock.engineRate = trackAutomationTimelineRate(
+        automationTimelineRate_.load(std::memory_order_relaxed), deviceSampleRate_);
     segmentClock.blockStartSample = startAudible;
     playback_mix_helpers::renderAudioTrackPostStripToStereoScratchWithChainAccess(
         *snap, startAudible, seg.run, seg.destFrame, slot.dataL, slot.dataR, access,

@@ -701,6 +701,11 @@ void PlaybackEngine::audioThread_runInstrumentStripPayload(InstrumentStripJobPay
     }
 }
 
+void PlaybackEngine::refreshAutomationTimelineRate() noexcept
+{
+    automationTimelineRate_.store(session_.getTimelineSampleRate(), std::memory_order_relaxed);
+}
+
 void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     if (device != nullptr)
@@ -709,6 +714,7 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         const int bs = device->getCurrentBufferSizeSamples();
         const int nOut = device->getActiveOutputChannels().countNumberOfSetBits();
         deviceSampleRateForDiagnostics_.store(sr, std::memory_order_relaxed);
+        refreshAutomationTimelineRate();
         // Input-selection slice: capture which PHYSICAL input channels are enabled — the callback
         // and the recording push map a track's physical input assignment to positions in the
         // packed active-channel array with this mask (sparse enables shift packed positions).
@@ -843,6 +849,7 @@ void PlaybackEngine::audioDeviceStopped()
     {
         readAhead_->releaseForDevice();
     }
+    automationRuntime_.messageThread_deviceStopped();
     if (pluginHost_ != nullptr)
     {
         pluginHost_->releaseResources();
@@ -1636,14 +1643,38 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     readAheadSegCount_ = 0;
     {
         const double deviceRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
-        const double engineRate = deviceRate > 0.0 ? deviceRate : 48000.0;
+        const double timelineRate = automationTimelineRate_.load(std::memory_order_relaxed);
+        const double engineRate = trackAutomationTimelineRate(timelineRate, deviceRate);
         const double blockStartSeconds = trackAutomationEngineSampleToSeconds(t0, engineRate);
+        const double blockDurationSeconds = static_cast<double>(numSamples) / engineRate;
         const bool transportJump = automationHavePreviousBlock_ && t0 != automationPreviousBlockEnd_;
         automationRuntime_.audioThread_beginBlock(
             blockStartSeconds,
-            engineRate,
+            blockDurationSeconds,
+            juce::Time::getMillisecondCounterHiRes() * 0.001,
             transportJump,
             trackAutomationEngineSampleToSeconds(automationPreviousBlockEnd_, engineRate));
+        if (sessionSnap != nullptr)
+        {
+            TrackId activeIds[kTrackAutomationSlots] = {};
+            const int activeCount = automationRuntime_.audioThread_activeTracks(activeIds, kTrackAutomationSlots);
+            for (int i = 0; i < activeCount; ++i)
+            {
+                const int idx = sessionSnap->findTrackIndexById(activeIds[i]);
+                if (idx < 0)
+                {
+                    automationRuntime_.audioThread_observe(activeIds[i], false, 0, blockStartSeconds);
+                }
+                else
+                {
+                    automationRuntime_.audioThread_observe(
+                        activeIds[i],
+                        true,
+                        sessionSnap->getTrack(idx).getAutomation().revision,
+                        blockStartSeconds);
+                }
+            }
+        }
         automationRuntime_.audioThread_fillClock(automationClock_, engineRate);
         automationClock_.blockStartSample = t0;
         automationPreviousBlockEnd_ = t0 + static_cast<std::int64_t>(numSamples);
@@ -1679,6 +1710,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         rbi.monitorView = monitorPtr;
         rbi.automationHoldTracks = automationHoldTracks;
         rbi.automationHoldCount = automationHoldCount;
+        rbi.automationTimelineRate = trackAutomationTimelineRate(
+            automationTimelineRate_.load(std::memory_order_relaxed),
+            deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed));
         readAhead_->audioThread_beginBlock(rbi);
         if (sessionSnap != nullptr)
         {
@@ -3463,8 +3497,9 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
     // Export evaluates the saved curve at this block's timeline, not the live playhead clock.
     ChannelAutomationClock offlineAutomationClock;
     {
-        const double rate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
-        offlineAutomationClock.engineRate = rate > 0.0 ? rate : 48000.0;
+        const double deviceRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+        const double projectRate = session_.getTimelineSampleRate();
+        offlineAutomationClock.engineRate = trackAutomationTimelineRate(projectRate, deviceRate);
         offlineAutomationClock.blockStartSample = renderBase;
         offlineAutomationClock.laneCount = 0;
     }

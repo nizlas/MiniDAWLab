@@ -157,17 +157,51 @@ void TrackAutomationLaneView::showHandle(const int segment, const double u) noex
     }
     const float y0 = curve_.points[static_cast<size_t>(segment)].value;
     const float y1 = curve_.points[static_cast<size_t>(segment + 1)].value;
-    const float control = segment < static_cast<int>(curve_.control.size())
-                              ? curve_.control[static_cast<size_t>(segment)]
-                              : trackAutomationLinearControl(y0, y1);
+    const TrackAutomationShape shape = trackAutomationShapeOrLinear(curve_, segment, y0, y1);
     const double cu = trackAutomationClampGrabU(u);
-    const float y = trackAutomationQuadratic(y0, control, y1, cu);
+    const float y = trackAutomationShapeValue(y0, shape, y1, cu);
     const double t0 = curve_.points[static_cast<size_t>(segment)].timeSeconds;
     const double t1 = curve_.points[static_cast<size_t>(segment + 1)].timeSeconds;
     handleVisible_ = true;
     handleSegment_ = segment;
     handleX_ = secondsToX(t0 + cu * (t1 - t0));
     handleY_ = valueToY(y);
+}
+
+void TrackAutomationLaneView::dragCurveLikeMouseForTest(const juce::Point<float> down, const juce::Point<float> drag)
+{
+    mouseDown(juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(),
+                               down,
+                               juce::ModifierKeys::leftButtonModifier,
+                               1.0f,
+                               0.0f,
+                               0.0f,
+                               0.0f,
+                               0.0f,
+                               this,
+                               this,
+                               juce::Time::getCurrentTime(),
+                               down,
+                               juce::Time::getCurrentTime(),
+                               1,
+                               false));
+    const juce::MouseEvent moved(juce::Desktop::getInstance().getMainMouseSource(),
+                                 drag,
+                                 juce::ModifierKeys::leftButtonModifier,
+                                 1.0f,
+                                 0.0f,
+                                 0.0f,
+                                 0.0f,
+                                 0.0f,
+                                 this,
+                                 this,
+                                 juce::Time::getCurrentTime(),
+                                 down,
+                                 juce::Time::getCurrentTime(),
+                                 1,
+                                 true);
+    mouseDrag(moved);
+    mouseUp(moved);
 }
 
 void TrackAutomationLaneView::commit() noexcept
@@ -311,16 +345,12 @@ void TrackAutomationLaneView::mouseDown(const juce::MouseEvent& e)
         if (hit >= 0 && curve_.points.size() > 1)
         {
             curve_.points.erase(curve_.points.begin() + hit);
-            if (!curve_.control.empty())
+            if (!curve_.shape.empty())
             {
-                const int controlIndex = juce::jlimit(0, static_cast<int>(curve_.control.size()) - 1, hit - 1);
-                if (hit > 0 && hit - 1 < static_cast<int>(curve_.control.size()))
+                const int shapeIndex = hit > 0 ? hit - 1 : 0;
+                if (shapeIndex >= 0 && shapeIndex < static_cast<int>(curve_.shape.size()))
                 {
-                    curve_.control.erase(curve_.control.begin() + (hit - 1));
-                }
-                else if (!curve_.control.empty())
-                {
-                    curve_.control.erase(curve_.control.begin() + controlIndex);
+                    curve_.shape.erase(curve_.shape.begin() + shapeIndex);
                 }
             }
             trackAutomationNormalize(curve_, parameterId_);
@@ -384,10 +414,8 @@ void TrackAutomationLaneView::mouseDown(const juce::MouseEvent& e)
     const double u = (t1 > t0) ? (seconds - t0) / (t1 - t0) : 0.5;
     const float y0 = curve_.points[static_cast<size_t>(seg)].value;
     const float y1 = curve_.points[static_cast<size_t>(seg + 1)].value;
-    const float control = seg < static_cast<int>(curve_.control.size())
-                              ? curve_.control[static_cast<size_t>(seg)]
-                              : trackAutomationLinearControl(y0, y1);
-    const float onCurve = trackAutomationQuadratic(y0, control, y1, trackAutomationClampGrabU(u));
+    const TrackAutomationShape shape = trackAutomationShapeOrLinear(curve_, seg, y0, y1);
+    const float onCurve = trackAutomationShapeValue(y0, shape, y1, trackAutomationClampGrabU(u));
     if (std::fabs(valueToY(onCurve) - e.position.y) > kCurveHitPx)
     {
         return;
@@ -412,19 +440,21 @@ void TrackAutomationLaneView::mouseDrag(const juce::MouseEvent& e)
         t = juce::jlimit(prev, juce::jmax(prev, next), t);
         curve_.points[static_cast<size_t>(dragIndex_)].timeSeconds = t;
         curve_.points[static_cast<size_t>(dragIndex_)].value = yToValue(e.position.y);
-        for (int s = juce::jmax(0, dragIndex_ - 1);
-             s <= dragIndex_ && s < static_cast<int>(curve_.control.size());
-             ++s)
+        for (int s = juce::jmax(0, dragIndex_ - 1); s <= dragIndex_; ++s)
         {
-            if (s + 1 >= static_cast<int>(curve_.points.size()))
+            if (s < 0 || s + 1 >= static_cast<int>(curve_.points.size()))
             {
                 break;
             }
             const float y0 = curve_.points[static_cast<size_t>(s)].value;
             const float y1 = curve_.points[static_cast<size_t>(s + 1)].value;
-            const float lo = std::min(y0, y1);
-            const float hi = std::max(y0, y1);
-            curve_.control[static_cast<size_t>(s)] = std::clamp(curve_.control[static_cast<size_t>(s)], lo, hi);
+            if (static_cast<int>(curve_.shape.size()) <= s)
+            {
+                curve_.shape.resize(static_cast<size_t>(s + 1), trackAutomationLinearShape(y0, y1));
+            }
+            const float kneeU = curve_.shape[static_cast<size_t>(s)].kneeU;
+            const float kneeY = curve_.shape[static_cast<size_t>(s)].kneeY;
+            trackAutomationShapeFromKnee(y0, y1, kneeU, kneeY, curve_.shape[static_cast<size_t>(s)]);
         }
         repaint();
         return;
@@ -441,12 +471,12 @@ void TrackAutomationLaneView::mouseDrag(const juce::MouseEvent& e)
         }
         const float y0 = curve_.points[static_cast<size_t>(dragIndex_)].value;
         const float y1 = curve_.points[static_cast<size_t>(dragIndex_ + 1)].value;
-        if (static_cast<int>(curve_.control.size()) <= dragIndex_)
+        if (static_cast<int>(curve_.shape.size()) <= dragIndex_)
         {
-            curve_.control.resize(static_cast<size_t>(dragIndex_ + 1), trackAutomationLinearControl(y0, y1));
+            curve_.shape.resize(static_cast<size_t>(dragIndex_ + 1), trackAutomationLinearShape(y0, y1));
         }
-        curve_.control[static_cast<size_t>(dragIndex_)]
-            = trackAutomationControlFromGrab(y0, y1, grabU_, yToValue(e.position.y));
+        trackAutomationShapeFromKnee(y0, y1, grabU_, yToValue(e.position.y), curve_.shape[static_cast<size_t>(dragIndex_)]);
+        grabU_ = curve_.shape[static_cast<size_t>(dragIndex_)].kneeU;
         showHandle(dragIndex_, grabU_);
         repaint();
     }

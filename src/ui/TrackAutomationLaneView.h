@@ -1,7 +1,7 @@
 #pragma once
 
 // One Volume or Pan lane under a track. Not a track row. The curve it draws is
-// `trackAutomationEvaluate` / `trackAutomationQuadratic`, the same functions playback uses.
+// `trackAutomationEvaluate`, the same function playback uses.
 
 #include "domain/Track.h"
 #include "domain/TrackAutomation.h"
@@ -30,6 +30,11 @@ public:
     [[nodiscard]] juce::Rectangle<int> getPlotBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getParameterMenuBounds() const noexcept;
     [[nodiscard]] bool isDraggingForTest() const noexcept { return drag_ != Drag::None; }
+    [[nodiscard]] float valueToY(float value) const noexcept;
+    [[nodiscard]] float secondsToX(double seconds) const noexcept;
+    [[nodiscard]] double xToSeconds(float x) const noexcept;
+    /// The same mouseDown / mouseDrag / mouseUp path a pointer uses.
+    void dragCurveLikeMouseForTest(juce::Point<float> down, juce::Point<float> drag);
 
 private:
     enum class Drag
@@ -47,10 +52,7 @@ private:
     void mouseUp(const juce::MouseEvent& e) override;
     void mouseDoubleClick(const juce::MouseEvent& e) override;
 
-    [[nodiscard]] float valueToY(float value) const noexcept;
     [[nodiscard]] float yToValue(float y) const noexcept;
-    [[nodiscard]] float secondsToX(double seconds) const noexcept;
-    [[nodiscard]] double xToSeconds(float x) const noexcept;
     [[nodiscard]] int pointAt(juce::Point<float> p) const noexcept;
     [[nodiscard]] int segmentAt(double seconds) const noexcept;
     void showHandle(int segment, double u) noexcept;
