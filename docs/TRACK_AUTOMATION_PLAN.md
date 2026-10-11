@@ -19,7 +19,7 @@
 > Read-ahead re-adopts a track only after the commit revision is observed and the return
 > ramp has ended. All four slices in §6 are the delivery.
 >
-> **Handover (the commit after `0d2cc4b`).** A finished gesture is a two-deep close
+> **Handover (`bd1f92198b24278c13916cb5b0850b725e25e53c`, after `0d2cc4b`).** A finished gesture is a two-deep close
 > queue. The audio thread release-stores the write index only after the mark is
 > filled. The message thread copies that mark and then release-stores the read index.
 > A slot is retired by swapping to phase 4, wiping the payload, and storing phase 0
