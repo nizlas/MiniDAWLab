@@ -2,7 +2,13 @@
 
 > **Status: planned, not implemented.** This document is the steering plan for the first
 > automation stage. It does not change production code, the project format, or the 1.3.1
-> read-ahead startup policy. Implementation starts only after this plan is reviewed.
+> read-ahead startup policy.
+>
+> **Correction (2026-10-11).** The curve grab is a point on the curve, moved in time and
+> value, not a handle locked at the segment midpoint. A punch preserves the polynomial
+> outside its interval. Recording stores the values the audio thread applied, in seconds.
+> Read-ahead re-adopts a track only after the commit revision is observed and the return
+> ramp has ended. All four slices in §6 are the delivery.
 >
 > **Reviewed revision:** `3a6f3384b80dac6ff7663b538beb4dc446fbff0e` (`v1.3.1`, `origin/main`).
 > Parallel audio/instrument strips (A1/A2) and the read-ahead prototype are on this
@@ -223,20 +229,36 @@ this stage.
 
 ### 4.3 Time base
 
-Points are **audible samples**, the same domain as clips, the playhead, and read-ahead
-segment keys.
+Points are **seconds** from the start of the timeline (`double`, finite, `>= 0`). They are
+not ticks and they are not device samples. A BPM edit does not move them. MIDI notes stay
+in ticks, so a BPM edit can move notes relative to Volume and Pan. That is the stage-1
+behaviour.
 
-A tempo change does not move Volume or Pan relative to audio. It can move them relative
-to MIDI notes. That is the split the project already has (audio in samples, MIDI in ticks).
-Channel Volume and Pan sit on the audio strip, so they follow audio. Tick-domain points
-would slide against every clip when BPM changes, which is the wrong default for a fader.
+The project's persistent rate is `Session::timelineSampleRate` (TLD-1). It is not
+restamped when the device rate changes. Playback converts one point at a time:
+
+```
+engineSample = llround(timeSeconds * engineRate)
+timeSeconds  = engineSample / engineRate
+```
+
+`llround` is per point. Positions are never a running sum of rounded deltas, so rounding
+does not accumulate. Opening a project does not rewrite the stored seconds. A device
+change 48 kHz ↔ 44.1 kHz therefore does not move the automation in time.
+
+Audio-clip placement, the playhead and read-ahead keys are still device-sample integers
+read 1:1 (`TimelineDomain.h`). This stage does not convert those. At a device rate equal
+to the timeline reference rate, a point at `S / rate` seconds lands on engine sample `S`.
+After a rate change, clips can sit at a different wall-clock time from the automation
+until the existing TLD-1 engine slice converts them. Automation points are still not
+rewritten.
 
 ### 4.4 Curve model
 
-A curve is an ordered list of points `(sample, value)` plus one **bend** per segment
-(the span from point *i* to point *i+1*). Bend is a scalar `b` in `[-1, +1]`. `0` is
-linear. Points are square. The circular handle is drawn only while the pointer is over
-that segment or while that segment is being dragged.
+A curve is an ordered list of square points `(timeSeconds, value)` plus one **control
+value** per segment (the span from point *i* to point *i+1*). The control is the
+quadratic Bezier value `C` in normalized time. It is not a free point in the plane, and
+it is not locked to the time midpoint.
 
 Stored domains, so the file never contains NaN or infinity:
 
@@ -244,33 +266,52 @@ Stored domains, so the file never contains NaN or infinity:
   number. The lane readout converts through `ChannelFaderScale` for display only.
 - Pan: `[-1, +1]`, same sanitizer as today.
 
-Interpolation is in that stored domain. Do not interpolate volume in dB: −∞ is not a
-finite dB, and a dB ramp would not match the linear multiply the strip already uses.
+Interpolation is in that stored domain. Do not interpolate volume in dB.
 
-**How a drag sets the curve.** The handle is not a free point in time. It is the curve
-at the time midpoint of the segment. A vertical drag anywhere on the segment sets that
-midpoint. Let the endpoints be `(y0, y1)` and the normalized time be
-`u = (t - t0) / (t1 - t0)`.
+Let `u = (t - t0) / (t1 - t0)` and the endpoint values be `y0`, `y1`.
 
 ```
-C = (y0 + y1) / 2 + b * (y1 - y0) / 2
-B(u) = (1 - u)^2 * y0 + 2 * (1 - u) * u * C + u^2 * y1
+y(u) = (1-u)^2 * y0 + 2*(1-u)*u * C + u^2 * y1
 ```
 
-`C` is always between `y0` and `y1` for `b` in `[-1, +1]`. `B(u)` is a quadratic Bezier
-of `y0`, `C`, `y1`, so it stays inside `[min(y0, y1), max(y0, y1)]`. There is no
-overshoot past the endpoints. `b = 0` puts `C` on the chord and `B` is the straight line.
+`u` is normalized time, so the curve is a single-valued function of time. Display and
+playback call this same function.
 
-The drawn handle is `B(0.5)`. A drag chooses a desired `B(0.5)`, clamped to the same
-endpoint range, and solves
+**User edits** clamp `C` into `[min(y0,y1), max(y0,y1)]`. The curve then stays inside
+that range (convex hull). `C = (y0+y1)/2` is the straight line.
+`C = y0` is `y = y0 + (y1-y0)*u^2`: the value stays near `y0` for most of the segment
+and the slope steepens toward the end. Two volume points and this one control are the
+crescendo that accelerates near the end, with no extra square point and no moved
+endpoint. `C = y1` is the opposite: most of the change happens early, then the slope
+falls away.
 
-```
-b = 4 * (B(0.5) - (y0 + y1) / 2) / (y1 - y0)
-```
+**The circular handle is a point on the curve, not `C`.** It is drawn only while the
+pointer is over the segment or while that segment is being dragged. The grab starts at
+the pointer's time on the curve. A drag moves it in both axes, inside these limits:
 
-when `y0 != y1`, then clamps `b` to `[-1, +1]`. When `y0 == y1` the segment is constant
-and the handle does not change the value. The handle's time stays at `u = 0.5`; the
-mouse `x` does not move it along the timeline.
+- `u` is clamped to `[0.08, 0.92]`. Closer to an endpoint the vertical room collapses
+  and the solve for `C` becomes unstable. The endpoints themselves do not move.
+- At that `u`, the reachable values are the chord plus or minus `|y1-y0| * u * (1-u)`.
+  The pointer's value is clamped into that interval, which is exactly the set of `y(u)`
+  for a `C` inside `[min(y0,y1), max(y0,y1)]`.
+- `C` is solved from the clamped point and clamped again. The drawn handle is then
+  `(u, y(u))`, so it lies on the curve and follows the pointer inside the limits.
+
+Horizontal motion changes `u`, which changes the solved `C`, which moves where the slope
+concentrates. Vertical motion changes the value at that `u`, which changes how far `C`
+sits from the chord. One stored `C` is the whole shape; the handle position is not a
+second saved point.
+
+**Equal endpoints.** `y0 == y1`. Every legal `C` equals that value. The handle can move
+in time but the curve stays flat.
+
+**Short segments.** If `t1 - t0 < 0.0001` seconds, evaluation uses the straight chord.
+The stored `C` is kept. A zero-length span is not a segment.
+
+**Split.** de Casteljau in double precision, then stored as float. The two new controls
+reproduce the same polynomial. A new control may lie outside the interval between the
+new piece's endpoints; it is kept anyway. Re-clamping it would change the curve outside
+a later punch. Absolute error from the float store is at most `1e-5` in the value domain.
 
 Point edits: click on empty lane adds a square point, drag moves it (time and value,
 clamped to the domain and not past its neighbours' times), Delete or a right-click removes
@@ -287,12 +328,12 @@ apart. Using the manual value for both of them conflicts with Touch (§4.12).
   - no points: the manual value (a lane with no curve does not change playback)
   - `t` strictly before the first point: `anchor`
   - `t` at or after the last point: hold the last point
-  - otherwise: `B(u)` on the segment that contains `t`
+  - otherwise: `y(u)` on the segment that contains `t`
 - **When the anchor is set.** The moment a curve goes from empty to having its first
   point, `anchor` is the effective value **just before** that gesture. Later touches do
   not change it. Deleting the last point clears the curve and the anchor.
 - **Why this does not rewrite earlier music.** The first recorded point is at the
-  touch-down sample, never at sample 0. Everything before that sample keeps evaluating
+  touch-down time, never at time 0. Everything before that time keeps evaluating
   to the value that was already playing. The user changes the song start only by adding
   a point there.
 
@@ -310,17 +351,18 @@ per lane.
    Playback holds that manual value. The curve is not deleted.
 3. **Read on, Write off.** The curve (with the anchor rule) drives. A pointer drag may
    take over for the duration of the gesture: the strip uses the gesture value. On
-   release, the control returns to the curve's value at the current sample. Audio
+   release, the control returns to the curve's value at the current time. Audio
    returns along the release ramp in §4.7. That takeover is **not** written.
 4. **Turning Read on** (no gesture in progress): the widgets jump immediately to the
-   curve at the current transport sample. Audio does not step. The strip ramps from the
-   previous effective value to the curve value over the same 10 ms ramp. That ramp is
-   **playback state**, like the pre-gain ramp. It is not written into the curve. The next
-   time this spot plays with Read already on, it follows the curve without that ramp.
-   The ramp exists so that enabling Read is not a click. It is not a claim that a later
-   pass reproduces the click-avoidance of the mode switch.
+   curve at the current transport time. Audio does not step. The strip ramps from the
+   previous effective value to the curve value over 0.010 seconds of project time,
+   per sample. That ramp is **playback state**, like the pre-gain ramp. It is not
+   written into the curve. The next time this spot plays with Read already on, it
+   follows the curve without that ramp. The ramp exists so that enabling Read is not
+   a click. It is not a claim that a later pass reproduces the click-avoidance of the
+   mode switch.
 5. **Write on, and transport playing, and the user is actually manipulating that
-   parameter.** The gesture is recorded. The first recorded sample of a parameter creates
+   parameter.** The gesture is recorded. The first recorded point of a parameter creates
    the curve if needed, sets the anchor from the pre-touch effective value, and shows
    the lane. Both parameters can be touched in one gesture (fader and pan); each gets
    its own stroke and they share one undo step.
@@ -343,38 +385,67 @@ only the manual value when Read is off, or is a non-recorded takeover when Read 
 
 ### 4.7 How a write punch and the release ramp are stored
 
-A Touch replaces only the time span of the gesture.
+A Touch replaces only the time span of the gesture. The shape outside that span stays,
+including bent segments on both sides.
 
-- Keep every point with `sample < touchStart` and every point with `sample >= rampEnd`.
-- Delete points strictly inside `[touchStart, rampEnd)`.
-- The segment that used to cross the punch does not keep its old bend. The new segment
-  that enters the stroke has bend `0`. Bends on segments that lie wholly outside the
-  punch stay.
-- Append the recorded points (§4.9) and, when Read is on at release, two ramp points:
-  - at the release sample: the release value, bend `0`
-  - at `releaseSample + rampLength`: the value the **pre-gesture** curve evaluates to
-    at that sample (anchor rule, points that fell inside the punch ignored)
-- `rampLength` is **10 ms**, rounded up to the next whole device block so it lines up
-  with the block ramp the strip already has to do. At 48 kHz that is 480 samples before
-  the block rounding. The ramp is linear in the stored domain (`b = 0`), which is what
-  was heard: the strip ramps linear gain and linear pan, not dB.
-- If Read is off at release, the return point is not added. The last recorded point is
-  the release value. Manual becomes that value.
+The write interval is `[touchStart, rampEnd)`. `touchStart` is the time of the first
+applied gesture sample. `rampEnd` is the release time when Read is off at release.
+When Read is on, `rampEnd = releaseTime + 0.010` seconds of project time. 0.010 is
+not rounded up to a device block. At 48 kHz it is 480 samples; at 44.1 kHz it is
+441 samples; at a block size that does not divide those counts the ramp simply
+continues into the next block. If a seek or cycle boundary arrives sooner, `rampEnd`
+is that boundary and the ramp does not cross it.
 
-Later playback with Read on therefore follows the same samples the gesture produced,
-including the return, for the Write case. The Read-on mode-switch ramp (§4.6 rule 4) is
-the exception and is intentionally not stored.
+**Split, then delete the interior.**
+
+- A segment that crosses `touchStart` is split there by de Casteljau (§4.4). The left
+  piece, including its new control, is kept. The right piece is the candidate for the
+  interior.
+- A segment that crosses `rampEnd` is split there the same way. The right piece,
+  including its new control, is kept.
+- Points and pieces strictly inside `[touchStart, rampEnd)` are deleted.
+- The stored control of a piece that lies wholly outside the interval is not rewritten.
+  A control produced by the split is stored even when it falls outside the new piece's
+  endpoint interval. Re-clamping it would move the curve outside the punch.
+- Absolute error against the pre-punch polynomial, outside the interval, is at most
+  `1e-5` in the value domain (float store of a double de Casteljau).
+
+**Then write the stroke.**
+
+- Append the recorded points (§4.9). Each recorded segment uses the straight control
+  `C = (y0+y1)/2`, because that is the polyline the strip applied.
+- When Read is on at release, add a linear return: a point at `releaseTime` with the
+  release value, and a point at `rampEnd` whose value is the **pre-gesture** curve at
+  `rampEnd` (anchor rule; points that fell inside the punch are ignored). The return
+  segment's control is the straight chord.
+- When Read is off at release, the return point is not added. The last recorded point
+  is the release value. Manual becomes that value.
+
+**Boundary collisions.** If a new point falls within `1e-6` seconds of an existing
+boundary point, the times are merged and the new value wins. A zero-length segment is
+not stored.
+
+**Overlapping writes and repeated cycle laps.** Each stroke punches its own interval.
+A later stroke splits whatever pieces the earlier stroke left, by the same rule.
+Repeated laps of a cycle are separate strokes inside one undo step. They do not draw
+a segment from the end of one lap to the start of the next.
+
+Later playback with Read on follows the same values the gesture applied, including the
+return, for the Write case. The Read-on mode-switch ramp (§4.6 rule 4) is the
+exception and is intentionally not stored.
 
 ### 4.8 Stop, seek, cycle wrap, and Read/Write changes during a drag
 
-- **Stop.** End the gesture at the last rendered sample. Apply §4.7 at that sample
+- **Stop.** End the gesture at the last rendered time. Apply §4.7 at that time
   (return ramp only if Read is on). Further motion while stopped follows the stopped
   rule in §4.6 and does not extend the stroke.
-- **Seek, or a cycle wrap.** End the stroke at the last sample **before** the jump.
-  Do not draw a segment across the jump. If playback continues at the new position and
-  the pointer is still down and Write is on, start a **new stroke** there (its own
-  touch-down sample, same undo step). The return ramp of the first stroke is evaluated
-  against the curve at the old position, not at the seek target.
+- **Seek, or a cycle wrap.** End the stroke at the last time **before** the jump.
+  Do not draw a segment or a return ramp across the jump. If the time left before the
+  jump is shorter than 0.010 seconds, the ramp is shortened to that remainder or
+  omitted when the remainder is below `1e-6` seconds. If playback continues at the
+  new position and the pointer is still down and Write is on, start a **new stroke**
+  there (its own touch-down time, same undo step). The return ramp of the first stroke
+  is evaluated against the curve at the old position, not at the seek target.
 - **Read or Write toggled during a drag.** End the gesture first, commit with the mode
   that was in force for the stroke, then apply the new mode. A Read-off mid-drag stores
   the current effective value as manual and does not write a return ramp. A Write-off
@@ -383,35 +454,49 @@ the exception and is intentionally not stored.
 
 ### 4.9 Timestamps, resolution, and non-drag edits
 
-The UI timer does not decide when the sound changes.
+The UI timer does not decide when the sound changes. Playback does not replace a curve
+with one straight line from the block's start value to its end value. A dip whose
+endpoints happen to match is still heard, because every sample is evaluated.
 
-- The message thread publishes the gesture value with a relaxed atomic store. No lock,
-  no allocation, on the audio thread or in a strip job.
-- Each audio callback reads that atomic once. If a gesture is active it ramps the strip
-  from the previous block's applied value to this value across the block (same shape as
-  the pre-gain ramp: per-sample linear in the stored domain). That ramp is the sound.
-- The callback also writes `(blockStartSample, appliedValue)` into a preallocated
-  single-producer ring for that track and parameter. The message thread drains the ring
-  and, on gesture end, turns the drained points into the curve edit. A drain may be
-  prompted by mouse-up or by a message-thread timer; the **timestamps and values** still
-  come from the callback.
-- Bound: one point per device block. The stored block-start value is the value the
-  callback applied. That is the error bound. No second thinning in stage 1. A later
+**What the audio thread applies.**
+
+- The message thread enqueues gesture values on a fixed single-producer ring. It does
+  not stamp them. No lock and no allocation on the audio thread or in a strip job.
+- The audio thread publishes the audible end time of the block it just rendered.
+- An event that arrives between callbacks is applied on the next block. Its time is
+  `blockStart + n / engineRate` seconds, where `n` is its order among the events
+  drained at that boundary. A whole short gesture that fits between two callbacks is
+  a sequence of samples one period apart, not one collapsed point and not a shift of
+  one extra block. The stamp is the start of the block that applies the event.
+- Inside the block the strip evaluates the same definition the lane draws: the stored
+  quadratic where a saved curve is playing, and the recorded polyline (straight control
+  between successive applied values) where a gesture is playing. Direct strips,
+  parallel strip jobs, the monitor pass, Group, Stereo Out, read-ahead and offline
+  export call that function. They do not each invent a ramp.
+
+**What is stored.**
+
+- The audio thread writes a commit record: the applied `(timeSeconds, value)` events,
+  the release time, the release value, and, when Read is on, the ramp end time and the
+  ramp end value. Those times and values are the ones the strip used.
+- The message thread punches with that record (§4.7) and publishes the curve. It does
+  not invent times of its own.
+- Bound: one stored point per applied event. No second thinning in stage 1. A later
   thin, if one is added, may drop a point only when the reconstructed curve stays within
-  `1e-4` linear gain or `1e-3` pan of this block-start sequence, and must say so in the
-  change that adds it.
-- Ring capacity: 32768 points per active parameter (about three minutes at a 256-sample
-  block). If the ring would overflow, the callback sets an overflow flag and stops
-  pushing. The message thread ends the gesture and commits what it has. The callback
-  never waits and never allocates.
+  `1e-4` linear gain or `1e-3` pan of this sequence, and must say so in the change
+  that adds it.
+- Ring capacity: 32768 events per active parameter. If the ring would overflow, the
+  callback sets an overflow flag and stops pushing. The message thread ends the gesture
+  and commits what it has. The callback never waits and never allocates.
 
-**Text commit and Ctrl/Cmd-reset** while playing with Write on are a one-block stroke:
-one point at the block where the new value is applied, then the §4.7 release rule.
-While stopped they only change the manual value (Read off) or do nothing to the curve
-(Read on: the widget shows the typed value only until the edit ends, then snaps back;
-the typed value is not kept, because a stopped Read-on edit is not a recording). Wheel
-ticks during playback with Write on are the same as a drag: they publish a gesture value
-and the callback records the blocks they cover.
+**Text commit and Ctrl/Cmd-reset** while playing with Write on are real events in this
+log: one applied value at the sample the next block uses, then the §4.7 release rule.
+They are not a stroke that keeps only the block endpoints. While stopped they only
+change the manual value (Read off) or do nothing to the curve (Read on: the widget
+shows the typed value only until the edit ends, then snaps back; the typed value is
+not kept, because a stopped Read-on edit is not a recording). Wheel ticks during
+playback with Write on are the same as a drag: each tick is an event, and the callback
+records the samples it applies.
 
 ### 4.10 What the widgets do
 
@@ -427,7 +512,7 @@ and the callback records the blocks they cover.
 Saved with the project (and therefore with autosave), which is a format bump when the
 implementation lands. Suggested next version is 29. This plan does not bump it.
 
-- curves, including anchors and bends
+- curves, including anchors and segment controls (`C`)
 - which lanes are visible
 - the Read flag, per track
 
@@ -461,11 +546,11 @@ second document.
   snapshot publish per mouse move.
 - Do not publish a new `SessionSnapshot` per block and do not write the snapshot from
   the audio thread.
-- Jobs receive the already-acquired snapshot (or the block's start/end gains computed
-  on the callback before dispatch) and ramp inside the job. Group, Stereo Out, the
-  monitor pass, and offline export call the same pure evaluator at the block's audible
-  sample range. Offline does not use read-ahead; it evaluates the saved curve at the
-  export timeline, which is the same function realtime uses when no gesture is active.
+- Jobs receive the already-acquired snapshot and evaluate per sample inside the job.
+  Group, Stereo Out, the monitor pass, and offline export call the same pure evaluator
+  at each audible sample. Offline does not use read-ahead; it evaluates the saved curve
+  at the export timeline, which is the same function realtime uses when no gesture is
+  active.
 
 ### 4.14 Arrangement UI
 
@@ -524,22 +609,40 @@ text use the current arrangement/header palette. No new theme.
 ### 4.15 Read-ahead
 
 Saved automation is evaluated at the **segment's audible time** inside the worker, from
-the published curve snapshot. Not at the UI playhead.
+the published curve snapshot, with the same per-sample function as the live strip. Not
+at the UI playhead.
 
 - Passive playback (Read on, no gesture): new segments see the current curve. Segments
   already queued before a curve edit stay stale for at most `depth` blocks. That is the
-  existing §6 late window. This stage does not discard the queue on every point drag.
+  existing late window. This stage does not discard the queue on every point drag.
 - Gesture begin (Touch, or a Read-on takeover): `audioThread_discardResetRow` for that
   track, the same transition monitor uses. If the worker is inside the plugin the row
   is Abandoning until `processBlock` returns. No concurrent `processBlock` on that
-  instance. No promise that the handover completes in the same callback.
-- While a gesture is active, that track is not offered for adoption. After release, the
-  normal offer rules apply and new segments evaluate the curve that now includes the
-  stroke and the return ramp.
-- This exclusion is per gesture. It does not change the 1.3.1 startup policy, the depth
-  cap, which rows are eligible when idle, or the thread model.
-- Stage 1 does **not** need a blanket "never read-ahead a track that has automation".
-  Only an in-progress gesture pulls the row back to the live callback.
+  instance. No promise that the handover completes in the same callback. Releasing the
+  mouse does not by itself offer the row again.
+
+**Gesture end is one handover, in this order.**
+
+1. Capture ends at a known audio boundary: the start of the block that observes the
+   release request. `releaseTime` is that boundary. `releaseValue` is the last gesture
+   value the strip applied.
+2. The audio thread writes the last events and the return ramp into the commit record
+   and keeps applying that ramp itself. It does not wait for the message thread.
+3. The message thread punches (§4.7) and publishes curve revision `R`.
+4. The audio thread switches from its local ramp to the published curve only when it
+   has observed revision `R` and the transport time is at or past `rampEnd`. At that
+   instant the ramp value and the published curve agree.
+5. Only then is the adoption hold cleared, and only then may `offerAdoption` run.
+
+Until step 5 the effective value is the ramp or hold the audio thread already latched.
+It is not the pre-gesture curve, and the last applied value is not dropped. The callback
+does not call `processBlock` on an instance the worker is inside, and it does not call
+it twice. If a plugin call runs longer than a block, the row stays Abandoning across
+however many callbacks that takes. This stage does not promise a same-block handover.
+
+The hold is per gesture. It does not change the 1.3.1 startup policy, the depth cap,
+which rows are eligible when idle, or the thread model. Stage 1 does **not** refuse
+read-ahead for every track that merely has a saved curve.
 
 ### 4.16 Proxies, and the VST3 boundary
 
@@ -555,7 +658,7 @@ When that later stage exists, the address in §4.2 is the extension point. The w
 will need an explicit parameter read (`getParameters` / `getParameterID`) and an explicit
 gesture (`beginChangeGesture` / `setValueNotifyingHost` / `endChangeGesture`), which it
 does not have now. Discrete values such as a Leslie speed switch would be **hold**
-segments (bend forced to 0), not the quadratic used for Volume and Pan. Leslie speed and
+segments (control forced to the chord), not the quadratic used for Volume and Pan. Leslie speed and
 Presence are not identified here.
 
 ---
@@ -584,22 +687,23 @@ are actually rendered".** Steady state evaluates the curve at segment time, so q
 no overlap, no same-block promise). A point edit that is not a gesture keeps the §6
 window rather than resetting every plugin on every point drag.
 
-**"One point per UI event" vs "the timer must not define audio timing".** The callback
-records one point per block at the sample it actually rendered. The message thread only
-commits that ring.
+**"One point per UI event" vs "the timer must not define audio timing".** The audio
+thread records each value at the sample it applies. The message thread only commits
+that record. A block is not one point.
 
 ---
 
 ## 6. Implementation order
 
-The stage is delivered when slices 1–3 are all in. Slice 1 alone is not a release.
-Slice 4 is part of the same stage because read-ahead is already in the product (on at
-depth 3 unless saved Off or `--no-readahead`); it does not wait for a later version.
+The stage is delivered only when all four slices are in. Read-ahead is already in the
+product (on at depth 3 unless saved Off or `--no-readahead`), so the gesture handover
+in slice 4 is part of this delivery.
 
-**Slice 1 — model, evaluator, playback, export.** Address, anchor, points, bend, pure
-evaluator, snapshot publish, project round-trip behind the new format version, block
-ramp in the audio-clip strip, the instrument/proxy strip, the monitor strip, Group, and
-Stereo Out, and the same call in the offline loop. No arrangement UI yet.
+**Slice 1 — model, evaluator, playback, export.** Address, anchor, points, control
+value, pure evaluator, snapshot publish, project round-trip behind the new format
+version, per-sample evaluation in the audio-clip strip, the instrument/proxy strip, the
+monitor strip, Group, and Stereo Out, and the same call in the offline loop. No
+arrangement UI yet.
 
 Done when: a fixture curve produces the same samples live and offline; values outside
 the domain cannot be stored; a project without the new keys loads as today; the callback
@@ -613,7 +717,7 @@ Done when: the nine Touch rules hold, including Write-while-stopped and a punch 
 leaves points outside the gesture in place; Inspector and mixer cannot recurse; a
 finished drag is a single undo.
 
-**Slice 3 — lanes.** Chevron, R/W cells, dropdown, readout, points, bend handle,
+**Slice 3 — lanes.** Chevron, R/W cells, dropdown, readout, points, on-curve handle,
 Micro/Mini placement, scrollbar content height, collapsed-group hide/restore. Duplicate
 and delete carry the curves. Lane visibility and Read persist; Write does not.
 
@@ -636,8 +740,10 @@ No full matrix. No time budget. Focused checks only.
 
 **Cloud / Linux (logic and determinism, stub device):**
 
-- Evaluator: anchor, hold after the last point, bend stays inside the endpoints, domain
-  clamps, 10 ms ramp points, punch keeps outside points, seek/cycle splits the stroke.
+- Evaluator: anchor, hold after the last point, crescendo (`C = y0`) and early rise
+  (`C = y1`), handle on the curve at several times, domain clamps, 0.010 s return ramp
+  in project seconds, punch leaves bent pieces outside the interval unchanged within
+  `1e-5`, seek/cycle does not draw across the jump.
 - Read/Write rules that do not need a physical mouse (programmatic gestures): Write
   alone writes nothing; stopped Write writes nothing; one undo restores the surrounding
   curve.
@@ -650,7 +756,7 @@ No full matrix. No time budget. Focused checks only.
 
 - Fader and pan from Inspector and mixer while playing, including text and Ctrl-reset.
 - No zipper on a slow move; the Read-on ramp is a short fade, not a click.
-- Lane hit targets: add, move, delete, bend; chevron and R/W on Micro, Mini, and Small;
+- Lane hit targets: add, move, delete, grab the curve in time and value; chevron and R/W on Micro, Mini, and Small;
   collapsed group; vertical scrollbar.
 - A gesture against a read-ahead row that is inside a plugin: the row goes quiet until
   the worker returns, then follows the live value. Not a same-block guarantee.
@@ -670,15 +776,16 @@ not reopen them silently.
 | Write mode | Touch only |
 | Read/Write scope | Per main track, shared by its lanes |
 | Write after open | Always off |
-| Time base | Audible samples |
+| Time base | Seconds; `llround(timeSeconds * engineRate)` per point |
 | Volume file domain | Linear gain `[0, 8]`, `0` = −∞ |
 | Pan file domain | `[-1, +1]`, existing linear balance law applied at the strip |
-| Bend | One scalar in `[-1, +1]` per segment; handle is `B(0.5)` |
+| Shape | One control value `C` per segment, clamped to the endpoints on user edit; handle is the on-curve point at `u` in `[0.08, 0.92]` |
 | Before the first point | Anchor, set once from the pre-touch value |
 | After the last point | Hold, while Read is on |
-| Release ramp | 10 ms, block-rounded, linear in the stored domain, written only when Read is on at release |
-| Enabling Read | Display jumps; audio ramps 10 ms; that ramp is not stored |
-| Recording resolution | One point per device block, timestamped by the callback |
+| Release ramp | 0.010 s of project time, per sample, not rounded to a block; written only when Read is on at release |
+| Enabling Read | Display jumps; audio ramps 0.010 s; that ramp is not stored |
+| Recording resolution | One stored point per value the audio thread applied |
+| Read-ahead re-adoption | Only after the commit revision is observed and the return ramp has ended |
 | Manual fader edits with Read off | Stay non-undoable |
 | MIDI | No Volume or Pan lanes |
 | Stereo Out | Volume and Pan, because the strip already has both |
