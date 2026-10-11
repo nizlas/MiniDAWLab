@@ -193,6 +193,10 @@ void ChannelFaderComponent::mouseDown(const juce::MouseEvent& e)
         return;
     }
     dragging_ = true;
+    if (onGestureBegin != nullptr)
+    {
+        onGestureBegin();
+    }
     if (!getKnobBounds().expanded(2).contains(e.getPosition()))
     {
         applyPosition(positionForY(e.position.y), true); // click in the travel jumps there
@@ -220,8 +224,13 @@ void ChannelFaderComponent::mouseDrag(const juce::MouseEvent& e)
 
 void ChannelFaderComponent::mouseUp(const juce::MouseEvent&)
 {
+    const bool wasDragging = dragging_;
     dragging_ = false;
     syncValueField();
+    if (wasDragging && onGestureEnd != nullptr)
+    {
+        onGestureEnd();
+    }
 }
 
 void ChannelFaderComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -234,13 +243,29 @@ void ChannelFaderComponent::mouseWheelMove(const juce::MouseEvent& e, const juce
     const double currentDb = Scale::dbForLinearGain(linearGain_);
     double next = (currentDb <= Scale::kMinDb ? -60.0 : currentDb) + (wheel.deltaY > 0.0f ? stepDb : -stepDb);
     next = juce::jlimit(Scale::kMinDb, Scale::kMaxDb, next);
+    if (!dragging_ && onGestureBegin != nullptr)
+    {
+        onGestureBegin();
+    }
     applyGain(next <= Scale::kMinDb ? 0.0f : static_cast<float>(std::pow(10.0, next / 20.0)), true);
+    if (!dragging_ && onGestureEnd != nullptr)
+    {
+        onGestureEnd();
+    }
 }
 
 void ChannelFaderComponent::resetToUnityGain()
 {
     dragging_ = false;
+    if (onGestureBegin != nullptr)
+    {
+        onGestureBegin();
+    }
     applyGain(1.0f, true);
+    if (onGestureEnd != nullptr)
+    {
+        onGestureEnd();
+    }
 }
 
 void ChannelFaderComponent::commitTypedValue(const juce::String& text)
@@ -248,7 +273,15 @@ void ChannelFaderComponent::commitTypedValue(const juce::String& text)
     float g = linearGain_;
     if (Scale::parseGainText(text, g))
     {
+        if (onGestureBegin != nullptr)
+        {
+            onGestureBegin();
+        }
         applyGain(g, true);
+        if (onGestureEnd != nullptr)
+        {
+            onGestureEnd();
+        }
     }
     syncValueField(); // unparsable → shows the unchanged value again
 }

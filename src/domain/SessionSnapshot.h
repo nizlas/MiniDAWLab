@@ -198,6 +198,13 @@ public:
         TrackId trackId,
         float channelFaderGainLinear) noexcept;
 
+    /// [Message thread] Replace one track's Volume/Pan automation state. MIDI rows keep the
+    /// previous state: they have no channel strip.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackAutomation(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        TrackAutomationState automation) noexcept;
+
     /// [Message thread] Replace one track's pre-gain (dB, sanitized to [-24,+24]); see `Track`.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackPreGainDb(
         const SessionSnapshot& previous,

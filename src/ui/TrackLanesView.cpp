@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "ui/TrackLanesView.h"
+#include "ui/TrackAutomationLaneView.h"
 
 #include "audio/LatencySettingsStore.h"
 #include "ui/ClipWaveformView.h"
@@ -1707,6 +1708,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 = headerActiveSuppressProvider_ != nullptr && headerActiveSuppressProvider_();
             m.active = sessionSaysActive && !suppressed;
             m.armed = (recorder_.getArmedTrackId() == tid);
+            fillAutomationHeader(m, tid);
             if (const auto snap = session_.loadSessionSnapshotForAudioThread())
             {
                 const int idx = snap->findTrackIndexById(tid);
@@ -1782,6 +1784,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             }
             onActive();
         };
+        bindAutomationHeaderCallbacks(callbacks, tid, onActive);
         callbacks.onToggleMonitor = [this, tid] {
             // Runtime control: flips engine monitor state only — no session edit, no undo entry,
             // no dirty flag. Repaint headers so the speaker reflects the new state immediately.
@@ -2214,10 +2217,12 @@ void TrackLanesView::rebuildMasterHeadersIfNeeded()
         // Create item validates against Master membership, and `visualGroupMember` stays false.
         m.headerMultiSelected = isHeaderMultiSelected(tid);
         fillCommonHeaderModelFields(m, tid);
+        fillAutomationHeader(m, tid);
         return m;
     };
 
     TrackHeaderCallbacks callbacks;
+    bindAutomationHeaderCallbacks(callbacks, tid, onActive);
     callbacks.onActivateName = [this, tid, onActive] {
         session_.setActiveTrack(tid);
         if (onAudioHeaderActivated_ != nullptr)
@@ -2334,10 +2339,12 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
             m.headerMultiSelected = isHeaderMultiSelected(tid);
             m.visualGroupMember = isTrackInDisplayableVisualGroup(tid);
             fillCommonHeaderModelFields(m, tid);
+            fillAutomationHeader(m, tid);
             return m;
         };
 
         TrackHeaderCallbacks callbacks;
+        bindAutomationHeaderCallbacks(callbacks, tid, onActive);
         callbacks.onActivateName = [this, tid, onActive] {
             session_.setActiveTrack(tid);
             if (onAudioHeaderActivated_ != nullptr)
@@ -2578,8 +2585,10 @@ void TrackLanesView::resized()
     {
         const int rowH = juce::jmax(1, rowHeightForVisibleEntry(vi));
         juce::Rectangle row(area.getX(), y, w, rowH);
-        auto visibleRow = row.getIntersection(scrollViewport);
         const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)vi];
+        const int laneExtra = automationDisplayExtraPx(e.sessionTrackId);
+        const int trackH = juce::jmax(1, rowH - laneExtra);
+        auto visibleRow = row.withHeight(trackH).getIntersection(scrollViewport);
         if (isTrackInCollapsedVisualGroup(e.sessionTrackId))
         {
             // Collapsed group member: the 4 px mini strip is painted by this view directly; the
@@ -2664,6 +2673,7 @@ void TrackLanesView::resized()
                 }
             }
         }
+        layoutAutomationLanesForRow(e.sessionTrackId, row, trackH, scrollViewport);
         y += rowH;
     }
 
@@ -2907,7 +2917,307 @@ int TrackLanesView::rowHeightForVisibleEntry(const int visibleIndex) const noexc
         }
         return kCollapsedGroupMemberRowHeightPx;
     }
-    return rowHeightForTrack(tid);
+    return rowHeightForTrack(tid) + automationDisplayExtraPx(tid);
+}
+
+int TrackLanesView::automationDisplayExtraPx(const TrackId tid) const noexcept
+{
+    if (tid == kInvalidTrackId || isTrackInCollapsedVisualGroup(tid))
+    {
+        return 0;
+    }
+    const auto snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return 0;
+    }
+    const int idx = snap->findTrackIndexById(tid);
+    if (idx < 0 || !trackKindHasChannelAutomation(snap->getTrack(idx).getKind()))
+    {
+        return 0;
+    }
+    const TrackAutomationState& state = snap->getTrack(idx).getAutomation();
+    int extra = 0;
+    if (state.volumeLaneVisible)
+    {
+        extra += TrackAutomationLaneView::kLaneHeightPx;
+    }
+    if (state.panLaneVisible)
+    {
+        extra += TrackAutomationLaneView::kLaneHeightPx;
+    }
+    return extra;
+}
+
+double TrackLanesView::automationPlayheadSeconds() const noexcept
+{
+    if (automationPlayheadSeconds_ != nullptr)
+    {
+        return automationPlayheadSeconds_();
+    }
+    const double rate = trackAutomationTimelineRate(session_.getTimelineSampleRate(),
+                                                    effectiveDisplaySampleRate(deviceManager_));
+    return static_cast<double>(transport_.readPlayheadSamplesForUi()) / rate;
+}
+
+void TrackLanesView::fillAutomationHeader(TrackHeaderModel& model, const TrackId trackId) const
+{
+    model.automationAvailable = false;
+    model.automationRead = false;
+    model.automationLanesOpen = false;
+    model.automationWrite = isAutomationWriteEnabled(trackId);
+    const auto snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int idx = snap->findTrackIndexById(trackId);
+    if (idx < 0 || !trackKindHasChannelAutomation(snap->getTrack(idx).getKind()))
+    {
+        model.automationWrite = false;
+        return;
+    }
+    const TrackAutomationState& state = snap->getTrack(idx).getAutomation();
+    model.automationAvailable = true;
+    model.automationRead = state.read;
+    model.automationLanesOpen = state.volumeLaneVisible || state.panLaneVisible;
+}
+
+void TrackLanesView::bindAutomationHeaderCallbacks(TrackHeaderCallbacks& callbacks,
+                                                   const TrackId trackId,
+                                                   std::function<void()> onActive)
+{
+    callbacks.onToggleAutomationRead = [this, trackId, onActive] {
+        toggleAutomationRead(trackId);
+        if (onActive != nullptr)
+        {
+            onActive();
+        }
+    };
+    callbacks.onToggleAutomationWrite = [this, trackId, onActive] {
+        automationWriteByTrack_[trackId] = !isAutomationWriteEnabled(trackId);
+        if (onActive != nullptr)
+        {
+            onActive();
+        }
+    };
+    callbacks.onToggleAutomationLanes = [this, trackId, onActive] {
+        toggleAutomationLanes(trackId);
+        if (onActive != nullptr)
+        {
+            onActive();
+        }
+    };
+}
+
+void TrackLanesView::toggleAutomationRead(const TrackId trackId)
+{
+    const auto snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int idx = snap->findTrackIndexById(trackId);
+    if (idx < 0)
+    {
+        return;
+    }
+    const Track& track = snap->getTrack(idx);
+    if (!trackKindHasChannelAutomation(track.getKind()))
+    {
+        return;
+    }
+    TrackAutomationState state = track.getAutomation();
+    if (state.read)
+    {
+        const double seconds = automationPlayheadSeconds();
+        const float volume = trackAutomationEvaluate(state.volume, seconds, track.getChannelFaderGain());
+        const float pan = trackAutomationEvaluate(state.pan, seconds, track.getStereoPan());
+        session_.setTrackChannelFaderGain(trackId, volume);
+        session_.setTrackStereoPan(trackId, pan);
+        state.read = false;
+    }
+    else
+    {
+        state.read = true;
+    }
+    session_.setTrackAutomation(trackId, std::move(state));
+    resized();
+}
+
+void TrackLanesView::toggleAutomationLanes(const TrackId trackId)
+{
+    const auto snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int idx = snap->findTrackIndexById(trackId);
+    if (idx < 0 || !trackKindHasChannelAutomation(snap->getTrack(idx).getKind()))
+    {
+        return;
+    }
+    TrackAutomationState state = snap->getTrack(idx).getAutomation();
+    if (state.volumeLaneVisible || state.panLaneVisible)
+    {
+        state.volumeLaneVisible = false;
+        state.panLaneVisible = false;
+    }
+    else
+    {
+        state.volumeLaneVisible = true;
+    }
+    session_.setTrackAutomation(trackId, std::move(state));
+    resized();
+}
+
+void TrackLanesView::setAutomationLaneVisible(const TrackId trackId, const int parameterId, const bool visible)
+{
+    const auto snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int idx = snap->findTrackIndexById(trackId);
+    if (idx < 0)
+    {
+        return;
+    }
+    TrackAutomationState state = snap->getTrack(idx).getAutomation();
+    if (parameterId == kTrackAutomationPanId)
+    {
+        state.panLaneVisible = visible;
+    }
+    else
+    {
+        state.volumeLaneVisible = visible;
+    }
+    session_.setTrackAutomation(trackId, std::move(state));
+    resized();
+}
+
+void TrackLanesView::commitAutomationCurve(const TrackId trackId,
+                                           const int parameterId,
+                                           const TrackAutomationCurve& curve)
+{
+    if (onAutomationCurveEdited_ != nullptr)
+    {
+        onAutomationCurveEdited_(trackId, parameterId, curve);
+        return;
+    }
+    const auto snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int idx = snap->findTrackIndexById(trackId);
+    if (idx < 0)
+    {
+        return;
+    }
+    TrackAutomationState state = snap->getTrack(idx).getAutomation();
+    if (parameterId == kTrackAutomationPanId)
+    {
+        state.pan = curve;
+    }
+    else
+    {
+        state.volume = curve;
+    }
+    session_.setTrackAutomation(trackId, std::move(state));
+}
+
+void TrackLanesView::layoutAutomationLanesForRow(const TrackId trackId,
+                                                 const juce::Rectangle<int> fullRow,
+                                                 const int trackHeightPx,
+                                                 const juce::Rectangle<int> scrollViewport)
+{
+    const bool collapsed = isTrackInCollapsedVisualGroup(trackId);
+    const auto snap = session_.loadSessionSnapshotForAudioThread();
+    const int idx = snap != nullptr ? snap->findTrackIndexById(trackId) : -1;
+    const bool has = idx >= 0 && trackKindHasChannelAutomation(snap->getTrack(idx).getKind());
+    const TrackAutomationState state = has ? snap->getTrack(idx).getAutomation() : TrackAutomationState{};
+    const TrackColourKey colourKey = session_.getTrackColour(trackId);
+    const juce::Colour colour = track_colour_palette::headerSegmentFill(colourKey);
+    const float manualGain = has ? snap->getTrack(idx).getChannelFaderGain() : 1.0f;
+    const float manualPan = has ? snap->getTrack(idx).getStereoPan() : 0.0f;
+    auto laneArea = fullRow.withTrimmedTop(trackHeightPx);
+    const int headerW = headerColumnWidthPx();
+
+    auto place = [&](std::unique_ptr<TrackAutomationLaneView>& widget,
+                     const bool show,
+                     const int parameterId,
+                     const TrackAutomationCurve& curve,
+                     const float manual) {
+        if (!show || collapsed || !has)
+        {
+            if (widget != nullptr)
+            {
+                widget->setVisible(false);
+                widget->setBounds({});
+            }
+            return;
+        }
+        auto rect = laneArea.removeFromTop(TrackAutomationLaneView::kLaneHeightPx).getIntersection(scrollViewport);
+        if (widget == nullptr)
+        {
+            widget = std::make_unique<TrackAutomationLaneView>(parameterId, trackId);
+            addAndMakeVisible(*widget);
+            widget->onCurveCommitted = [this, trackId, parameterId](TrackAutomationCurve edited) {
+                commitAutomationCurve(trackId, parameterId, edited);
+            };
+            widget->onParameterChosen = [this, trackId, parameterId](const int chosen) {
+                if (chosen == parameterId)
+                {
+                    return;
+                }
+                setAutomationLaneVisible(trackId, parameterId, false);
+                setAutomationLaneVisible(trackId, chosen, true);
+            };
+            widget->onToggleOtherLane = [this, trackId, parameterId] {
+                const auto live = session_.loadSessionSnapshotForAudioThread();
+                const int liveIdx = live != nullptr ? live->findTrackIndexById(trackId) : -1;
+                if (liveIdx < 0)
+                {
+                    return;
+                }
+                const TrackAutomationState& liveState = live->getTrack(liveIdx).getAutomation();
+                const bool other = parameterId == kTrackAutomationPanId ? liveState.volumeLaneVisible
+                                                                         : liveState.panLaneVisible;
+                const int otherId = parameterId == kTrackAutomationPanId ? kTrackAutomationVolumeId
+                                                                          : kTrackAutomationPanId;
+                setAutomationLaneVisible(trackId, otherId, !other);
+            };
+        }
+        widget->setVisible(!rect.isEmpty());
+        widget->setBounds(rect);
+        widget->setCurve(curve, manual, colour);
+        const double rate = trackAutomationTimelineRate(session_.getTimelineSampleRate(),
+                                                        effectiveDisplaySampleRate(deviceManager_));
+        widget->setTimeMap(timelineViewport_.getSamplesPerPixel(),
+                           timelineViewport_.getVisibleStartSamples(),
+                           rate);
+        widget->setPlayheadSeconds(automationPlayheadSeconds());
+        juce::ignoreUnused(headerW);
+    };
+
+    auto& pair = automationLaneWidgets_[trackId];
+    if (state.volumeLaneVisible)
+    {
+        place(pair.volume, true, kTrackAutomationVolumeId, state.volume, manualGain);
+    }
+    else
+    {
+        place(pair.volume, false, kTrackAutomationVolumeId, state.volume, manualGain);
+    }
+    if (state.panLaneVisible)
+    {
+        place(pair.pan, true, kTrackAutomationPanId, state.pan, manualPan);
+    }
+    else
+    {
+        place(pair.pan, false, kTrackAutomationPanId, state.pan, manualPan);
+    }
 }
 
 int TrackLanesView::collapsedMemberDisplayHeightPx(const VisualGroupDisplayRun& run, const int vi) const noexcept

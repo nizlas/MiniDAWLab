@@ -419,7 +419,15 @@ void InspectorPanControl::mouseDown(const juce::MouseEvent& e)
 
     if (e.mods.isCommandDown() || e.mods.isCtrlDown())
     {
+        if (onGestureBegin != nullptr)
+        {
+            onGestureBegin();
+        }
         commitPan(0.0f, juce::sendNotificationSync);
+        if (onGestureEnd != nullptr)
+        {
+            onGestureEnd();
+        }
         return;
     }
 
@@ -434,6 +442,10 @@ void InspectorPanControl::mouseDown(const juce::MouseEvent& e)
     }
 
     panDragActive_ = true;
+    if (onGestureBegin != nullptr)
+    {
+        onGestureBegin();
+    }
     hideCursorOnMouseInputSources();
     applyPanFromLocalX((float)e.position.x, juce::sendNotificationSync);
 }
@@ -460,6 +472,10 @@ void InspectorPanControl::mouseUp(const juce::MouseEvent& e)
         return;
     }
     panDragActive_ = false;
+    if (onGestureEnd != nullptr)
+    {
+        onGestureEnd();
+    }
     revealCursorOnMouseInputSources();
 }
 
@@ -574,7 +590,15 @@ void InspectorPanControl::textEditorReturnKeyPressed(juce::TextEditor& ed)
     }
 
     ed.removeListener(this);
+    if (onGestureBegin != nullptr)
+    {
+        onGestureBegin();
+    }
     commitPan(*parsed, juce::sendNotificationSync);
+    if (onGestureEnd != nullptr)
+    {
+        onGestureEnd();
+    }
     removeChildComponent(&ed);
     panEditor_.reset();
     repaint();
@@ -609,7 +633,15 @@ void InspectorPanControl::textEditorFocusLost(juce::TextEditor& ed)
     ed.removeListener(this);
     if (parsed.has_value())
     {
+        if (onGestureBegin != nullptr)
+        {
+            onGestureBegin();
+        }
         commitPan(*parsed, juce::sendNotificationSync);
+        if (onGestureEnd != nullptr)
+        {
+            onGestureEnd();
+        }
     }
     removeChildComponent(&ed);
     panEditor_.reset();

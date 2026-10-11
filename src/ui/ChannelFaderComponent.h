@@ -45,6 +45,10 @@ public:
 
     /// Fired on every user change (drag, wheel, reset, typed value) with the new linear gain.
     std::function<void(float linearGain)> onGainChanged;
+    /// Pointer gesture around the values delivered to `onGainChanged`. Text and wheel
+    /// edits do not call these.
+    std::function<void()> onGestureBegin;
+    std::function<void()> onGestureEnd;
 
     /// Scale-column width (ticks + labels) the fader uses beside its travel.
     static constexpr int kScaleColumnWidthPx = 26;

@@ -264,6 +264,8 @@ private:
     LevelMeterComponent meter_;
     bool faderGuard_ = false;
     bool panGuard_ = false;
+    bool faderGesture_ = false;
+    bool panGesture_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixerChannelStrip)
 };

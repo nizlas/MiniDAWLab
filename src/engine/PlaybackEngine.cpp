@@ -622,7 +622,8 @@ void PlaybackEngine::audioThread_runAudioStripPayload(AudioStripJobPayload& payl
             payload.timelineEnd,
             payload.trackIndex,
             &preGainRampState_,
-            payload.soloView);
+            payload.soloView,
+            payload.automation);
     }
     if (payload.trackIndex >= 0
         && payload.trackIndex < (int)audioStripLastRenderTicks_.size())
@@ -690,13 +691,19 @@ void PlaybackEngine::audioThread_runInstrumentStripPayload(InstrumentStripJobPay
         // Audition instances exist only while the transport is stopped; combine is active only
         // while playing, so a combined job never mixes an audition host (PID-008 unchanged).
         nullptr,
-        payload.soloView);
+        payload.soloView,
+        payload.automation);
     if (payload.trackIndex >= 0
         && payload.trackIndex < (int)audioStripLastRenderTicks_.size())
     {
         audioStripLastRenderTicks_[(size_t)payload.trackIndex]
             = juce::Time::getHighResolutionTicks() - tStart;
     }
+}
+
+void PlaybackEngine::refreshAutomationTimelineRate() noexcept
+{
+    automationTimelineRate_.store(session_.getTimelineSampleRate(), std::memory_order_relaxed);
 }
 
 void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
@@ -707,6 +714,7 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         const int bs = device->getCurrentBufferSizeSamples();
         const int nOut = device->getActiveOutputChannels().countNumberOfSetBits();
         deviceSampleRateForDiagnostics_.store(sr, std::memory_order_relaxed);
+        refreshAutomationTimelineRate();
         // Input-selection slice: capture which PHYSICAL input channels are enabled — the callback
         // and the recording push map a track's physical input assignment to positions in the
         // packed active-channel array with this mask (sparse enables shift packed positions).
@@ -841,6 +849,7 @@ void PlaybackEngine::audioDeviceStopped()
     {
         readAhead_->releaseForDevice();
     }
+    automationRuntime_.messageThread_deviceStopped();
     if (pluginHost_ != nullptr)
     {
         pluginHost_->releaseResources();
@@ -1632,6 +1641,48 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     // monitor pass and the global transport-context refresh (docs/READAHEAD_PROTOTYPE.md).
     readAheadExcludedCount_ = 0;
     readAheadSegCount_ = 0;
+    {
+        const double deviceRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+        const double timelineRate = automationTimelineRate_.load(std::memory_order_relaxed);
+        const double engineRate = trackAutomationTimelineRate(timelineRate, deviceRate);
+        const double blockStartSeconds = trackAutomationEngineSampleToSeconds(t0, engineRate);
+        const double blockDurationSeconds = static_cast<double>(numSamples) / engineRate;
+        const bool transportJump = automationHavePreviousBlock_ && t0 != automationPreviousBlockEnd_;
+        automationRuntime_.audioThread_beginBlock(
+            blockStartSeconds,
+            blockDurationSeconds,
+            juce::Time::getMillisecondCounterHiRes() * 0.001,
+            transportJump,
+            trackAutomationEngineSampleToSeconds(automationPreviousBlockEnd_, engineRate));
+        if (sessionSnap != nullptr)
+        {
+            TrackId activeIds[kTrackAutomationSlots] = {};
+            const int activeCount = automationRuntime_.audioThread_activeTracks(activeIds, kTrackAutomationSlots);
+            for (int i = 0; i < activeCount; ++i)
+            {
+                const int idx = sessionSnap->findTrackIndexById(activeIds[i]);
+                if (idx < 0)
+                {
+                    automationRuntime_.audioThread_observe(activeIds[i], false, 0, blockStartSeconds);
+                }
+                else
+                {
+                    automationRuntime_.audioThread_observe(
+                        activeIds[i],
+                        true,
+                        sessionSnap->getTrack(idx).getAutomation().revision,
+                        blockStartSeconds);
+                }
+            }
+        }
+        automationRuntime_.audioThread_fillClock(automationClock_, engineRate);
+        automationClock_.blockStartSample = t0;
+        automationPreviousBlockEnd_ = t0 + static_cast<std::int64_t>(numSamples);
+        automationHavePreviousBlock_ = playbackIntent == PlaybackIntent::Playing;
+    }
+    TrackId automationHoldTracks[kTrackAutomationSlots] = {};
+    const int automationHoldCount = automationRuntime_.audioThread_adoptionHoldTracks(
+        automationHoldTracks, kTrackAutomationSlots);
     if (readAhead_ != nullptr)
     {
         readahead::ReadAheadRenderer::BlockBeginInfo rbi;
@@ -1657,6 +1708,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                          && postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
                          && postStripStageCapacity_ >= numSamples;
         rbi.monitorView = monitorPtr;
+        rbi.automationHoldTracks = automationHoldTracks;
+        rbi.automationHoldCount = automationHoldCount;
+        rbi.automationTimelineRate = trackAutomationTimelineRate(
+            automationTimelineRate_.load(std::memory_order_relaxed),
+            deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed));
         readAhead_->audioThread_beginBlock(rbi);
         if (sessionSnap != nullptr)
         {
@@ -1742,6 +1798,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             {
                 continue;
             }
+            if (automationRuntime_.adoptionHeld(srcTr.getId()))
+            {
+                continue;
+            }
             readAhead_->audioThread_offerAdoption(srcTr.getId(), step.trackIndex);
         }
     }
@@ -1820,7 +1880,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                0,
                                                                                numSamples,
                                                                                pluginHost_,
-                                                                               soloView);
+                                                                               soloView, &automationClock_);
                 // Group rows meter their bus strip output here; the Master row's meter is the
                 // device-output Stereo Out meter (folded once per callback), never duplicated.
                 if (busTr.getKind() == TrackKind::Group)
@@ -1880,14 +1940,14 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                           numOutputChannels,
                                                                           outputChannelData,
                                                                           pluginHost_,
-                                                                          soloView);
+                                                                          soloView, &automationClock_);
                 }
                 else if (step.destBusIndex < static_cast<int>(rp->busScratchL.size()))
                 {
                     float* const destStereo[2] = { rp->busScratchL[(size_t)step.destBusIndex],
                                                    rp->busScratchR[(size_t)step.destBusIndex] };
                     playback_mix_helpers::processBusChannelStripToOutputs(
-                        busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_, soloView);
+                        busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_, soloView, &automationClock_);
                 }
             }
             return;
@@ -1902,7 +1962,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                   numOutputChannels,
                                                                   outputChannelData,
                                                                   pluginHost_,
-                                                                  soloView);
+                                                                  soloView, &automationClock_);
         }
     };
 
@@ -1964,6 +2024,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 p.engine = this;
                 p.sessionSnap = sessionSnap.get();
                 p.soloView = soloView;
+                p.automation = &automationClock_;
                 p.chainEntry = insertMapForBlock != nullptr
                                    ? PluginInsertHost::audioThread_findEntry(
                                          *insertMapForBlock,
@@ -2173,7 +2234,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                         // while the transport is NOT playing — never layered over transport
                         // playback. Block-boundary decision on this thread; no republish races.
                         playbackIntent != PlaybackIntent::Playing ? entry->auditionHost : nullptr,
-                        soloView);
+                        soloView, &automationClock_);
                     stripStageL = postStripStagePtrs_[0];
                     stripStageR = postStripStagePtrs_[1];
                 }
@@ -2351,7 +2412,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 postStripStagePtrs_[1],
                 pluginHost_,
                 &preGainRampState_,
-                soloView);
+                soloView, &automationClock_);
             audioThread_foldTrackMeterIfMetered(
                 tr.getId(), postStripStagePtrs_[0], postStripStagePtrs_[1], numSamples);
 
@@ -2766,6 +2827,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     p.engine = this;
                     p.sessionSnap = sessionSnap.get();
                     p.soloView = soloView;
+                p.automation = &automationClock_;
                     p.chainEntry = insertMapForBlock != nullptr
                                        ? PluginInsertHost::audioThread_findEntry(*insertMapForBlock,
                                                                                  srcTr.getId())
@@ -2858,7 +2920,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     timelineEnd,
                     step.trackIndex,
                     &preGainRampState_,
-                    soloView);
+                    soloView, &automationClock_);
                 audioThread_foldTrackMeterIfMetered(srcTr.getId(),
                                                     postStripStagePtrs_[0] + destFrame,
                                                     postStripStagePtrs_[1] + destFrame,
@@ -2895,7 +2957,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                              step.trackIndex,
                                                                              &preGainRampState_,
                                                                              monitorPtr,
-                                                                             soloView);
+                                                                             soloView, &automationClock_);
             }
         }
         else
@@ -2912,7 +2974,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                          -1,
                                                                          &preGainRampState_,
                                                                          monitorPtr,
-                                                                         soloView);
+                                                                         soloView, &automationClock_);
         }
 
         if (prof)
@@ -3432,6 +3494,15 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
 
     const std::int64_t playbackShift = playbackOffsetSamples_.load(std::memory_order_acquire);
     const std::int64_t renderBase = timelineSegStartSample + playbackShift;
+    // Export evaluates the saved curve at this block's timeline, not the live playhead clock.
+    ChannelAutomationClock offlineAutomationClock;
+    {
+        const double deviceRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+        const double projectRate = session_.getTimelineSampleRate();
+        offlineAutomationClock.engineRate = trackAutomationTimelineRate(projectRate, deviceRate);
+        offlineAutomationClock.blockStartSample = renderBase;
+        offlineAutomationClock.laneCount = 0;
+    }
     std::int64_t silenceFrames = 0;
     if (renderBase < 0)
     {
@@ -3479,7 +3550,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                     sessionSnap.getArrangementExtentSamples(),
                     step.trackIndex,
                     nullptr,
-                    soloView);
+                    soloView, &offlineAutomationClock);
                 playback_mix_helpers::fanPostStripStageToDryAndSends(postStripStagePtrs_[0],
                                                                        postStripStagePtrs_[1],
                                                                        destFrame,
@@ -3512,7 +3583,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                              step.trackIndex,
                                                                              nullptr,
                                                                              nullptr,
-                                                                             soloView);
+                                                                             soloView, &offlineAutomationClock);
             }
         }
         else
@@ -3529,7 +3600,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                          -1,
                                                                          nullptr,
                                                                          nullptr,
-                                                                         soloView);
+                                                                         soloView, &offlineAutomationClock);
         }
 
         if (instrumentSnap != nullptr)
@@ -3664,7 +3735,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                                numSamples,
                                                                                pluginHost_,
                                                                                nullptr,
-                                                                               soloView);
+                                                                               soloView, &offlineAutomationClock);
                 if (rp != nullptr && srcStep != nullptr && srcStep->destBusIndex >= 0
                     && srcStep->destBusIndex < static_cast<int>(rp->busScratchL.size()))
                 {
@@ -3766,7 +3837,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                            0,
                                                                            numSamples,
                                                                            pluginHost_,
-                                                                           soloView);
+                                                                           soloView, &offlineAutomationClock);
             if (step.destBusIndex < 0)
             {
                 playback_mix_helpers::addPostStripStageToDeviceOutputs(
@@ -3814,14 +3885,14 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                       2,
                                                                       stereoOutputLR,
                                                                       pluginHost_,
-                                                                      soloView);
+                                                                      soloView, &offlineAutomationClock);
             }
             else if (step.destBusIndex < static_cast<int>(rp->busScratchL.size()))
             {
                 float* const destStereo[2] = { rp->busScratchL[(size_t)step.destBusIndex],
                                                rp->busScratchR[(size_t)step.destBusIndex] };
                 playback_mix_helpers::processBusChannelStripToOutputs(
-                    busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_, soloView);
+                    busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_, soloView, &offlineAutomationClock);
             }
         }
     }
@@ -3834,7 +3905,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                               2,
                                                               stereoOutputLR,
                                                               pluginHost_,
-                                                              soloView);
+                                                              soloView, &offlineAutomationClock);
     }
 }
 

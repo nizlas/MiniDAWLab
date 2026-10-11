@@ -98,6 +98,8 @@ struct InstrumentTimelineAttachment
 // Drains `RecorderService` preview-peak SPSC **once** (this timer) so lanes do not compete for the
 // same preview FIFO. Passes a copy to the one lane whose `TrackId` matches the active take.
 // ---------------------------------------------------------------------------
+class TrackAutomationLaneView;
+
 class TrackLanesView : public juce::Component, private juce::Timer
 {
 public:
@@ -814,6 +816,54 @@ private:
     float middlePanLastX_ = 0.0f;
 
     std::unordered_map<TrackId, int> perTrackRowHeightPx_;
+    /// Runtime Write flags. Not saved. Empty after open, so Write is off.
+    std::unordered_map<TrackId, bool> automationWriteByTrack_;
+    std::function<double()> automationPlayheadSeconds_;
+    std::function<void(TrackId, int, TrackAutomationCurve)> onAutomationCurveEdited_;
+
+    struct AutomationLanePair
+    {
+        std::unique_ptr<TrackAutomationLaneView> volume;
+        std::unique_ptr<TrackAutomationLaneView> pan;
+    };
+    std::unordered_map<TrackId, AutomationLanePair> automationLaneWidgets_;
+
+public:
+    [[nodiscard]] bool isAutomationWriteEnabled(TrackId trackId) const noexcept
+    {
+        const auto it = automationWriteByTrack_.find(trackId);
+        return it != automationWriteByTrack_.end() && it->second;
+    }
+
+    void clearAutomationWriteFlags() noexcept { automationWriteByTrack_.clear(); }
+
+    void setAutomationPlayheadSeconds(std::function<double()> fn) noexcept
+    {
+        automationPlayheadSeconds_ = std::move(fn);
+    }
+
+    /// One undo step per finished lane edit. Null falls through to a direct session write.
+    void setOnAutomationCurveEdited(std::function<void(TrackId, int parameter, TrackAutomationCurve)> fn) noexcept
+    {
+        onAutomationCurveEdited_ = std::move(fn);
+    }
+
+    void fillAutomationHeader(TrackHeaderModel& model, TrackId trackId) const;
+    void bindAutomationHeaderCallbacks(TrackHeaderCallbacks& callbacks,
+                                       TrackId trackId,
+                                       std::function<void()> onActive);
+
+private:
+    [[nodiscard]] int automationDisplayExtraPx(TrackId trackId) const noexcept;
+    [[nodiscard]] double automationPlayheadSeconds() const noexcept;
+    void toggleAutomationRead(TrackId trackId);
+    void toggleAutomationLanes(TrackId trackId);
+    void setAutomationLaneVisible(TrackId trackId, int parameterId, bool visible);
+    void commitAutomationCurve(TrackId trackId, int parameterId, const TrackAutomationCurve& curve);
+    void layoutAutomationLanesForRow(TrackId trackId,
+                                     juce::Rectangle<int> fullRow,
+                                     int trackHeightPx,
+                                     juce::Rectangle<int> scrollViewport);
 
     std::unordered_map<TrackId, InstrumentTimelineAttachment> instrumentTimelineAttachments_;
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended

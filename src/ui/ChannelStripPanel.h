@@ -54,6 +54,17 @@ public:
     /// the panel; the panel removes itself in its destructor.
     void setMeterHub(LevelMeterHub* hub);
 
+    /// Optional Touch path. When unset, the fader keeps calling `setTrackChannelFaderGain`.
+    void setAutomationPlayheadSeconds(std::function<double()> playheadSeconds) noexcept
+    {
+        automationPlayheadSeconds_ = std::move(playheadSeconds);
+    }
+
+    void setAutomationGestureTarget(std::function<void(TrackId, int parameter, float value)> update,
+                                    std::function<void(TrackId, int parameter)> end,
+                                    std::function<bool(TrackId)> writeOn,
+                                    std::function<bool()> playing);
+
     // --- LevelMeterHub::Listener -------------------------------------------------------------------
     void collectMeterInterest(std::vector<TrackId>& out) override;
     void meterWindowArrived(TrackId trackId, const level_meter::Reading& reading, double nowSeconds) override;
@@ -104,6 +115,12 @@ private:
     bool shownIsMaster_ = false;
     bool trackStripVisible_ = false;
     bool faderWiredGuard_ = false;
+    bool automationGesture_ = false;
+    std::function<void(TrackId, int, float)> automationUpdate_;
+    std::function<void(TrackId, int)> automationEnd_;
+    std::function<bool(TrackId)> automationWriteOn_;
+    std::function<bool()> automationPlaying_;
+    std::function<double()> automationPlayheadSeconds_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChannelStripPanel)
 };

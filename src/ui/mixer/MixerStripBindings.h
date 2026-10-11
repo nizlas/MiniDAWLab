@@ -54,6 +54,12 @@ struct MixerStripBindings
     // --- direct channel writes (same policy as the Inspector: no undo step) -----------------------
     std::function<void(TrackId, float linearGain)> setChannelFaderGain;
     std::function<void(TrackId, float pan)> setStereoPan;
+    /// Same Volume/Pan gesture as the Inspector. Null keeps the direct setters.
+    std::function<void(TrackId, int parameter, float value)> automationGestureUpdate;
+    std::function<void(TrackId, int parameter)> automationGestureEnd;
+    std::function<bool(TrackId)> automationWriteOn;
+    std::function<bool()> automationTransportPlaying;
+    std::function<double()> automationPlayheadSeconds;
 
     // --- base buttons (header semantics per kind) -------------------------------------------------
     std::function<void(TrackId)> toggleMute;

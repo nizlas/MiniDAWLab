@@ -1996,6 +1996,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         m.headerMultiSelected = trackLanes_.isHeaderMultiSelected(laneTid);
         m.visualGroupMember = trackLanes_.isTrackInDisplayableVisualGroup(laneTid);
         trackLanes_.fillCommonHeaderModelFields(m, laneTid);
+        trackLanes_.fillAutomationHeader(m, laneTid);
         return m;
     };
 
@@ -2006,6 +2007,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
     };
 
     TrackHeaderCallbacks callbacks;
+    trackLanes_.bindAutomationHeaderCallbacks(callbacks, laneTid, repaintExtras);
     callbacks.onActivateName = [this, ctl, laneTid, repaintExtras] {
         instrumentRuntime_.deactivateAllKeyedAndStagingControllers();
         session_.setActiveTrack(laneTid);

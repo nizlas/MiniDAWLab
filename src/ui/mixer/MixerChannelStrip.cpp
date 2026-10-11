@@ -228,15 +228,71 @@ MixerChannelStrip::MixerChannelStrip(const TrackId trackId, const MixerStripBind
     // Pan / fader / meter ----------------------------------------------------------------------
     styleSmallCaption(panCaption_, "Pan");
     addChildComponent(panCaption_);
+    pan_.onGestureBegin = [this] {
+        if (bindings_.automationGestureUpdate == nullptr)
+        {
+            return;
+        }
+        const auto snap = bindings_.loadSnapshot != nullptr ? bindings_.loadSnapshot() : nullptr;
+        const int idx = snap != nullptr ? snap->findTrackIndexById(trackId_) : -1;
+        const bool read = idx >= 0 && snap->getTrack(idx).getAutomation().read;
+        const bool write = bindings_.automationWriteOn != nullptr && bindings_.automationWriteOn(trackId_);
+        const bool playing = bindings_.automationTransportPlaying != nullptr && bindings_.automationTransportPlaying();
+        panGesture_ = read || (write && playing);
+    };
+    pan_.onGestureEnd = [this] {
+        if (panGesture_ && bindings_.automationGestureEnd != nullptr)
+        {
+            bindings_.automationGestureEnd(trackId_, kTrackAutomationPanId);
+        }
+        panGesture_ = false;
+    };
     pan_.onPanChanged = [this](const float pan) {
-        if (!panGuard_ && bindings_.setStereoPan)
+        if (panGuard_)
+        {
+            return;
+        }
+        if (panGesture_ && bindings_.automationGestureUpdate != nullptr)
+        {
+            bindings_.automationGestureUpdate(trackId_, kTrackAutomationPanId, pan);
+            return;
+        }
+        if (bindings_.setStereoPan)
         {
             bindings_.setStereoPan(trackId_, pan);
         }
     };
     addChildComponent(pan_);
+    fader_.onGestureBegin = [this] {
+        if (bindings_.automationGestureUpdate == nullptr)
+        {
+            return;
+        }
+        const auto snap = bindings_.loadSnapshot != nullptr ? bindings_.loadSnapshot() : nullptr;
+        const int idx = snap != nullptr ? snap->findTrackIndexById(trackId_) : -1;
+        const bool read = idx >= 0 && snap->getTrack(idx).getAutomation().read;
+        const bool write = bindings_.automationWriteOn != nullptr && bindings_.automationWriteOn(trackId_);
+        const bool playing = bindings_.automationTransportPlaying != nullptr && bindings_.automationTransportPlaying();
+        faderGesture_ = read || (write && playing);
+    };
+    fader_.onGestureEnd = [this] {
+        if (faderGesture_ && bindings_.automationGestureEnd != nullptr)
+        {
+            bindings_.automationGestureEnd(trackId_, kTrackAutomationVolumeId);
+        }
+        faderGesture_ = false;
+    };
     fader_.onGainChanged = [this](const float linear) {
-        if (!faderGuard_ && bindings_.setChannelFaderGain)
+        if (faderGuard_)
+        {
+            return;
+        }
+        if (faderGesture_ && bindings_.automationGestureUpdate != nullptr)
+        {
+            bindings_.automationGestureUpdate(trackId_, kTrackAutomationVolumeId, linear);
+            return;
+        }
+        if (bindings_.setChannelFaderGain)
         {
             bindings_.setChannelFaderGain(trackId_, linear);
         }
@@ -667,14 +723,26 @@ void MixerChannelStrip::refreshFromSession(const SessionSnapshot& snap, const bo
     {
         if (!fader_.isDragging() && !fader_.isValueFieldBeingEdited())
         {
+            float gain = tr.getChannelFaderGain();
+            if (tr.getAutomation().read && bindings_.automationPlayheadSeconds != nullptr)
+            {
+                gain = trackAutomationDisplayedValue(tr.getAutomation(), kTrackAutomationVolumeId, gain,
+                                                     bindings_.automationPlayheadSeconds());
+            }
             faderGuard_ = true;
-            fader_.setLinearGain(tr.getChannelFaderGain(), juce::dontSendNotification);
+            fader_.setLinearGain(gain, juce::dontSendNotification);
             faderGuard_ = false;
         }
         if (!pan_.isMouseButtonDown())
         {
+            float pan = tr.getStereoPan();
+            if (tr.getAutomation().read && bindings_.automationPlayheadSeconds != nullptr)
+            {
+                pan = trackAutomationDisplayedValue(tr.getAutomation(), kTrackAutomationPanId, pan,
+                                                    bindings_.automationPlayheadSeconds());
+            }
             panGuard_ = true;
-            pan_.setPan(tr.getStereoPan(), juce::dontSendNotification);
+            pan_.setPan(pan, juce::dontSendNotification);
             panGuard_ = false;
         }
     }

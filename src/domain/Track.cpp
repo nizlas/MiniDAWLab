@@ -96,6 +96,15 @@ Track Track::withChannelFaderGain(const float gain) const noexcept
     return out;
 }
 
+Track Track::withAutomation(TrackAutomationState automation) const noexcept
+{
+    trackAutomationNormalize(automation.volume, kTrackAutomationVolumeId);
+    trackAutomationNormalize(automation.pan, kTrackAutomationPanId);
+    Track out(*this);
+    out.automation_ = std::move(automation);
+    return out;
+}
+
 Track Track::withPreGainDb(const float preGainDb) const noexcept
 {
     Track out(*this);
