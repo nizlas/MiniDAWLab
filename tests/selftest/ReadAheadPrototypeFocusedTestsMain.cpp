@@ -2254,6 +2254,303 @@ void pumpMessageLoopMs(const int ms)
     return rc;
 }
 
+[[nodiscard]] std::shared_ptr<const AudioClip> makeDcClip(const int numSamples, const double rate)
+{
+    juce::AudioBuffer<float> buf(2, numSamples);
+    for (int i = 0; i < numSamples; ++i)
+    {
+        buf.setSample(0, i, 1.0f);
+        buf.setSample(1, i, 1.0f);
+    }
+    return std::make_shared<const AudioClip>(std::move(buf), rate, "ra-dc");
+}
+
+TrackAutomationState stepDownAt(const double dipSeconds, const double rate)
+{
+    const double justBefore = (static_cast<double>(trackAutomationSecondsToEngineSample(dipSeconds, rate)) - 1.0) / rate;
+    TrackAutomationState state;
+    state.read = true;
+    state.volume.anchorSet = true;
+    state.volume.anchor = 1.0f;
+    state.volume.points = { { 0.0, 1.0f }, { justBefore, 1.0f }, { dipSeconds, 0.25f } };
+    state.volume.shape = { trackAutomationLinearShape(1.0f, 1.0f), trackAutomationLinearShape(1.0f, 0.25f) };
+    return state;
+}
+
+/// Real worker thread, parked inside processBlock with the existing hold gate.
+/// A Volume gesture must discard the row, keep the in-flight call exclusive, and
+/// refuse re-adoption until the commit is in the snapshot the callback loaded
+/// and the return ramp has ended.
+void testAutomationGestureThroughReadAhead()
+{
+    std::printf("\n-- automation gesture through the real read-ahead worker --\n");
+    const int overlapsBefore = gOverlaps.load();
+    readahead::setConfiguredReadAheadDepth(kDepth);
+    const auto on = std::make_unique<Fixture>(0);
+    readahead::setConfiguredReadAheadDepth(0);
+    readahead::ReadAheadRenderer* const ra = on->h.engine.experimentalReadAhead();
+    expect(ra != nullptr, "thread-mode renderer is the production one");
+    expect(parkWorkerInsideProbe(*on), "worker parked inside processBlock before the gesture");
+
+    const auto parked = ra->countersSnapshot();
+    const TrackId tid = on->h.audioTids[1];
+    TrackAutomationCurve frozen;
+    frozen.anchorSet = true;
+    frozen.anchor = 1.0f;
+    auto& runtime = on->h.engine.trackAutomation();
+    runtime.begin(tid, kTrackAutomationVolumeId, true, true, 0.25f, 1.0, 7, frozen, 1.0f);
+    (void)on->h.runCallbackBlocks(1);
+    const auto discarded = ra->countersSnapshot();
+    expect(discarded.discardResets > parked.discardResets, "the gesture discards the adopted row");
+    expect(on->pre->isHeldInProcessBlock(), "the worker is still inside the same processBlock");
+    expect(gOverlaps.load() == overlapsBefore, "the live path does not process that instance");
+    expect(runtime.adoptionHeld(tid), "the gesture holds adoption");
+
+    runtime.requestRelease(tid, kTrackAutomationVolumeId, 1.0);
+    (void)on->h.runCallbackBlocks(2);
+    expect(runtime.adoptionHeld(tid), "release alone does not publish the curve or clear the hold");
+    on->pre->setHoldInProcessBlock(false);
+    const auto leaveBy = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (on->pre->isHeldInProcessBlock() && std::chrono::steady_clock::now() < leaveBy)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    expect(!on->pre->isHeldInProcessBlock(), "the worker leaves processBlock when the gate opens");
+    (void)on->h.runCallbackBlocks(3, 1000);
+    const auto beforePublish = ra->countersSnapshot();
+    expect(runtime.adoptionHeld(tid), "a free worker does not clear the hold before the snapshot revision");
+    expect(!ra->audioThread_isOwnedForRender(tid), "this row stays unowned while its gesture is unpublished");
+    expect(gOverlaps.load() == overlapsBefore, "no overlapping processBlock after the worker returns");
+
+    TrackId got = kInvalidTrackId;
+    int param = 0;
+    const auto commit = std::make_unique<TrackAutomationCommit>();
+    expect(runtime.takeCommit(got, param, *commit), "the delayed message thread can still take the close");
+    expect(commit->gestureId == 7 && commit->eventCount > 0, "the close is the gesture that was playing");
+    TrackAutomationState state;
+    state.read = true;
+    state.volume.anchorSet = true;
+    state.volume.anchor = commit->preTouchValue;
+    state.volume.points.assign(commit->events.begin(), commit->events.begin() + commit->eventCount);
+    state.volume.points.push_back({ commit->rampEndSeconds, commit->rampEndValue });
+    state.volume.shape.assign(static_cast<size_t>(juce::jmax(0, static_cast<int>(state.volume.points.size()) - 1)),
+                              trackAutomationLinearShape(0.0f, 0.0f));
+    for (size_t i = 0; i + 1 < state.volume.points.size(); ++i)
+    {
+        state.volume.shape[i] = trackAutomationLinearShape(state.volume.points[i].value, state.volume.points[i + 1].value);
+    }
+    uint32_t revision = 0;
+    expect(on->h.session.setTrackAutomation(tid, state, nullptr, nullptr, &revision), "the curve is published");
+    runtime.noteRequiredRevision(tid, param, commit->revision, revision);
+    bool cleared = false;
+    for (int i = 0; i < 8 && !cleared; ++i)
+    {
+        (void)on->h.runCallbackBlocks(1, 1000);
+        cleared = !runtime.adoptionHeld(tid);
+    }
+    expect(cleared, "the hold clears only after the callback loads that revision and the ramp ends");
+    const auto after = ra->countersSnapshot();
+    std::printf("automation handover discardResets=%lld missed=%lld stale=%lld adoptedBefore=%lld adoptedAfter=%lld\n",
+                (long long)(after.discardResets - parked.discardResets),
+                (long long)(after.missedSegments - parked.missedSegments),
+                (long long)(after.staleDiscarded - parked.staleDiscarded),
+                (long long)parked.adopted,
+                (long long)after.adopted);
+    expect(after.discardResets > parked.discardResets, "the handover discard is counted, not folded into a tolerance");
+    bool reowned = ra->audioThread_isOwnedForRender(tid);
+    for (int i = 0; i < 4 && !reowned; ++i)
+    {
+        (void)on->h.runCallbackBlocks(1, 1000);
+        reowned = ra->audioThread_isOwnedForRender(tid);
+    }
+    expect(reowned, "this row is offered again once the hold has cleared");
+    juce::ignoreUnused(beforePublish);
+
+    runtime.begin(tid, kTrackAutomationVolumeId, true, true, 0.4f, 1.0, 8, frozen, 1.0f);
+    (void)on->h.runCallbackBlocks(1, 1000);
+    runtime.requestRelease(tid, kTrackAutomationVolumeId, 1.0);
+    (void)on->h.runCallbackBlocks(1, 1000);
+    const auto rejected = std::make_unique<TrackAutomationCommit>();
+    expect(runtime.takeCommit(got, param, *rejected), "the rejected path still has a close");
+    runtime.noteRejected(tid, param, rejected->revision);
+    bool rejectionCleared = false;
+    for (int i = 0; i < 8 && !rejectionCleared; ++i)
+    {
+        (void)on->h.runCallbackBlocks(1, 1000);
+        rejectionCleared = !runtime.adoptionHeld(tid);
+    }
+    expect(rejectionCleared, "a rejected commit clears the hold without a revision ack");
+}
+
+/// Saved curve, no gesture: pump-mode read-ahead versus the direct callback.
+void testSavedAutomationMatchesDirectPath()
+{
+    std::printf("\n-- saved automation: read-ahead pump versus the direct strip --\n");
+    constexpr int kBlocks = 40;
+    const auto material = makeDcClip(kBlock * (kBlocks + 8), kRate);
+    auto run = [&](const int depth) {
+        const auto h = std::make_unique<Harness>(depth);
+        const TrackId tid = h->addAudioTrackWithClip(material);
+        expect(h->session.setTrackAutomation(tid, stepDownAt(0.10, kRate)), "saved curve published");
+        h->finishSetup();
+        return h->runPlayingBlocksPumped(kBlocks);
+    };
+    const std::vector<float> direct = run(0);
+    const std::vector<float> ahead = run(kDepth);
+    const double diff = maxAbsDiff(direct, ahead);
+    std::printf("saved-curve direct vs read-ahead maxAbsDiff=%g\n", diff);
+    expect(diff == 0.0, "a saved curve is bit-identical on the direct path and the read-ahead worker");
+    int dipIndex = -1;
+    for (int i = 0; i < kBlocks * kBlock; ++i)
+    {
+        if (std::fabs(direct[(size_t)i * 2]) < 0.5)
+        {
+            dipIndex = i;
+            break;
+        }
+    }
+    const int expectAt = (int)trackAutomationSecondsToEngineSample(0.10, kRate);
+    expect(dipIndex >= 0 && std::abs(dipIndex - expectAt) <= 1, "the dip is at the timeline sample of 0.10 s");
+}
+
+class RateDevice final : public juce::AudioIODevice
+{
+public:
+    RateDevice(const double rate, const int block)
+        : juce::AudioIODevice("RateDevice", "Stub"), rate_(rate), block_(block) {}
+    juce::StringArray getOutputChannelNames() override { return { "L", "R" }; }
+    juce::StringArray getInputChannelNames() override { return {}; }
+    juce::Array<double> getAvailableSampleRates() override { return { rate_ }; }
+    juce::Array<int> getAvailableBufferSizes() override { return { block_ }; }
+    int getDefaultBufferSize() override { return block_; }
+    juce::String open(const juce::BigInteger&, const juce::BigInteger&, double, int) override { return {}; }
+    void close() override {}
+    bool isOpen() override { return true; }
+    void start(juce::AudioIODeviceCallback*) override {}
+    void stop() override {}
+    bool isPlaying() override { return false; }
+    juce::String getLastError() override { return {}; }
+    int getCurrentBufferSizeSamples() override { return block_; }
+    double getCurrentSampleRate() override { return rate_; }
+    int getCurrentBitDepth() override { return 32; }
+    juce::BigInteger getActiveOutputChannels() const override { juce::BigInteger b; b.setRange(0, 2, true); return b; }
+    juce::BigInteger getActiveInputChannels() const override { return {}; }
+    int getOutputLatencyInSamples() override { return 0; }
+    int getInputLatencyInSamples() override { return 0; }
+private:
+    double rate_;
+    int block_;
+};
+
+/// Project rate and device rate differ. The engine does not reject the pair.
+/// Automation is heard at the project timeline sample. The WAV the exporter
+/// writes is tagged with the device rate and is not resampled; that tagging
+/// is the pre-automation exporter (AudioMixdownExporter.cpp is unchanged from
+/// the PR base).
+void testMismatchedProjectAndDeviceRates()
+{
+    std::printf("\n-- project rate and device rate differ; export header --\n");
+    const double pairs[2][2] = { { 44100.0, 48000.0 }, { 48000.0, 44100.0 } };
+    for (const auto& pair : pairs)
+    {
+        const double project = pair[0];
+        const double device = pair[1];
+        std::printf("project %.1f device %.1f\n", project, device);
+        Session session;
+        Transport transport;
+        PluginInsertHost host;
+        const auto engine = std::make_unique<PlaybackEngine>(transport, session, nullptr, nullptr, &host);
+        session.initializeTimelineSampleRateIfUnset(project);
+        expect(session.getTimelineSampleRate() == project, "the project rate stays put");
+        const int64_t dipSample = trackAutomationSecondsToEngineSample(0.5, project);
+        const auto material = makeDcClip((int)dipSample + 4096, project);
+        session.addTrack();
+        const TrackId tid = session.getActiveTrackId();
+        expect(session.addPlacedClipFromExistingMaterial(material, 0, 0, material->getNumSamples(), tid).wasOk(),
+               "clip placed on the timeline");
+        expect(session.setTrackAutomation(tid, stepDownAt(0.5, project)), "dip published at 0.5 s");
+        session.setArrangementExtentSamples((int64_t)project * 2);
+        engine->rebuildRoutingPlanFromSession();
+        RateDevice dev(device, 512);
+        engine->audioDeviceAboutToStart(&dev);
+        expect(session.getTimelineSampleRate() == project, "opening the device does not rewrite the project rate");
+
+        transport.requestSeek(dipSample - 256);
+        transport.requestPlaybackIntent(PlaybackIntent::Playing);
+        juce::AudioBuffer<float> blk(2, 512);
+        float* ptrs[2] = { blk.getWritePointer(0), blk.getWritePointer(1) };
+        juce::AudioIODeviceCallbackContext ctx;
+        int dipAt = -1;
+        for (int b = 0; b < 2; ++b)
+        {
+            blk.clear();
+            engine->audioDeviceIOCallbackWithContext(nullptr, 0, ptrs, 2, 512, ctx);
+            for (int i = 0; i < 512; ++i)
+            {
+                const int64_t sample = dipSample - 256 + (int64_t)b * 512 + i;
+                if (dipAt < 0 && std::fabs(ptrs[0][i]) < 0.5f)
+                {
+                    dipAt = (int)(sample - (dipSample - 256));
+                    expect(sample == dipSample, "the callback hears the dip at the project timeline sample");
+                }
+            }
+        }
+        expect(dipAt >= 0, "the callback rendered the dip");
+        const int64_t wrong = trackAutomationSecondsToEngineSample(0.5, device);
+        expect(dipSample != wrong, "the two rates name different samples");
+
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        expect(snap != nullptr, "snapshot available for export");
+        juce::AudioBuffer<float> offline(2, (int)project);
+        int offlineDip = -1;
+        constexpr int kQuantum = 512;
+        for (int pos = 0; pos < (int)project; pos += kQuantum)
+        {
+            const int n = std::min(kQuantum, (int)project - pos);
+            float* slice[2] = { offline.getWritePointer(0) + pos, offline.getWritePointer(1) + pos };
+            engine->renderOfflineMixdownBlock(*snap, nullptr, pos, n, slice, pos == 0);
+            for (int i = 0; i < n; ++i)
+            {
+                if (offlineDip < 0 && std::fabs(slice[0][i]) < 0.5f)
+                {
+                    offlineDip = pos + i;
+                }
+            }
+        }
+        expect(offlineDip == (int)dipSample, "offline export hears the dip at the same timeline sample");
+
+        const juce::File wav = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("dal-rate-" + juce::String((int)project) + "-" + juce::String((int)device) + ".wav");
+        wav.deleteFile();
+        {
+            auto stream = std::make_unique<juce::FileOutputStream>(wav);
+            juce::WavAudioFormat format;
+            std::unique_ptr<juce::AudioFormatWriter> writer(format.createWriterFor(
+                stream.release(), device, 2u, 16, {}, 0));
+            expect(writer != nullptr && writer->writeFromAudioSampleBuffer(offline, 0, (int)project),
+                   "WAV written the way the exporter tags it");
+        }
+        {
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(wav));
+            expect(reader != nullptr, "WAV reopened");
+            if (reader != nullptr)
+            {
+                expect(std::fabs(reader->sampleRate - device) < 0.1, "WAV header carries the device rate");
+                expect(reader->lengthInSamples == (juce::int64)project, "WAV length is the timeline sample count, not a resampled device length");
+                std::printf("export project %.0f device %.0f header %.0f length %lld (player seconds %.4f)\n",
+                            project, device, reader->sampleRate,
+                            (long long)reader->lengthInSamples,
+                            (double)reader->lengthInSamples / reader->sampleRate);
+            }
+        }
+        wav.deleteFile();
+        transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+        (void)engine->audioDeviceIOCallbackWithContext(nullptr, 0, ptrs, 2, 512, ctx);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -2264,6 +2561,15 @@ int main(int argc, char** argv)
         return runMonoDelaySave(argc, argv);
     }
     juce::ScopedJuceInitialiser_GUI juceInit; // MessageManager: prepareForDevice requires the message thread
+    if (argc >= 2 && juce::String(argv[1]) == "--automation")
+    {
+        std::printf("ReadAheadPrototypeFocusedTests --automation\n");
+        testAutomationGestureThroughReadAhead();
+        testSavedAutomationMatchesDirectPath();
+        testMismatchedProjectAndDeviceRates();
+        std::printf("\n%d checks, %d failure(s)\n", checks, failures);
+        return failures == 0 ? 0 : 1;
+    }
     std::printf("ReadAheadPrototypeFocusedTests (model: docs/READAHEAD_PROTOTYPE.md, v2)\n");
 
     testStablePlaybackBitIdentity();
@@ -2287,6 +2593,9 @@ int main(int argc, char** argv)
     testWorkerPauseAckTimeoutContract();
     testChainRemovalWaitsForBlockedWorker();
     testDeviceStopWaitsForBlockedWorker();
+    testAutomationGestureThroughReadAhead();
+    testSavedAutomationMatchesDirectPath();
+    testMismatchedProjectAndDeviceRates();
 
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

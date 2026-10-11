@@ -14,9 +14,11 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <atomic>
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace
@@ -566,6 +568,172 @@ void testUndoRedoAndDuplicateAndSave()
     expect(std::fabs(loaded.timelineSampleRate - 48000.0) < 1.0, "opening at another device rate does not rewrite the timeline rate");
 }
 
+[[nodiscard]] bool waitStage(const std::atomic<int>& stage, const int want)
+{
+    for (int i = 0; i < 100000000; ++i)
+    {
+        if (stage.load(std::memory_order_acquire) >= want)
+        {
+            return true;
+        }
+        std::this_thread::yield();
+    }
+    return false;
+}
+
+struct HandoverSync
+{
+    std::atomic<int> stage{ 0 };
+    TrackAutomationRuntime* runtime = nullptr;
+    bool tookDuringClose = false;
+    float valueDuringClose = -1.0f;
+    bool beganDuringRetire = false;
+    int drained = 0;
+};
+
+void onBeforeClosePublish(void* context)
+{
+    auto* sync = static_cast<HandoverSync*>(context);
+    sync->stage.store(1, std::memory_order_release);
+    (void)waitStage(sync->stage, 2);
+}
+
+void onDuringRetire(void* context)
+{
+    auto* sync = static_cast<HandoverSync*>(context);
+    sync->stage.store(1, std::memory_order_release);
+    (void)waitStage(sync->stage, 2);
+}
+
+void onDuringDrain(void* context)
+{
+    auto* sync = static_cast<HandoverSync*>(context);
+    sync->stage.store(1, std::memory_order_release);
+    (void)waitStage(sync->stage, 2);
+}
+
+void testHandoverThreads()
+{
+    auto runtime = std::make_unique<TrackAutomationRuntime>();
+    TrackAutomationCurve frozen;
+    frozen.anchorSet = true;
+    frozen.anchor = 1.0f;
+    HandoverSync sync;
+    sync.runtime = runtime.get();
+    TrackAutomationHandoverProbe probe;
+    probe.context = &sync;
+    probe.beforeClosePublish = &onBeforeClosePublish;
+    runtime->setHandoverProbeForTest(&probe);
+
+    runtime->begin(TrackId{ 1 }, kTrackAutomationVolumeId, true, false, 1.0f, 10.0, 4, frozen, 1.0f);
+    runtime->push(TrackId{ 1 }, kTrackAutomationVolumeId, 0.25f, 10.2);
+    runtime->requestRelease(TrackId{ 1 }, kTrackAutomationVolumeId, 10.4);
+    std::thread message([&] {
+        expect(waitStage(sync.stage, 1), "close window opened");
+        TrackId id = kInvalidTrackId;
+        int param = 0;
+        TrackAutomationCommit early;
+        sync.tookDuringClose = runtime->takeCommit(id, param, early);
+        sync.valueDuringClose = early.releaseValue;
+        sync.stage.store(2, std::memory_order_release);
+    });
+    runtime->audioThread_beginBlock(0.0, 0.10, 10.5, false, 0.0);
+    message.join();
+    expect(!sync.tookDuringClose, "a close is not visible before its payload is published");
+    TrackId id = kInvalidTrackId;
+    int param = 0;
+    TrackAutomationCommit commit;
+    expect(runtime->takeCommit(id, param, commit), "the published close is taken once");
+    expectNear(commit.releaseValue, 0.25, 1.0e-4, "the taken close carries the release value");
+    expect(commit.gestureId == 4, "the taken close keeps the gesture id");
+    TrackAutomationCommit again;
+    expect(!runtime->takeCommit(id, param, again), "the same close is not committed twice");
+    runtime->setHandoverProbeForTest(nullptr);
+
+    auto reuse = std::make_unique<TrackAutomationRuntime>();
+    for (int i = 0; i < 7; ++i)
+    {
+        reuse->begin(TrackId{ static_cast<TrackId>(i + 1) }, kTrackAutomationVolumeId, true, false, 0.5f, 1.0, 20, frozen, 0.5f);
+    }
+    reuse->begin(TrackId{ 8 }, kTrackAutomationVolumeId, true, false, 0.5f, 1.0, 21, frozen, 0.5f);
+    reuse->requestRelease(TrackId{ 8 }, kTrackAutomationVolumeId, 1.4);
+    reuse->audioThread_beginBlock(0.0, 0.10, 1.5, false, 0.0);
+    TrackAutomationCommit dumped;
+    expect(reuse->takeCommit(id, param, dumped), "the slot being retired has already handed off its close");
+    HandoverSync retireSync;
+    retireSync.runtime = reuse.get();
+    TrackAutomationHandoverProbe retireProbe;
+    retireProbe.context = &retireSync;
+    retireProbe.duringRetire = &onDuringRetire;
+    reuse->setHandoverProbeForTest(&retireProbe);
+    std::thread nextGesture([&] {
+        expect(waitStage(retireSync.stage, 1), "retire window opened");
+        reuse->begin(TrackId{ 9 }, kTrackAutomationVolumeId, true, false, 0.7f, 3.0, 22, frozen, 0.7f);
+        retireSync.beganDuringRetire = reuse->isCapturing(TrackId{ 9 }, kTrackAutomationVolumeId);
+        retireSync.stage.store(2, std::memory_order_release);
+    });
+    reuse->messageThread_snapshotReplaced();
+    nextGesture.join();
+    expect(!retireSync.beganDuringRetire, "the next gesture cannot claim a slot that is still being retired");
+    reuse->setHandoverProbeForTest(nullptr);
+    reuse->begin(TrackId{ 9 }, kTrackAutomationVolumeId, true, false, 0.7f, 3.0, 22, frozen, 0.7f);
+    expect(reuse->isCapturing(TrackId{ 9 }, kTrackAutomationVolumeId), "the slot accepts the next gesture after it is free");
+    ChannelAutomationClock clock;
+    reuse->audioThread_fillClock(clock, 48000.0);
+    const ChannelAutomationGestureLane* lane = clock.find(TrackId{ 9 }, kTrackAutomationVolumeId);
+    expect(lane != nullptr && std::fabs(lane->holdValue - 0.7f) < 1.0e-4f, "retirement does not wipe the next gesture");
+
+    auto drainRuntime = std::make_unique<TrackAutomationRuntime>();
+    drainRuntime->setCapacityForTest(4);
+    HandoverSync drainSync;
+    drainSync.runtime = drainRuntime.get();
+    TrackAutomationHandoverProbe drainProbe;
+    drainProbe.context = &drainSync;
+    drainProbe.duringDrain = &onDuringDrain;
+    drainRuntime->setHandoverProbeForTest(&drainProbe);
+    drainRuntime->begin(TrackId{ 3 }, kTrackAutomationVolumeId, true, false, 0.1f, 0.0, 30, frozen, 0.1f);
+    for (int i = 0; i < 4; ++i)
+    {
+        drainRuntime->push(TrackId{ 3 }, kTrackAutomationVolumeId, 0.2f * static_cast<float>(i + 1), 0.2 * (i + 1));
+    }
+    drainRuntime->audioThread_beginBlock(0.0, 0.10, 1.0, false, 0.0);
+    TrackAutomationPoint copied[4] = {};
+    std::thread producer([&] {
+        expect(waitStage(drainSync.stage, 1), "drain window opened");
+        drainRuntime->push(TrackId{ 3 }, kTrackAutomationVolumeId, 9.0f, 1.2);
+        drainRuntime->audioThread_beginBlock(1.0, 0.10, 2.0, false, 0.0);
+        drainSync.stage.store(2, std::memory_order_release);
+    });
+    const int n = drainRuntime->drainBefore(TrackId{ 3 }, kTrackAutomationVolumeId, 10.0, copied, 4);
+    producer.join();
+    expect(n == 3, "drain keeps a left endpoint and does not drop the copied points");
+    expectNear(copied[0].value, 0.1, 1.0e-4, "the first drained point survived the concurrent produce");
+    expectNear(copied[2].value, 0.4, 1.0e-4, "the last copied point was not overwritten");
+    drainRuntime->setHandoverProbeForTest(nullptr);
+    drainRuntime->push(TrackId{ 3 }, kTrackAutomationVolumeId, 8.0f, 2.2);
+    drainRuntime->requestRelease(TrackId{ 3 }, kTrackAutomationVolumeId, 2.4);
+    drainRuntime->audioThread_beginBlock(2.0, 0.10, 3.0, false, 0.0);
+    TrackAutomationCommit drainedCommit;
+    expect(drainRuntime->takeCommit(id, param, drainedCommit), "the drained gesture still commits");
+    bool sawNine = false;
+    bool sawEight = false;
+    bool sawKept = false;
+    bool sawDrainedAgain = false;
+    for (int i = 0; i < drainedCommit.eventCount; ++i)
+    {
+        const float v = drainedCommit.events[static_cast<size_t>(i)].value;
+        sawNine = sawNine || std::fabs(v - 9.0f) < 1.0e-3f;
+        sawEight = sawEight || std::fabs(v - 8.0f) < 1.0e-3f;
+        sawKept = sawKept || std::fabs(v - 0.6f) < 1.0e-3f;
+        sawDrainedAgain = sawDrainedAgain || std::fabs(v - 0.1f) < 1.0e-3f;
+    }
+    expect(sawKept, "the endpoint still in the ring survived the full-buffer produce");
+    expect(!sawNine, "a produce into a full ring does not overwrite an undrained point");
+    expect(!sawDrainedAgain, "points already drained are not committed again");
+    expect(sawEight, "a point produced after the drain was published is kept");
+    juce::ignoreUnused(drainSync);
+}
+
 void testObserveAndReadAheadHold()
 {
     const auto runtime = std::make_unique<TrackAutomationRuntime>();
@@ -624,6 +792,7 @@ int main()
     step("identity", testGestureIdentity);
     step("undo", testUndoRedoAndDuplicateAndSave);
     step("observe", testObserveAndReadAheadHold);
+    step("handover", testHandoverThreads);
     {
         juce::ScopedJuceInitialiser_GUI gui;
         const juce::File shotDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)

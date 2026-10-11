@@ -695,7 +695,8 @@ target_sources(TrackAutomationFocusedTests PRIVATE
 )
 target_include_directories(TrackAutomationFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(TrackAutomationFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
-    JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+    JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1
+    MINIDAW_AUTOMATION_HANDOVER_PROBE=1)
 target_link_libraries(TrackAutomationFocusedTests
     PRIVATE
         juce::juce_audio_basics

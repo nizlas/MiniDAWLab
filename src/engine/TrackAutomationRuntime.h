@@ -27,6 +27,18 @@
 #include <atomic>
 #include <cstdint>
 
+#if defined(MINIDAW_AUTOMATION_HANDOVER_PROBE)
+/// Test-only gates. Production does not compile these. Each function runs on the
+/// thread that hit the window; the test uses it to wake the other thread.
+struct TrackAutomationHandoverProbe
+{
+    void (*beforeClosePublish)(void* context) = nullptr;
+    void (*duringRetire)(void* context) = nullptr;
+    void (*duringDrain)(void* context) = nullptr;
+    void* context = nullptr;
+};
+#endif
+
 inline constexpr int kTrackAutomationLaneEvents = 256;
 inline constexpr int kTrackAutomationSlots = 8;
 inline constexpr int kTrackAutomationRingCapacity = 8192;
@@ -171,9 +183,36 @@ struct TrackAutomationCommit
     std::array<TrackAutomationPoint, kTrackAutomationRingCapacity> events{};
 };
 
-/// Fixed slots. Message thread: begin / push / release / drain / takeCommit /
-/// noteRequiredRevision / noteRejected. Audio thread: beginBlock / fillClock /
-/// observe. The callback never waits on the message thread.
+/// Fixed slots. The audio callback never allocates, locks, or waits.
+///
+/// Ownership of one slot:
+/// - phase 0 free: payload is inert. Only `begin` may claim it, by swapping
+///   0 → arming. It publishes phase 1 only after the payload is complete.
+/// - phase 1 capture: message thread owns the desired ring and the release
+///   request. Audio thread owns applied times, the hold value, and closes.
+/// - phase 2 ramp / 3 hold: audio thread reads the ramp. Message thread takes
+///   closes and notes the snapshot revision.
+/// - phase 4 retiring: one thread owns the wipe. phase 0 is stored last, so a
+///   claim cannot see a half-cleared slot. A reader that loaded an older phase
+///   copies values out and drops them if the phase changed.
+/// - phase 5 arming: the claiming `begin` owns every field.
+///
+/// Closes are a two-deep queue. The audio thread fills a `CloseMark` and then
+/// release-stores `closeWrite`. `takeCommit` acquire-loads that index, copies
+/// the mark, and only then release-stores `closeRead`. The mark is not visible
+/// before the release, and it is not overwritten before the ack. A full queue
+/// keeps the captured points and marks the gesture incomplete; it does not
+/// drop a close that was already published.
+/// The applied ring is the same kind of queue: the audio thread publishes
+/// `appliedWrite`, `drainBefore` copies and then release-stores `appliedRead`.
+/// `waitingLocal`, `requiredSnapshot` and `rejected` are written by the message
+/// thread after it owns the close, and read by the audio thread in `observe`.
+/// The audio thread does not write them. `clearSlot` refuses an untaken close.
+/// `snapshotReplaced` retires a ramp or hold whose close was already taken.
+/// `reset` advances the read index to the write index first, because the
+/// project is gone, and then retires. `deviceStopped` runs with no callback
+/// in flight: it closes an open capture, keeps an untaken close, and retires
+/// the rest.
 class TrackAutomationRuntime
 {
 public:
@@ -201,7 +240,7 @@ public:
         {
             return;
         }
-        Slot* slot = findFree();
+        Slot* slot = claimFree();
         if (slot == nullptr)
         {
             overflowTrack_.store(trackId, std::memory_order_relaxed);
@@ -209,32 +248,35 @@ public:
             overflowPending_.store(true, std::memory_order_release);
             return;
         }
-        slot->trackId = trackId;
-        slot->parameterId = parameterId;
-        slot->gestureId = gestureId == 0 ? 1u : gestureId;
-        slot->writeEnabled = writeEnabled;
-        slot->readEnabled = readEnabled;
+        slot->trackId.store(trackId, std::memory_order_relaxed);
+        slot->parameterId.store(parameterId, std::memory_order_relaxed);
+        slot->gestureId.store(gestureId == 0 ? 1u : gestureId, std::memory_order_relaxed);
+        slot->writeEnabled.store(writeEnabled, std::memory_order_relaxed);
+        slot->readEnabled.store(readEnabled, std::memory_order_relaxed);
         slot->frozen = frozenCurve;
         slot->frozenManual = frozenManual;
         slot->desiredRead.store(0, std::memory_order_relaxed);
         slot->desiredWrite.store(0, std::memory_order_relaxed);
         slot->appliedRead.store(0, std::memory_order_relaxed);
         slot->appliedWrite.store(0, std::memory_order_relaxed);
-        slot->closeCount = 0;
+        slot->closeRead.store(0, std::memory_order_relaxed);
+        slot->closeWrite.store(0, std::memory_order_relaxed);
         slot->releaseRequested.store(false, std::memory_order_relaxed);
-        slot->incomplete = false;
+        slot->incomplete.store(false, std::memory_order_relaxed);
         slot->rejected.store(false, std::memory_order_relaxed);
         slot->requiredSnapshot.store(0, std::memory_order_relaxed);
-        slot->waitingLocal = 0;
-        slot->publishRequired = false;
-        slot->holdValue = sanitizeTrackAutomationValue(parameterId, value);
+        slot->waitingLocal.store(0, std::memory_order_relaxed);
+        slot->publishRequired.store(false, std::memory_order_relaxed);
+        slot->retireRequested.store(false, std::memory_order_relaxed);
+        const float sanitized = sanitizeTrackAutomationValue(parameterId, value);
+        slot->holdValue.store(sanitized, std::memory_order_relaxed);
         slot->touchStartSeconds = -1.0;
         slot->localRevision = 0;
         const uint32_t w = 0;
-        slot->desired[w] = { slot->holdValue, hostSeconds };
+        slot->desired[w] = { sanitized, hostSeconds };
         slot->desiredWrite.store(1, std::memory_order_release);
         slot->adoptionHeld.store(true, std::memory_order_release);
-        slot->phase.store(1, std::memory_order_release);
+        slot->phase.store(kPhaseCapture, std::memory_order_release);
     }
 
     [[nodiscard]] bool isCapturing(const TrackId trackId, const int parameterId) const noexcept
@@ -254,13 +296,13 @@ public:
         }
         for (const Slot& slot : slots_)
         {
-            if (slot.phase.load(std::memory_order_acquire) != 1 || n >= capacity)
+            if (slot.phase.load(std::memory_order_acquire) != kPhaseCapture || n >= capacity)
             {
                 continue;
             }
-            ids[n] = slot.trackId;
-            params[n] = slot.parameterId;
-            gestures[n] = slot.gestureId;
+            ids[n] = slot.trackId.load(std::memory_order_relaxed);
+            params[n] = slot.parameterId.load(std::memory_order_relaxed);
+            gestures[n] = slot.gestureId.load(std::memory_order_relaxed);
             ++n;
         }
         return n;
@@ -274,11 +316,14 @@ public:
         }
         for (const Slot& slot : slots_)
         {
-            if (slot.gestureId != gestureId)
+            if (slot.gestureId.load(std::memory_order_relaxed) != gestureId)
             {
                 continue;
             }
-            if (slot.phase.load(std::memory_order_acquire) == 1 || slot.closeCount > 0)
+            const int phase = slot.phase.load(std::memory_order_acquire);
+            const uint32_t published = slot.closeWrite.load(std::memory_order_acquire);
+            const uint32_t taken = slot.closeRead.load(std::memory_order_acquire);
+            if (phase == kPhaseCapture || published != taken)
             {
                 return true;
             }
@@ -324,7 +369,8 @@ public:
                     const int maxOut) noexcept
     {
         Slot* slot = findCapturing(trackId, parameterId);
-        if (slot == nullptr || slot->closeCount > 0 || out == nullptr || maxOut <= 0)
+        if (slot == nullptr || out == nullptr || maxOut <= 0
+            || slot->closeWrite.load(std::memory_order_acquire) != slot->closeRead.load(std::memory_order_relaxed))
         {
             return 0;
         }
@@ -354,6 +400,12 @@ public:
             const Applied& ev = slot->applied[i % kTrackAutomationRingCapacity];
             out[copied++] = { ev.timeSeconds, ev.value };
         }
+#if defined(MINIDAW_AUTOMATION_HANDOVER_PROBE)
+        if (handoverProbe_ != nullptr && handoverProbe_->duringDrain != nullptr)
+        {
+            handoverProbe_->duringDrain(handoverProbe_->context);
+        }
+#endif
         slot->appliedRead.store(r + static_cast<uint32_t>(copied), std::memory_order_release);
         return copied;
     }
@@ -362,7 +414,7 @@ public:
     {
         for (const Slot& slot : slots_)
         {
-            if (slot.trackId == trackId && slot.adoptionHeld.load(std::memory_order_acquire))
+            if (slot.trackId.load(std::memory_order_relaxed) == trackId && slot.adoptionHeld.load(std::memory_order_acquire))
             {
                 return true;
             }
@@ -385,18 +437,15 @@ public:
     {
         for (Slot& slot : slots_)
         {
-            if (slot.closeCount <= 0)
+            const uint32_t published = slot.closeWrite.load(std::memory_order_acquire);
+            const uint32_t taken = slot.closeRead.load(std::memory_order_relaxed);
+            if (taken == published)
             {
                 continue;
             }
-            const CloseMark mark = slot.closes[0];
-            for (int i = 1; i < slot.closeCount; ++i)
-            {
-                slot.closes[static_cast<size_t>(i - 1)] = slot.closes[static_cast<size_t>(i)];
-            }
-            --slot.closeCount;
-            trackId = slot.trackId;
-            parameterId = slot.parameterId;
+            const CloseMark mark = slot.closes[taken % 2u];
+            trackId = slot.trackId.load(std::memory_order_relaxed);
+            parameterId = slot.parameterId.load(std::memory_order_relaxed);
             out = {};
             out.valid = true;
             out.writeEnabled = mark.writeEnabled;
@@ -424,7 +473,8 @@ public:
                 out.incomplete = true;
             }
             slot.appliedRead.store(r, std::memory_order_release);
-            slot.waitingLocal = mark.localRevision;
+            slot.waitingLocal.store(mark.localRevision, std::memory_order_release);
+            slot.closeRead.store(taken + 1u, std::memory_order_release);
             return true;
         }
         return false;
@@ -461,15 +511,15 @@ public:
             if (phase == 1)
             {
                 const double at = slot.touchStartSeconds >= 0.0 ? slot.touchStartSeconds : 0.0;
-                pushApplied(slot, at, slot.holdValue);
+                pushApplied(slot, at, slot.holdValue.load(std::memory_order_relaxed));
                 closeStroke(slot, at, false, false);
             }
             slot.adoptionHeld.store(false, std::memory_order_release);
-            if (slot.closeCount > 0)
+            if (slot.closeWrite.load(std::memory_order_acquire) != slot.closeRead.load(std::memory_order_acquire))
             {
-                slot.phase.store(3, std::memory_order_release);
+                slot.phase.store(kPhaseHold, std::memory_order_release);
             }
-            else if (slot.phase.load(std::memory_order_acquire) != 0)
+            else if (slot.phase.load(std::memory_order_acquire) != kPhaseFree)
             {
                 clearSlot(slot);
             }
@@ -483,7 +533,7 @@ public:
         for (Slot& slot : slots_)
         {
             const int phase = slot.phase.load(std::memory_order_acquire);
-            if (phase == 2 || phase == 3)
+            if (phase == kPhaseRamp || phase == kPhaseHold)
             {
                 clearSlot(slot);
             }
@@ -494,11 +544,9 @@ public:
     {
         for (Slot& slot : slots_)
         {
-            slot.phase.store(0, std::memory_order_release);
-            slot.adoptionHeld.store(false, std::memory_order_release);
-            slot.closeCount = 0;
-            slot.trackId = kInvalidTrackId;
-            slot.gestureId = 0;
+            const uint32_t published = slot.closeWrite.load(std::memory_order_relaxed);
+            slot.closeRead.store(published, std::memory_order_relaxed);
+            clearSlot(slot);
         }
         overflowPending_.store(false, std::memory_order_release);
     }
@@ -520,16 +568,16 @@ public:
         for (Slot& slot : slots_)
         {
             const int phase = slot.phase.load(std::memory_order_acquire);
-            if (phase == 0)
+            if (phase != kPhaseCapture && phase != kPhaseRamp && phase != kPhaseHold)
             {
                 continue;
             }
-            if (phase == 1)
+            if (phase == kPhaseCapture)
             {
                 if (discontinuity && previousBlockEndSeconds >= 0.0)
                 {
                     const bool released = slot.releaseRequested.load(std::memory_order_acquire);
-                    pushApplied(slot, previousBlockEndSeconds, slot.holdValue);
+                    pushApplied(slot, previousBlockEndSeconds, slot.holdValue.load(std::memory_order_relaxed));
                     closeStroke(slot, previousBlockEndSeconds, false, !released);
                     continue;
                 }
@@ -550,9 +598,9 @@ public:
                         const bool empty = w == slot.appliedRead.load(std::memory_order_acquire);
                         const Applied last = empty ? Applied{} : slot.applied[(w - 1) % kTrackAutomationRingCapacity];
                         if (empty || at > last.timeSeconds + kTrackAutomationTimeMergeSeconds
-                            || std::fabs(last.value - slot.holdValue) > kTrackAutomationValueTolerance)
+                            || std::fabs(last.value - slot.holdValue.load(std::memory_order_relaxed)) > kTrackAutomationValueTolerance)
                         {
-                            pushApplied(slot, at, slot.holdValue);
+                            pushApplied(slot, at, slot.holdValue.load(std::memory_order_relaxed));
                         }
                         closeStroke(slot, at, true, false);
                     }
@@ -573,14 +621,14 @@ public:
     {
         for (Slot& slot : slots_)
         {
-            if (slot.trackId != trackId)
+            if (slot.trackId.load(std::memory_order_relaxed) != trackId)
             {
                 continue;
             }
             const int phase = slot.phase.load(std::memory_order_acquire);
-            if (phase != 2 && phase != 3)
+            if (phase != kPhaseRamp && phase != kPhaseHold)
             {
-                if (!present && phase != 1)
+                if (!present && phase != kPhaseCapture && phase != kPhaseFree && phase != kPhaseArming)
                 {
                     clearSlot(slot);
                 }
@@ -591,15 +639,15 @@ public:
                 clearSlot(slot);
                 continue;
             }
-            const bool rampDone = blockStartSeconds >= slot.rampEndSeconds - kTrackAutomationTimeMergeSeconds;
+            const bool rampDone = blockStartSeconds >= slot.rampEndSeconds.load(std::memory_order_relaxed) - kTrackAutomationTimeMergeSeconds;
             if (!rampDone)
             {
                 continue;
             }
             const bool rejected = slot.rejected.load(std::memory_order_acquire);
             const uint32_t required = slot.requiredSnapshot.load(std::memory_order_acquire);
-            const bool published = slot.publishRequired && required != 0 && snapshotRevision == required;
-            if (rejected || published || !slot.writeEnabled)
+            const bool published = slot.publishRequired.load(std::memory_order_acquire) && required != 0 && snapshotRevision == required;
+            if (rejected || published || !slot.writeEnabled.load(std::memory_order_relaxed))
             {
                 clearSlot(slot);
             }
@@ -613,21 +661,39 @@ public:
         for (const Slot& slot : slots_)
         {
             const int phase = slot.phase.load(std::memory_order_acquire);
-            if (phase == 0 || clock.laneCount >= kTrackAutomationSlots)
+            if (phase != kPhaseCapture && phase != kPhaseRamp && phase != kPhaseHold)
+            {
+                continue;
+            }
+            if (clock.laneCount >= kTrackAutomationSlots)
+            {
+                continue;
+            }
+            ChannelAutomationGestureLane laneCopy;
+            laneCopy.trackId = slot.trackId.load(std::memory_order_relaxed);
+            laneCopy.parameterId = slot.parameterId.load(std::memory_order_relaxed);
+            laneCopy.holding = true;
+            laneCopy.holdValue = slot.holdValue.load(std::memory_order_relaxed);
+            laneCopy.ramping = phase == kPhaseRamp;
+            laneCopy.rampStartSeconds = slot.releaseSeconds.load(std::memory_order_relaxed);
+            laneCopy.rampEndSeconds = slot.rampEndSeconds.load(std::memory_order_relaxed);
+            laneCopy.rampStartValue = slot.releaseValue.load(std::memory_order_relaxed);
+            laneCopy.rampEndValue = slot.rampEndValue.load(std::memory_order_relaxed);
+            if (slot.phase.load(std::memory_order_acquire) != phase)
             {
                 continue;
             }
             ChannelAutomationGestureLane& lane = clock.lanes[static_cast<size_t>(clock.laneCount++)];
             lane = {};
-            lane.trackId = slot.trackId;
-            lane.parameterId = slot.parameterId;
+            lane.trackId = laneCopy.trackId;
+            lane.parameterId = laneCopy.parameterId;
             lane.holding = true;
-            lane.holdValue = slot.holdValue;
-            lane.ramping = phase == 2;
-            lane.rampStartSeconds = slot.releaseSeconds;
-            lane.rampEndSeconds = slot.rampEndSeconds;
-            lane.rampStartValue = slot.releaseValue;
-            lane.rampEndValue = slot.rampEndValue;
+            lane.holdValue = laneCopy.holdValue;
+            lane.ramping = laneCopy.ramping;
+            lane.rampStartSeconds = laneCopy.rampStartSeconds;
+            lane.rampEndSeconds = laneCopy.rampEndSeconds;
+            lane.rampStartValue = laneCopy.rampStartValue;
+            lane.rampEndValue = laneCopy.rampEndValue;
             const uint32_t w = slot.appliedWrite.load(std::memory_order_acquire);
             const uint32_t r = slot.appliedRead.load(std::memory_order_acquire);
             const uint32_t available = w >= r ? w - r : 0u;
@@ -640,6 +706,10 @@ public:
                 lane.value[static_cast<size_t>(i)] = ev.value;
             }
             lane.count = n;
+            if (slot.phase.load(std::memory_order_acquire) != phase)
+            {
+                --clock.laneCount;
+            }
         }
     }
 
@@ -655,14 +725,14 @@ public:
             bool seen = false;
             for (int i = 0; i < n; ++i)
             {
-                if (out[i] == slot.trackId)
+                if (out[i] == slot.trackId.load(std::memory_order_relaxed))
                 {
                     seen = true;
                 }
             }
             if (!seen)
             {
-                out[n++] = slot.trackId;
+                out[n++] = slot.trackId.load(std::memory_order_relaxed);
             }
         }
         return n;
@@ -673,21 +743,22 @@ public:
         int n = 0;
         for (const Slot& slot : slots_)
         {
-            if (slot.phase.load(std::memory_order_acquire) == 0 || n >= capacity)
+            const int activePhase = slot.phase.load(std::memory_order_acquire);
+            if ((activePhase != kPhaseCapture && activePhase != kPhaseRamp && activePhase != kPhaseHold) || n >= capacity)
             {
                 continue;
             }
             bool seen = false;
             for (int i = 0; i < n; ++i)
             {
-                if (out[i] == slot.trackId)
+                if (out[i] == slot.trackId.load(std::memory_order_relaxed))
                 {
                     seen = true;
                 }
             }
             if (!seen)
             {
-                out[n++] = slot.trackId;
+                out[n++] = slot.trackId.load(std::memory_order_relaxed);
             }
         }
         return n;
@@ -697,6 +768,13 @@ public:
     {
         return drainHorizon_.load(std::memory_order_acquire);
     }
+
+#if defined(MINIDAW_AUTOMATION_HANDOVER_PROBE)
+    void setHandoverProbeForTest(TrackAutomationHandoverProbe* const probe) noexcept
+    {
+        handoverProbe_ = probe;
+    }
+#endif
 
 private:
     struct Desired
@@ -728,27 +806,36 @@ private:
         float preTouchValue = 0.0f;
     };
 
+    static constexpr int kPhaseFree = 0;
+    static constexpr int kPhaseCapture = 1;
+    static constexpr int kPhaseRamp = 2;
+    static constexpr int kPhaseHold = 3;
+    static constexpr int kPhaseRetiring = 4;
+    static constexpr int kPhaseArming = 5;
+
     struct Slot
     {
-        TrackId trackId = kInvalidTrackId;
-        int parameterId = 0;
-        uint32_t gestureId = 0;
-        bool writeEnabled = false;
-        bool readEnabled = false;
-        bool incomplete = false;
-        bool publishRequired = false;
+        std::atomic<TrackId> trackId{ kInvalidTrackId };
+        std::atomic<int> parameterId{ 0 };
+        std::atomic<uint32_t> gestureId{ 0 };
+        std::atomic<bool> writeEnabled{ false };
+        std::atomic<bool> readEnabled{ false };
+        std::atomic<bool> incomplete{ false };
+        std::atomic<bool> publishRequired{ false };
+        std::atomic<bool> retireRequested{ false };
         TrackAutomationCurve frozen{};
         float frozenManual = 0.0f;
-        float holdValue = 0.0f;
+        std::atomic<float> holdValue{ 0.0f };
         double touchStartSeconds = -1.0;
-        double releaseSeconds = 0.0;
         double releaseHostSeconds = 0.0;
-        double rampEndSeconds = 0.0;
-        float releaseValue = 0.0f;
-        float rampEndValue = 0.0f;
+        std::atomic<double> releaseSeconds{ 0.0 };
+        std::atomic<double> rampEndSeconds{ 0.0 };
+        std::atomic<float> releaseValue{ 0.0f };
+        std::atomic<float> rampEndValue{ 0.0f };
         uint32_t localRevision = 0;
-        uint32_t waitingLocal = 0;
-        int closeCount = 0;
+        std::atomic<uint32_t> waitingLocal{ 0 };
+        std::atomic<uint32_t> closeWrite{ 0 };
+        std::atomic<uint32_t> closeRead{ 0 };
         std::array<CloseMark, 2> closes{};
         std::atomic<int> phase{ 0 };
         std::atomic<bool> adoptionHeld{ false };
@@ -767,8 +854,9 @@ private:
     {
         for (Slot& slot : slots_)
         {
-            if (slot.trackId == trackId && slot.parameterId == parameterId
-                && slot.phase.load(std::memory_order_acquire) == 1)
+            if (slot.trackId.load(std::memory_order_relaxed) == trackId
+                && slot.parameterId.load(std::memory_order_relaxed) == parameterId
+                && slot.phase.load(std::memory_order_acquire) == kPhaseCapture)
             {
                 return &slot;
             }
@@ -780,8 +868,9 @@ private:
     {
         for (const Slot& slot : slots_)
         {
-            if (slot.trackId == trackId && slot.parameterId == parameterId
-                && slot.phase.load(std::memory_order_acquire) == 1)
+            if (slot.trackId.load(std::memory_order_relaxed) == trackId
+                && slot.parameterId.load(std::memory_order_relaxed) == parameterId
+                && slot.phase.load(std::memory_order_acquire) == kPhaseCapture)
             {
                 return &slot;
             }
@@ -789,11 +878,12 @@ private:
         return nullptr;
     }
 
-    Slot* findFree() noexcept
+    Slot* claimFree() noexcept
     {
         for (Slot& slot : slots_)
         {
-            if (slot.phase.load(std::memory_order_acquire) == 0 && slot.closeCount == 0)
+            int expected = kPhaseFree;
+            if (slot.phase.compare_exchange_strong(expected, kPhaseArming, std::memory_order_acq_rel, std::memory_order_acquire))
             {
                 return &slot;
             }
@@ -805,7 +895,10 @@ private:
     {
         for (Slot& slot : slots_)
         {
-            if (slot.trackId == trackId && slot.parameterId == parameterId && slot.waitingLocal == localRevision)
+            if (slot.trackId.load(std::memory_order_relaxed) == trackId
+                && slot.parameterId.load(std::memory_order_relaxed) == parameterId
+                && slot.waitingLocal.load(std::memory_order_acquire) == localRevision
+                && localRevision != 0)
             {
                 return &slot;
             }
@@ -815,9 +908,9 @@ private:
 
     void markOverflow(Slot& slot) noexcept
     {
-        slot.incomplete = true;
-        overflowTrack_.store(slot.trackId, std::memory_order_relaxed);
-        overflowParam_.store(slot.parameterId, std::memory_order_relaxed);
+        slot.incomplete.store(true, std::memory_order_relaxed);
+        overflowTrack_.store(slot.trackId.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        overflowParam_.store(slot.parameterId.load(std::memory_order_relaxed), std::memory_order_relaxed);
         overflowPending_.store(true, std::memory_order_release);
     }
 
@@ -832,7 +925,7 @@ private:
         }
         slot.applied[w % kTrackAutomationRingCapacity] = { timeSeconds, value };
         slot.appliedWrite.store(w + 1, std::memory_order_release);
-        slot.holdValue = value;
+        slot.holdValue.store(value, std::memory_order_relaxed);
         if (slot.touchStartSeconds < 0.0)
         {
             slot.touchStartSeconds = timeSeconds;
@@ -890,69 +983,104 @@ private:
 
     void closeStroke(Slot& slot, const double releaseTime, const bool allowRamp, const bool restart) noexcept
     {
-        if (slot.closeCount >= 2)
+        const uint32_t write = slot.closeWrite.load(std::memory_order_relaxed);
+        const uint32_t read = slot.closeRead.load(std::memory_order_acquire);
+        if (write - read >= 2u)
         {
             markOverflow(slot);
-            slot.phase.store(3, std::memory_order_release);
+            slot.phase.store(kPhaseHold, std::memory_order_release);
             slot.releaseRequested.store(false, std::memory_order_release);
             return;
         }
-        slot.releaseSeconds = releaseTime;
-        slot.releaseValue = slot.holdValue;
+        const float held = slot.holdValue.load(std::memory_order_relaxed);
+        const bool readEnabled = slot.readEnabled.load(std::memory_order_relaxed);
         double rampEnd = releaseTime;
-        float rampEndValue = slot.holdValue;
-        if (allowRamp && slot.readEnabled)
+        float rampEndValue = held;
+        if (allowRamp && readEnabled)
         {
             rampEnd = releaseTime + kTrackAutomationReturnRampSeconds;
             rampEndValue = trackAutomationEvaluate(slot.frozen, rampEnd, slot.frozenManual);
         }
-        slot.rampEndSeconds = rampEnd;
-        slot.rampEndValue = rampEndValue;
+        slot.releaseSeconds.store(releaseTime, std::memory_order_relaxed);
+        slot.releaseValue.store(held, std::memory_order_relaxed);
+        slot.rampEndSeconds.store(rampEnd, std::memory_order_relaxed);
+        slot.rampEndValue.store(rampEndValue, std::memory_order_relaxed);
         slot.localRevision += 1;
         if (slot.localRevision == 0)
         {
             slot.localRevision = 1;
         }
-        CloseMark& mark = slot.closes[static_cast<size_t>(slot.closeCount++)];
-        mark = {};
-        mark.writeEnabled = slot.writeEnabled;
-        mark.readEnabled = slot.readEnabled;
+        CloseMark mark;
+        mark.writeEnabled = slot.writeEnabled.load(std::memory_order_relaxed);
+        mark.readEnabled = readEnabled;
         mark.restartStroke = restart;
-        mark.incomplete = slot.incomplete;
-        mark.gestureId = slot.gestureId;
+        mark.incomplete = slot.incomplete.load(std::memory_order_relaxed);
+        mark.gestureId = slot.gestureId.load(std::memory_order_relaxed);
         mark.localRevision = slot.localRevision;
         mark.endWrite = slot.appliedWrite.load(std::memory_order_relaxed);
         mark.touchStartSeconds = slot.touchStartSeconds >= 0.0 ? slot.touchStartSeconds : releaseTime;
         mark.releaseSeconds = releaseTime;
         mark.rampEndSeconds = rampEnd;
-        mark.releaseValue = slot.holdValue;
+        mark.releaseValue = held;
         mark.rampEndValue = rampEndValue;
         mark.preTouchValue = slot.frozenManual;
+        slot.closes[write % 2u] = mark;
+#if defined(MINIDAW_AUTOMATION_HANDOVER_PROBE)
+        if (handoverProbe_ != nullptr && handoverProbe_->beforeClosePublish != nullptr)
+        {
+            handoverProbe_->beforeClosePublish(handoverProbe_->context);
+        }
+#endif
+        slot.closeWrite.store(write + 1u, std::memory_order_release);
         slot.releaseRequested.store(false, std::memory_order_release);
         if (restart)
         {
             slot.touchStartSeconds = -1.0;
-            slot.phase.store(1, std::memory_order_release);
+            slot.phase.store(kPhaseCapture, std::memory_order_release);
             return;
         }
-        slot.publishRequired = slot.writeEnabled;
-        slot.waitingLocal = slot.localRevision;
-        slot.phase.store(allowRamp && slot.readEnabled ? 2 : 3, std::memory_order_release);
+        slot.publishRequired.store(mark.writeEnabled, std::memory_order_relaxed);
+        slot.phase.store(allowRamp && readEnabled ? kPhaseRamp : kPhaseHold, std::memory_order_release);
     }
 
-    static void clearSlot(Slot& slot) noexcept
+    /// Exclusive wipe. Refuses a slot another thread is arming, and refuses to
+    /// drop a close the message thread has not taken. phase 0 is published last.
+    void clearSlot(Slot& slot) noexcept
     {
-        slot.adoptionHeld.store(false, std::memory_order_release);
-        slot.phase.store(0, std::memory_order_release);
-        slot.trackId = kInvalidTrackId;
-        slot.gestureId = 0;
-        slot.closeCount = 0;
-        slot.waitingLocal = 0;
-        slot.publishRequired = false;
+        const int phase = slot.phase.load(std::memory_order_acquire);
+        if (phase == kPhaseFree || phase == kPhaseArming || phase == kPhaseRetiring)
+        {
+            return;
+        }
+        if (slot.closeWrite.load(std::memory_order_acquire) != slot.closeRead.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        int expected = phase;
+        if (!slot.phase.compare_exchange_strong(expected, kPhaseRetiring, std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            return;
+        }
+        slot.adoptionHeld.store(false, std::memory_order_relaxed);
+        slot.trackId.store(kInvalidTrackId, std::memory_order_relaxed);
+        slot.gestureId.store(0, std::memory_order_relaxed);
+        slot.waitingLocal.store(0, std::memory_order_relaxed);
+        slot.publishRequired.store(false, std::memory_order_relaxed);
         slot.requiredSnapshot.store(0, std::memory_order_relaxed);
         slot.rejected.store(false, std::memory_order_relaxed);
+        slot.incomplete.store(false, std::memory_order_relaxed);
+#if defined(MINIDAW_AUTOMATION_HANDOVER_PROBE)
+        if (handoverProbe_ != nullptr && handoverProbe_->duringRetire != nullptr)
+        {
+            handoverProbe_->duringRetire(handoverProbe_->context);
+        }
+#endif
+        slot.phase.store(kPhaseFree, std::memory_order_release);
     }
 
+#if defined(MINIDAW_AUTOMATION_HANDOVER_PROBE)
+    TrackAutomationHandoverProbe* handoverProbe_ = nullptr;
+#endif
     std::array<Slot, kTrackAutomationSlots> slots_{};
     std::atomic<int> capacity_{ kTrackAutomationRingCapacity };
     std::atomic<double> drainHorizon_{ 0.0 };

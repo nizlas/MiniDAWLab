@@ -19,6 +19,51 @@
 > Read-ahead re-adopts a track only after the commit revision is observed and the return
 > ramp has ended. All four slices in §6 are the delivery.
 >
+> **Handover (the commit after `0d2cc4b`).** A finished gesture is a two-deep close
+> queue. The audio thread release-stores the write index only after the mark is
+> filled. The message thread copies that mark and then release-stores the read index.
+> A slot is retired by swapping to phase 4, wiping the payload, and storing phase 0
+> last, so the next `begin` cannot claim a slot that is still being cleared. An
+> untaken close is not dropped. Project replace abandons the queue first, because
+> the project is gone. The audio callback still does not allocate, lock, or wait.
+>
+> Before that protocol, `TrackAutomationFocusedTests` with two threads and barriers
+> that exist only in that target (`MINIDAW_AUTOMATION_HANDOVER_PROBE`) failed seven
+> checks: the close was visible before its payload; taking it lost the release value
+> and the gesture id; the next gesture could claim a slot that was still being
+> retired, and the retirement then wiped the new gesture. Draining a full applied
+> ring already refused the overlapping write, and that check passed both times.
+> After the protocol the same checks pass.
+>
+> `ReadAheadPrototypeFocusedTests --automation` calls
+> `PlaybackEngine::audioDeviceIOCallbackWithContext` and the real
+> `ReadAheadRenderer` worker at depth 3. The worker is held inside
+> `StatefulProbeInsert::processBlock`. A Volume gesture discards that row. On the
+> run recorded with this note the discard window was `discardResets` 3,
+> `missedSegments` 7, `staleDiscarded` 1. Those counters are the silence; they are
+> not folded into an audio tolerance. `processBlock` did not overlap on that
+> instance. The row stayed unowned until `setTrackAutomation` published the revision
+> and the 0.010 s ramp had ended, and it was offered again after that. A rejected
+> commit cleared the hold with no revision ack. A separate pump-mode run of a saved
+> curve, with no gesture, matched the direct strip bit for bit, and the step sat on
+> the timeline sample of 0.10 s at 48 kHz.
+>
+> Project 44100 Hz with a 48000 Hz device, and project 48000 Hz with a 44100 Hz
+> device, are not rejected. The project rate stays. The live callback and
+> `renderOfflineMixdownBlock` both hear a step at 0.5 s on
+> `llround(0.5 * projectRate)` (22050 and 24000), not on the device-rate index.
+> A WAV tagged with the device rate and filled with that timeline sample count
+> plays as 0.9187 s and 1.0884 s. That split is already on `3a6f338`:
+> `AudioMixdownDialog` sets the WAV rate from the open device, and
+> `exportStereoMixdownWavBlocking` writes `loopSpan.lengthSamples` timeline samples
+> without resampling. `AudioMixdownExporter.cpp` is unchanged on this branch. It is
+> parked, not rebuilt. The exporter translation unit was not linked into the test;
+> the fixture calls the engine's offline block and then writes the header the
+> exporter writes.
+>
+> Still not covered by these runs: ASIO, a physical pointer, and a listening pass.
+> The observe-only helper is not this worker check.
+>
 > **Reviewed revision:** `3a6f3384b80dac6ff7663b538beb4dc446fbff0e` (`v1.3.1`, `origin/main`).
 > Parallel audio/instrument strips (A1/A2) and the read-ahead prototype are on this
 > revision. Read-ahead is on at depth 3 unless Audio Settings has a saved Off or the
@@ -256,6 +301,15 @@ timeSeconds    = timelineSample / timelineRate
 export rate. `llround` is per point. Opening a project does not rewrite the stored
 seconds, and changing the device does not move a point to a different timeline sample.
 Clips, the playhead and read-ahead keys are still those timeline-sample integers.
+
+The mixdown WAV header is a separate, older fact. The dialog tags the file with the
+open device's rate, and the exporter writes one timeline sample per output frame
+with no resampling (`AudioMixdownExporter.cpp`, unchanged from `3a6f338`). A project
+at 44100 Hz opened on a 48000 Hz device therefore stores 44100 frames in a file
+whose header says 48000 Hz. Playback of that file is 44100/48000 seconds per
+timeline second. This stage does not rebuild that exporter. Automation placement
+is verified against the timeline sample, at both of those rate pairs and at a
+matched 48000 Hz pump-mode run.
 
 ### 4.4 Curve model
 
@@ -763,8 +817,10 @@ No full matrix. No time budget. Focused checks only.
   curve.
 - Save, reload, old-project load. Duplicate independence. Delete drops curves.
 - Realtime vs offline on a deterministic fixture, same samples.
-- Read-ahead pump: segment-time evaluation, discard on gesture, no second `processBlock`
-  while the worker is inside the plugin. Proxy fingerprint stable across a fader change.
+- Read-ahead: the `--automation` run parks the real worker inside `processBlock`
+  and checks the gesture handover there. A pump-mode run checks a saved curve
+  against the direct strip. Neither is a claim about ASIO or a listening pass.
+  Proxy fingerprint stays without a fader or automation field.
 
 **Windows / ASIO and a real pointer, on the user's machine:**
 
