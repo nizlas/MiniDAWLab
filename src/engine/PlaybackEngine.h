@@ -55,6 +55,7 @@
 #include "engine/TrackMeterBank.h"
 #include "engine/LiveMidiInputBus.h"
 #include "engine/PlaybackMixHelpers.h"
+#include "engine/TrackAutomationRuntime.h"
 #include "engine/ReadAheadRenderer.h"
 #include "engine/RoutingPlan.h"
 #include "engine/SoloMuteView.h"
@@ -272,6 +273,9 @@ public:
     /// focused tests (no worker thread; the test drives it via `experimentalReadAhead()`).
     void enableExperimentalReadAheadForTests(int depthBlocks);
     [[nodiscard]] readahead::ReadAheadRenderer* experimentalReadAhead() noexcept { return readAhead_.get(); }
+
+    /// [Message thread] Live Volume/Pan gesture. The audio thread stamps the values.
+    TrackAutomationRuntime& trackAutomation() noexcept { return automationRuntime_; }
     /// [Message thread] Pause+resume of the read-ahead worker — the publish-before-destroy hook
     /// calls this AFTER the new insert map is published and the callback was waited out: an
     /// acknowledged pause proves the worker is outside every chain render that could still
@@ -556,6 +560,7 @@ private:
         PlaybackEngine* engine = nullptr;
         const SessionSnapshot* sessionSnap = nullptr;
         const SoloMuteView* soloView = nullptr;
+        const ChannelAutomationClock* automation = nullptr;
         /// Resolved insert chain (null = row has none). Points into the block's acquired
         /// `PluginAudioThreadMap`, which the callback retains until every job has joined.
         const PluginAudioThreadMap::Entry* chainEntry = nullptr;
@@ -593,6 +598,7 @@ private:
         PlaybackEngine* engine = nullptr;
         const SessionSnapshot* sessionSnap = nullptr;
         const SoloMuteView* soloView = nullptr;
+        const ChannelAutomationClock* automation = nullptr;
         /// Resolved insert chain (null = row has none). Points into the block's acquired map.
         const PluginAudioThreadMap::Entry* chainEntry = nullptr;
         ExperimentalInstrumentHost* host = nullptr;
@@ -652,6 +658,10 @@ private:
 
     /// Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md); null unless explicitly enabled.
     std::unique_ptr<readahead::ReadAheadRenderer> readAhead_;
+    TrackAutomationRuntime automationRuntime_;
+    ChannelAutomationClock automationClock_{};
+    std::int64_t automationPreviousBlockEnd_ = 0;
+    bool automationHavePreviousBlock_ = false;
     /// State-capture drain wait bound (ms); test-shrinkable, same decision logic as production.
     std::atomic<int> stateCaptureDrainTimeoutMs_{ 500 };
     /// [Audio thread, block-stable after the read-ahead block begin] Owned rows excluded from the

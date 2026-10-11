@@ -118,6 +118,9 @@ struct ProjectFileTrackV1
     /// file and every default-grey track) → `DefaultGrey`; unknown spellings also load as the
     /// default. Written only when not the default. UI metadata: no effect on audio or clips.
     juce::String colourKey;
+    /// v29: Channel Volume / Pan automation. Default (Read off, lanes hidden, empty curves)
+    /// is omitted from the file.
+    TrackAutomationState automation{};
 };
 
 /// v12: editable tick-domain notes (I3f).
@@ -452,7 +455,10 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 28;
+    /// **29** adds optional `tracks[].automation` — Channel Volume and Pan curves in seconds,
+    /// Read, and lane visibility. Absent on every older file: no curves, Read off, lanes hidden.
+    /// Write mode is not stored.
+    static constexpr int kCurrentVersion = 29;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

@@ -21,6 +21,9 @@ public:
 
     /// Fired while dragging / programmatic commits when `notify != dontSend`.
     std::function<void(float normalizedPan)> onPanChanged;
+    /// A pointer drag, text commit, or Ctrl/Cmd reset. The owner decides whether it records.
+    std::function<void()> onGestureBegin;
+    std::function<void()> onGestureEnd;
 
     void paint(juce::Graphics& g) override;
     void resized() override;

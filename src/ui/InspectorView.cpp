@@ -424,10 +424,36 @@ InspectorView::InspectorView(Session& session)
     addAndMakeVisible(panCaptionLabel_);
 
     panField_.setPan(0.f, juce::dontSendNotification);
+    panField_.onGestureBegin = [this] {
+        const TrackId active = session_.getActiveTrackId();
+        if (active == kInvalidTrackId || automationUpdate_ == nullptr)
+        {
+            return;
+        }
+        const auto snap = session_.loadSessionSnapshotForAudioThread();
+        const int idx = snap != nullptr ? snap->findTrackIndexById(active) : -1;
+        const bool read = idx >= 0 && snap->getTrack(idx).getAutomation().read;
+        const bool write = automationWriteOn_ != nullptr && automationWriteOn_(active);
+        const bool playing = automationPlaying_ != nullptr && automationPlaying_();
+        automationGesture_ = read || (write && playing);
+    };
+    panField_.onGestureEnd = [this] {
+        const TrackId active = session_.getActiveTrackId();
+        if (automationGesture_ && automationEnd_ != nullptr && active != kInvalidTrackId)
+        {
+            automationEnd_(active, kTrackAutomationPanId);
+        }
+        automationGesture_ = false;
+    };
     panField_.onPanChanged = [this](const float pan) {
         const TrackId active = session_.getActiveTrackId();
         if (active == kInvalidTrackId)
         {
+            return;
+        }
+        if (automationGesture_ && automationUpdate_ != nullptr)
+        {
+            automationUpdate_(active, kTrackAutomationPanId, pan);
             return;
         }
         session_.setTrackStereoPan(active, pan);
@@ -1660,6 +1686,20 @@ void InspectorView::mouseDown(const juce::MouseEvent& e)
     }
 }
 
+void InspectorView::setAutomationGestureTarget(
+    std::function<void(TrackId, int, float)> update,
+    std::function<void(TrackId, int)> end,
+    std::function<bool(TrackId)> writeOn,
+    std::function<bool()> playing,
+    std::function<double()> playheadSeconds)
+{
+    automationUpdate_ = std::move(update);
+    automationEnd_ = std::move(end);
+    automationWriteOn_ = std::move(writeOn);
+    automationPlaying_ = std::move(playing);
+    automationPlayheadSeconds_ = std::move(playheadSeconds);
+}
+
 void InspectorView::refreshFromSession()
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
@@ -1718,7 +1758,13 @@ void InspectorView::refreshFromSession()
 
     if (!panField_.isMouseButtonDown())
     {
-        panField_.setPan(tr.getStereoPan(), juce::dontSendNotification);
+        float pan = tr.getStereoPan();
+        if (tr.getAutomation().read && automationPlayheadSeconds_ != nullptr)
+        {
+            pan = trackAutomationDisplayedValue(tr.getAutomation(), kTrackAutomationPanId, pan,
+                                                automationPlayheadSeconds_());
+        }
+        panField_.setPan(pan, juce::dontSendNotification);
     }
 
     // Pre-gain is an Audio-lane control only (task scope: not MIDI/instrument/group/master rows).

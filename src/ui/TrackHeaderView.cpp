@@ -181,7 +181,11 @@ TrackHeaderView::HeaderContentLayout TrackHeaderView::computeHeaderContentLayout
     L.titleStripBounds = { stripX, titleY, kHeaderTitleCellCount * cell, cell };
 
     const int nameX = stripX + kHeaderTitleCellCount * cell + kHeaderStripToNameGapPx;
-    const int nameRight = b.getRight() - kHeaderOuterPadXPx;
+    int nameRight = b.getRight() - kHeaderOuterPadXPx;
+    if (m.automationAvailable && b.getHeight() < kMinimumHeightForSecondRowPx)
+    {
+        nameRight -= 2 * cell;
+    }
     L.nameTextBounds = { nameX, titleY, juce::jmax(0, nameRight - nameX), cell };
 
     // Second row: only when it fits entirely above the resize band (Small and up).
@@ -277,6 +281,72 @@ juce::Rectangle<int> TrackHeaderView::getAlternativesButtonBounds() const noexce
     }
     return secondStripCellAtIndex((hasMonitorCell() ? 1 : 0) + (hasArmCell() ? 1 : 0)
                                   + (hasInstrumentEditorCell() ? 1 : 0));
+}
+
+juce::Rectangle<int> TrackHeaderView::automationCell(const bool readCell) const noexcept
+{
+    const TrackHeaderModel m = modelProvider_();
+    if (!m.automationAvailable)
+    {
+        return {};
+    }
+    auto const b = getLocalBounds();
+    const int cell = kStripControlCellWidthPx;
+    const int y = b.getHeight() >= kMinimumHeightForSecondRowPx
+                      ? b.getY() + kHeaderRowTopPadPx + cell + kHeaderRowGapPx
+                      : b.getY() + kHeaderRowTopPadPx;
+    const int x = b.getRight() - kHeaderOuterPadXPx - (readCell ? 2 : 1) * cell;
+    if (x < b.getX() || y + cell > b.getBottom() - kHeaderResizeBandPx)
+    {
+        return {};
+    }
+    return { x, y, cell, cell };
+}
+
+juce::Rectangle<int> TrackHeaderView::getAutomationReadBounds() const noexcept
+{
+    return automationCell(true);
+}
+
+juce::Rectangle<int> TrackHeaderView::getAutomationWriteBounds() const noexcept
+{
+    return automationCell(false);
+}
+
+juce::Rectangle<int> TrackHeaderView::getAutomationChevronBounds() const noexcept
+{
+    if (modelProvider_ == nullptr || callbacks_.onToggleAutomationLanes == nullptr)
+    {
+        return {};
+    }
+    const TrackHeaderModel m = modelProvider_();
+    if (!m.automationAvailable)
+    {
+        return {};
+    }
+    const juce::Rectangle<int> seg = computeHeaderContentLayout().colourSegmentBounds;
+    if (seg.getWidth() < 12 || seg.getHeight() < 16)
+    {
+        return {};
+    }
+    constexpr int kW = 14;
+    constexpr int kH = 12;
+    const int y = seg.getBottom() - kHeaderResizeBandPx - kH;
+    if (y < seg.getY())
+    {
+        return {};
+    }
+    return { seg.getX() + 1, y, juce::jmin(kW, seg.getWidth() - 2), kH };
+}
+
+bool TrackHeaderView::clickAutomationChevronLikeMouseForStabilityTest()
+{
+    if (callbacks_.onToggleAutomationLanes == nullptr || getAutomationChevronBounds().isEmpty())
+    {
+        return false;
+    }
+    callbacks_.onToggleAutomationLanes();
+    return true;
 }
 
 juce::Rectangle<int> TrackHeaderView::getColourSegmentBounds() const noexcept
@@ -384,6 +454,21 @@ TrackHeaderView::buildStripControlSpecs() const noexcept
         al.enabled = callbacks_.onShowInstrumentAlternatives != nullptr && m.instrumentAlternativesAvailable;
         al.cellBounds = getAlternativesButtonBounds();
         specs.push_back(std::move(al));
+    }
+    if (m.automationAvailable)
+    {
+        TrackHeaderStripButtonSpec rd{};
+        rd.kind = TrackHeaderButtonKind::AutomationRead;
+        rd.enabled = callbacks_.onToggleAutomationRead != nullptr;
+        rd.automationActive = m.automationRead;
+        rd.cellBounds = getAutomationReadBounds();
+        specs.push_back(std::move(rd));
+        TrackHeaderStripButtonSpec wr{};
+        wr.kind = TrackHeaderButtonKind::AutomationWrite;
+        wr.enabled = callbacks_.onToggleAutomationWrite != nullptr;
+        wr.automationActive = m.automationWrite;
+        wr.cellBounds = getAutomationWriteBounds();
+        specs.push_back(std::move(wr));
     }
     // Drop every spec whose cell is hidden (empty bounds): nothing to paint, hit or tooltip.
     specs.erase(std::remove_if(specs.begin(), specs.end(),
@@ -502,6 +587,20 @@ void TrackHeaderView::drawStripControlButton(juce::Graphics& g,
         }
         break;
 
+    case TrackHeaderButtonKind::AutomationRead:
+    case TrackHeaderButtonKind::AutomationWrite:
+    {
+        const bool write = spec.kind == TrackHeaderButtonKind::AutomationWrite;
+        const juce::Colour on = write ? juce::Colour(0xff9a2f6a) : juce::Colour(0xff6fbf73);
+        drawStandardStripButtonFace(g,
+                                    rf,
+                                    spec.automationActive ? on : juce::Colour(0xff5a5858),
+                                    ctlEdgeNeutral,
+                                    showHoverBrighten);
+        drawStripLetter(g, bodyPx, write ? "W" : "R", juce::Colour(0xfff4f4f4));
+        break;
+    }
+
     case TrackHeaderButtonKind::Alternatives:
         drawStandardStripButtonFace(g,
                                     rf,
@@ -601,6 +700,14 @@ TrackHeaderView::TrackHeaderView(TrackHeaderModelProvider modelProvider,
         jassert(dragHost_->onHeaderDragMoved != nullptr);
         jassert(dragHost_->onHeaderDragEnded != nullptr);
     }
+    addAndMakeVisible(automationChevron_);
+    automationChevron_.setTooltip("Show or hide volume and pan automation");
+    automationChevron_.onClick = [this] {
+        if (callbacks_.onToggleAutomationLanes != nullptr)
+        {
+            callbacks_.onToggleAutomationLanes();
+        }
+    };
 }
 
 void TrackHeaderView::setHeaderReorderDrag(
@@ -769,6 +876,9 @@ void TrackHeaderView::textEditorFocusLost(juce::TextEditor& e)
 void TrackHeaderView::resized()
 {
     layoutInlineTrackNameEditor();
+    const juce::Rectangle<int> chevron = getAutomationChevronBounds();
+    automationChevron_.setVisible(!chevron.isEmpty());
+    automationChevron_.setBounds(chevron);
 }
 
 void TrackHeaderView::mouseDoubleClick(juce::MouseEvent const& e)
@@ -786,6 +896,15 @@ void TrackHeaderView::mouseDoubleClick(juce::MouseEvent const& e)
 void TrackHeaderView::paint(juce::Graphics& g)
 {
     TrackHeaderModel const m = modelProvider_();
+    {
+        const juce::Rectangle<int> chevron = getAutomationChevronBounds();
+        automationChevron_.setVisible(!chevron.isEmpty());
+        if (automationChevron_.getBounds() != chevron)
+        {
+            automationChevron_.setBounds(chevron);
+        }
+        automationChevron_.setLanesOpen(m.automationLanesOpen);
+    }
 
     auto const specs = buildStripControlSpecs();
 
@@ -870,11 +989,13 @@ void TrackHeaderView::paint(juce::Graphics& g)
         // EVERY cell kind in `specs` is painted here (hit testing / hover / tooltips work from the
         // same spec list, so a kind missing from this list would be an invisible-but-clickable
         // button — the original Monitor-button defect).
-        constexpr std::array<TrackHeaderButtonKind, 7> paintOrderBottomToTop{{
+        constexpr std::array<TrackHeaderButtonKind, 9> paintOrderBottomToTop{{
             TrackHeaderButtonKind::Mute,
             TrackHeaderButtonKind::Solo,
             TrackHeaderButtonKind::Monitor,
             TrackHeaderButtonKind::Arm,
+            TrackHeaderButtonKind::AutomationRead,
+            TrackHeaderButtonKind::AutomationWrite,
             TrackHeaderButtonKind::Alternatives,
             TrackHeaderButtonKind::InstrumentEditor,
             TrackHeaderButtonKind::Power,
@@ -953,6 +1074,22 @@ bool TrackHeaderView::dispatchStripClick(juce::Point<int> const position,
             {
                 dragBlocker_ = DragBlocker::Arm;
                 callbacks_.onToggleArm();
+            }
+            return true;
+
+        case TrackHeaderButtonKind::AutomationRead:
+            if (callbacks_.onToggleAutomationRead != nullptr)
+            {
+                dragBlocker_ = DragBlocker::Automation;
+                callbacks_.onToggleAutomationRead();
+            }
+            return true;
+
+        case TrackHeaderButtonKind::AutomationWrite:
+            if (callbacks_.onToggleAutomationWrite != nullptr)
+            {
+                dragBlocker_ = DragBlocker::Automation;
+                callbacks_.onToggleAutomationWrite();
             }
             return true;
 

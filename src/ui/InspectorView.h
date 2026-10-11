@@ -113,6 +113,13 @@ public:
         preGainHandler_ = std::move(fn);
     }
 
+    /// Pan drags, text commits and Ctrl/Cmd resets share the channel-fader gesture target.
+    void setAutomationGestureTarget(std::function<void(TrackId, int parameter, float value)> update,
+                                    std::function<void(TrackId, int parameter)> end,
+                                    std::function<bool(TrackId)> writeOn,
+                                    std::function<bool()> playing,
+                                    std::function<double()> playheadSeconds);
+
     /// [Message thread] Stability-scenario surface for the real user flow: feeds `text` to the
     /// pre-gain field through `TextEditor::keyPressed` (Ctrl+A, the characters, Return) exactly as
     /// typed keys arrive from the peer. Return is delivered by the editor as an asynchronous
@@ -270,6 +277,12 @@ private:
     juce::BubbleMessageComponent preGainRefusedBubble_;
     juce::Label panCaptionLabel_;
     InspectorPanControl panField_;
+    bool automationGesture_ = false;
+    std::function<void(TrackId, int, float)> automationUpdate_;
+    std::function<void(TrackId, int)> automationEnd_;
+    std::function<bool(TrackId)> automationWriteOn_;
+    std::function<bool()> automationPlaying_;
+    std::function<double()> automationPlayheadSeconds_;
     /// Audio Input (audio rows only): which device input the track records/monitors.
     juce::Label inputCaptionLabel_;
     juce::ComboBox inputComboBox_;

@@ -141,6 +141,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/InstrumentAlternativesPopup.cpp
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp
+    src/ui/TrackAutomationLaneView.cpp
     src/ui/TrackHeaderView.cpp
     src/ui/UiLayoutSettingsStore.cpp
     src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
@@ -672,6 +673,28 @@ endif()
 juce_generate_juce_header(ReadAheadPrototypeFocusedTests)
 
 # -----------------------------------------------------------------------------
+# TrackAutomationFocusedTests: curve math, punch, seconds time base, and offscreen
+# header / lane snapshots. Does not open an audio device.
+juce_add_console_app(TrackAutomationFocusedTests PRODUCT_NAME "TrackAutomationFocusedTests")
+target_sources(TrackAutomationFocusedTests PRIVATE
+    tests/selftest/TrackAutomationFocusedTestsMain.cpp
+    src/ui/TrackHeaderView.cpp
+    src/ui/TrackAutomationLaneView.cpp
+    src/ui/ForbiddenCursor.cpp
+)
+target_include_directories(TrackAutomationFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(TrackAutomationFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(TrackAutomationFocusedTests
+    PRIVATE
+        juce::juce_core
+        juce::juce_graphics
+        juce::juce_gui_basics
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+juce_generate_juce_header(TrackAutomationFocusedTests)
+
 # ReadAheadStartupFocusedTests: the 1.3.1 on/off choice only (not the renderer).
 # Isolated preference files, CLI priority, and the Audio Settings checkbox section
 # in a real native window. Does not open an audio device.
@@ -847,6 +870,7 @@ target_sources(TrackRowHeightFocusedTests PRIVATE
     src/ui/TimelineLocatorPainter.cpp
     src/ui/TrackHeaderView.cpp
     src/ui/TrackLanesView.cpp
+    src/ui/TrackAutomationLaneView.cpp
     src/ui/UiPlayheadClock.cpp
     src/ui/ForbiddenCursor.cpp)
 target_include_directories(TrackRowHeightFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -1005,6 +1029,7 @@ target_sources(CollapsibleTrackGroupFocusedTests PRIVATE
     src/ui/TimelineLocatorPainter.cpp
     src/ui/TrackHeaderView.cpp
     src/ui/TrackLanesView.cpp
+    src/ui/TrackAutomationLaneView.cpp
     src/ui/UiPlayheadClock.cpp
     src/ui/ForbiddenCursor.cpp)
 target_include_directories(CollapsibleTrackGroupFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

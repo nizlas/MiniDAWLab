@@ -36,9 +36,33 @@ ChannelStripPanel::ChannelStripPanel(Session& session)
         {
             return;
         }
+        if (automationGesture_ && automationUpdate_ != nullptr)
+        {
+            automationUpdate_(shownTrackId_, kTrackAutomationVolumeId, linear);
+            return;
+        }
         // Same path as the former Channel-volume text field: direct Session setter (snapshot
         // publish marks the project dirty; no undo step, same as before).
         session_.setTrackChannelFaderGain(shownTrackId_, linear);
+    };
+    fader_.onGestureBegin = [this] {
+        if (shownTrackId_ == kInvalidTrackId || automationUpdate_ == nullptr)
+        {
+            return;
+        }
+        const auto snap = session_.loadSessionSnapshotForAudioThread();
+        const int idx = snap != nullptr ? snap->findTrackIndexById(shownTrackId_) : -1;
+        const bool read = idx >= 0 && snap->getTrack(idx).getAutomation().read;
+        const bool write = automationWriteOn_ != nullptr && automationWriteOn_(shownTrackId_);
+        const bool playing = automationPlaying_ != nullptr && automationPlaying_();
+        automationGesture_ = read || (write && playing);
+    };
+    fader_.onGestureEnd = [this] {
+        if (automationGesture_ && automationEnd_ != nullptr && shownTrackId_ != kInvalidTrackId)
+        {
+            automationEnd_(shownTrackId_, kTrackAutomationVolumeId);
+        }
+        automationGesture_ = false;
     };
     addAndMakeVisible(fader_);
 
@@ -60,6 +84,18 @@ ChannelStripPanel::~ChannelStripPanel()
 {
     stopTimer();
     setMeterHub(nullptr);
+}
+
+void ChannelStripPanel::setAutomationGestureTarget(
+    std::function<void(TrackId, int, float)> update,
+    std::function<void(TrackId, int)> end,
+    std::function<bool(TrackId)> writeOn,
+    std::function<bool()> playing)
+{
+    automationUpdate_ = std::move(update);
+    automationEnd_ = std::move(end);
+    automationWriteOn_ = std::move(writeOn);
+    automationPlaying_ = std::move(playing);
 }
 
 void ChannelStripPanel::setMeterHub(LevelMeterHub* const hub)
@@ -147,10 +183,16 @@ void ChannelStripPanel::applyModeForTrack(const Track* const track)
     {
         nameLabel_.setText(track->getName(), juce::dontSendNotification);
     }
-    if (track != nullptr && hasAudioPath)
+    if (track != nullptr && hasAudioPath && !fader_.isDragging())
     {
+        float gain = track->getChannelFaderGain();
+        if (track->getAutomation().read && automationPlayheadSeconds_ != nullptr)
+        {
+            gain = trackAutomationDisplayedValue(track->getAutomation(), kTrackAutomationVolumeId, gain,
+                                                 automationPlayheadSeconds_());
+        }
         faderWiredGuard_ = true;
-        fader_.setLinearGain(track->getChannelFaderGain(), juce::dontSendNotification);
+        fader_.setLinearGain(gain, juce::dontSendNotification);
         faderWiredGuard_ = false;
     }
 }

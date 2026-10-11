@@ -33,6 +33,7 @@
 // =============================================================================
 
 #include "domain/PlacedClip.h"
+#include "domain/TrackAutomation.h"
 #include "domain/TrackStereoPan.h"
 
 #include <juce_core/juce_core.h>
@@ -237,6 +238,13 @@ enum class TrackKind : std::uint8_t
     Midi,
 };
 
+/// Volume and Pan automation exist on the rows that already have that strip.
+[[nodiscard]] inline bool trackKindHasChannelAutomation(const TrackKind kind) noexcept
+{
+    return kind == TrackKind::Audio || kind == TrackKind::Instrument || kind == TrackKind::Group
+           || kind == TrackKind::Master;
+}
+
 /// System-owned display name for `TrackKind::Master` (not user-renamable).
 inline constexpr const char kMasterTrackDisplayName[] = "Stereo Out";
 
@@ -414,6 +422,8 @@ public:
     }
     // Linear gain at the channel-fader point (see header block above). Not clip gain or pre-gain.
     [[nodiscard]] float getChannelFaderGain() const noexcept { return channelFaderGain_; }
+    /// Saved Volume/Pan curves, Read, and lane visibility. Write mode is not stored here.
+    [[nodiscard]] const TrackAutomationState& getAutomation() const noexcept { return automation_; }
     /// Pre-gain in dB (0.0 = unity), applied before Pre inserts and fader on Audio lanes only —
     /// see the Pre-gain block above. Not persisted in the constructor: fresh rows default to 0
     /// and load/duplication go through `withPreGainDb` / the copy constructor.
@@ -459,6 +469,7 @@ public:
     [[nodiscard]] Track withName(juce::String name) const noexcept;
     [[nodiscard]] Track withPlacedClips(std::vector<PlacedClip> clips) const noexcept;
     [[nodiscard]] Track withChannelFaderGain(float gain) const noexcept;
+    [[nodiscard]] Track withAutomation(TrackAutomationState automation) const noexcept;
     [[nodiscard]] Track withPreGainDb(float preGainDb) const noexcept;
     [[nodiscard]] Track withInputAssignment(TrackInputAssignment assignment) const noexcept;
     [[nodiscard]] Track withMidiInputAssignment(TrackMidiInputAssignment assignment) const noexcept;
@@ -483,6 +494,7 @@ private:
     bool trackMuted_ = false;
     TrackKind kind_ = TrackKind::Audio;
     float stereoPan_ = kTrackStereoPanCenter;
+    TrackAutomationState automation_{};
     TrackId routedOutputTrackId_ = kInvalidTrackId;
     std::vector<TrackSend> sends_;
     int midiOutputChannel_ = kTrackMidiOutputChannelDefault;

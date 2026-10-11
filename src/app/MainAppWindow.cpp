@@ -382,6 +382,51 @@ public:
             },
         });
         inspectorPanel_.channelPanel().setMeterHub(&levelMeterHub_);
+        inspectorPanel_.channelPanel().setAutomationGestureTarget(
+            [this](const TrackId id, const int parameter, const float value) {
+                automationGestureUpdate(id, parameter, value);
+            },
+            [this](const TrackId id, const int parameter) { automationGestureEnd(id, parameter); },
+            [this](const TrackId id) { return trackLanesView.isAutomationWriteEnabled(id); },
+            [this] { return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing; });
+        inspectorPanel_.channelPanel().setAutomationPlayheadSeconds([this] { return automationPlayheadSeconds(); });
+        inspectorView_.setAutomationGestureTarget(
+            [this](const TrackId id, const int parameter, const float value) {
+                automationGestureUpdate(id, parameter, value);
+            },
+            [this](const TrackId id, const int parameter) { automationGestureEnd(id, parameter); },
+            [this](const TrackId id) { return trackLanesView.isAutomationWriteEnabled(id); },
+            [this] { return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing; },
+            [this] { return automationPlayheadSeconds(); });
+        trackLanesView.setAutomationPlayheadSeconds([this] { return automationPlayheadSeconds(); });
+        trackLanesView.setOnAutomationCurveEdited(
+            [this](const TrackId id, const int parameter, const TrackAutomationCurve curve) {
+                if (undoRedoCoordinator_ == nullptr)
+                {
+                    return;
+                }
+                undoRedoCoordinator_->executeUndoableSessionEdit(
+                    "Channel automation",
+                    [this, id, parameter, curve]() {
+                        const auto snap = session.loadSessionSnapshotForAudioThread();
+                        const int idx = snap != nullptr ? snap->findTrackIndexById(id) : -1;
+                        if (idx < 0)
+                        {
+                            return false;
+                        }
+                        TrackAutomationState state = snap->getTrack(idx).getAutomation();
+                        if (parameter == kTrackAutomationPanId)
+                        {
+                            state.pan = curve;
+                        }
+                        else
+                        {
+                            state.volume = curve;
+                        }
+                        session.setTrackAutomation(id, std::move(state));
+                        return true;
+                    });
+            });
         // Shared track-header column width: app-wide preference (`%APPDATA%\MiniDAWLab\ui-layout.xml`),
         // restored before the first layout; absent/invalid ⇒ the view's default. Persisted once per
         // completed drag of the header/timeline boundary handle (no I/O per mouse move, no undo step).
@@ -2144,6 +2189,7 @@ public:
                     {
                         liveMidiInputCoordinator_->clearRuntimeStateForProjectReplace();
                     }
+                    trackLanesView.clearAutomationWriteFlags();
                     proxyRenderScheduler_.notifyProjectChanged();
                     if (proxyUpdatePolicyService_ != nullptr)
                     {
@@ -6062,6 +6108,123 @@ private:
 
     void timerCallback() override
     {
+        struct AutomationCommitItem
+        {
+            TrackId trackId = kInvalidTrackId;
+            int parameterId = 0;
+            TrackAutomationCommit commit;
+        };
+        std::vector<AutomationCommitItem> automationCommits;
+        {
+            TrackId commitTrack = kInvalidTrackId;
+            int commitParam = 0;
+            TrackAutomationCommit commit;
+            while (playbackEngine_.trackAutomation().takeAnyCommit(commitTrack, commitParam, commit))
+            {
+                automationCommits.push_back(AutomationCommitItem{ commitTrack, commitParam, commit });
+            }
+        }
+        std::vector<AutomationCommitItem> automationWrites;
+        for (const AutomationCommitItem& item : automationCommits)
+        {
+            if (item.commit.writeEnabled && item.commit.eventCount > 0)
+            {
+                automationWrites.push_back(item);
+            }
+        }
+        if (!automationWrites.empty() && undoRedoCoordinator_ != nullptr)
+        {
+            undoRedoCoordinator_->executeUndoableSessionEdit(
+                "Channel automation",
+                [this, automationWrites] {
+                    std::vector<TrackId> tracks;
+                    for (const AutomationCommitItem& item : automationWrites)
+                    {
+                        if (std::find(tracks.begin(), tracks.end(), item.trackId) == tracks.end())
+                        {
+                            tracks.push_back(item.trackId);
+                        }
+                    }
+                    bool any = false;
+                    for (const TrackId trackId : tracks)
+                    {
+                        const auto snap = session.loadSessionSnapshotForAudioThread();
+                        if (snap == nullptr)
+                        {
+                            continue;
+                        }
+                        const int idx = snap->findTrackIndexById(trackId);
+                        if (idx < 0)
+                        {
+                            continue;
+                        }
+                        TrackAutomationState state = snap->getTrack(idx).getAutomation();
+                        std::optional<float> manualGain;
+                        std::optional<float> manualPan;
+                        for (const AutomationCommitItem& item : automationWrites)
+                        {
+                            if (item.trackId != trackId)
+                            {
+                                continue;
+                            }
+                            const TrackAutomationCommit& commit = item.commit;
+                            const int parameterId = item.parameterId;
+                            TrackAutomationCurve& curve = parameterId == kTrackAutomationPanId ? state.pan : state.volume;
+                            if (!curve.anchorSet)
+                            {
+                                curve.anchorSet = true;
+                                curve.anchor = commit.preTouchValue;
+                            }
+                            std::vector<TrackAutomationPoint> recorded;
+                            recorded.reserve(static_cast<size_t>(commit.eventCount) + 1u);
+                            for (int i = 0; i < commit.eventCount; ++i)
+                            {
+                                recorded.push_back(commit.events[static_cast<size_t>(i)]);
+                            }
+                            double rampEnd = commit.releaseSeconds;
+                            if (commit.readEnabled)
+                            {
+                                rampEnd = commit.rampEndSeconds;
+                                recorded.push_back(TrackAutomationPoint{ rampEnd, commit.rampEndValue });
+                            }
+                            const double touch = commit.touchStartSeconds >= 0.0 ? commit.touchStartSeconds
+                                                                                 : commit.releaseSeconds;
+                            if (!(rampEnd > touch))
+                            {
+                                rampEnd = touch + 1.0e-4;
+                            }
+                            trackAutomationPunch(curve, touch, rampEnd, recorded, parameterId);
+                            if (parameterId == kTrackAutomationVolumeId)
+                            {
+                                state.volumeLaneVisible = true;
+                                if (!commit.readEnabled)
+                                {
+                                    manualGain = commit.releaseValue;
+                                }
+                            }
+                            else
+                            {
+                                state.panLaneVisible = true;
+                                if (!commit.readEnabled)
+                                {
+                                    manualPan = commit.releaseValue;
+                                }
+                            }
+                        }
+                        if (session.setTrackAutomation(trackId, std::move(state),
+                                                       manualGain ? &*manualGain : nullptr,
+                                                       manualPan ? &*manualPan : nullptr))
+                        {
+                            any = true;
+                        }
+                    }
+                    return any;
+                });
+        }
+        for (const AutomationCommitItem& item : automationCommits)
+        {
+            playbackEngine_.trackAutomation().notePublished(item.trackId, item.parameterId, item.commit.revision);
+        }
         // Secondary watchdog heartbeat: keeps the stall detector alive when playback (and thereby
         // the 60 Hz overlay frame callback) is stopped.
         ui_hang_watchdog::heartbeat();
@@ -6615,6 +6778,53 @@ private:
         inspectorView_.refreshFromSession();
     }
 
+    void automationGestureUpdate(const TrackId id, const int parameter, const float value)
+    {
+        auto& runtime = playbackEngine_.trackAutomation();
+        if (runtime.isCapturing(id, parameter))
+        {
+            runtime.push(id, parameter, value);
+            return;
+        }
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        const int idx = snap != nullptr ? snap->findTrackIndexById(id) : -1;
+        if (idx < 0 || !trackKindHasChannelAutomation(snap->getTrack(idx).getKind()))
+        {
+            return;
+        }
+        const Track& track = snap->getTrack(idx);
+        const TrackAutomationState& state = track.getAutomation();
+        const bool read = state.read;
+        const bool write = trackLanesView.isAutomationWriteEnabled(id);
+        const bool playing = transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+        if (!read && !(write && playing))
+        {
+            return;
+        }
+        const TrackAutomationCurve& curve = parameter == kTrackAutomationPanId ? state.pan : state.volume;
+        const float manual = parameter == kTrackAutomationPanId ? track.getStereoPan()
+                                                                : track.getChannelFaderGain();
+        runtime.begin(id, parameter, write && playing, read, value, curve, manual);
+    }
+
+    void automationGestureEnd(const TrackId id, const int parameter)
+    {
+        playbackEngine_.trackAutomation().requestRelease(id, parameter);
+    }
+
+    [[nodiscard]] double automationPlayheadSeconds() const
+    {
+        double rate = 48000.0;
+        if (juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice())
+        {
+            if (dev->getCurrentSampleRate() > 0.0)
+            {
+                rate = dev->getCurrentSampleRate();
+            }
+        }
+        return static_cast<double>(transport.readPlayheadSamplesForUi()) / rate;
+    }
+
     void buildMixerStripBindings()
     {
         MixerStripBindings& b = mixerBindings_;
@@ -6649,6 +6859,13 @@ private:
         // Direct channel writes — the same setters the Inspector channel panel / pan field use.
         b.setChannelFaderGain = [this](const TrackId tid, const float g) { session.setTrackChannelFaderGain(tid, g); };
         b.setStereoPan = [this](const TrackId tid, const float p) { session.setTrackStereoPan(tid, p); };
+        b.automationGestureUpdate = [this](const TrackId id, const int parameter, const float value) {
+            automationGestureUpdate(id, parameter, value);
+        };
+        b.automationGestureEnd = [this](const TrackId id, const int parameter) { automationGestureEnd(id, parameter); };
+        b.automationWriteOn = [this](const TrackId id) { return trackLanesView.isAutomationWriteEnabled(id); };
+        b.automationTransportPlaying = [this] { return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing; };
+        b.automationPlayheadSeconds = [this] { return automationPlayheadSeconds(); };
 
         // Mute / Power: instrument and MIDI rows go through their controller (it mirrors the
         // flag into the session and republishes its render snapshot — the header's path); other

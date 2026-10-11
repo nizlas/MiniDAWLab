@@ -3,7 +3,9 @@
 #include "engine/ReadAheadRenderer.h"
 
 #include "engine/ReadAheadStartupConfig.h"
+#include "engine/TrackAutomationRuntime.h"
 
+#include <algorithm>
 #include <chrono>
 
 static_assert(readahead::kReadAheadDepthMin == readahead::ReadAheadRenderer::kMinDepth
@@ -64,7 +66,7 @@ ReadAheadRenderer::~ReadAheadRenderer()
 
 void ReadAheadRenderer::prepareForDevice(const double sampleRate, const int blockSizeSamples)
 {
-    juce::ignoreUnused(sampleRate);
+    deviceSampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
     prepared_.store(false, std::memory_order_release);
     if (!acquireWorkerPause(pauseAckTimeoutMs_.load(std::memory_order_relaxed)))
     {
@@ -421,9 +423,15 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
         {
             // Monitor/record must win even during a prime: the direct path changes semantics
             // this same block, so a queued or in-flight clip segment must not play.
+            const bool automationHold = info.automationHoldTracks != nullptr
+                                        && std::find(info.automationHoldTracks,
+                                                     info.automationHoldTracks + info.automationHoldCount,
+                                                     row.trackId)
+                                               != info.automationHoldTracks + info.automationHoldCount;
             const bool handover = (info.monitorView != nullptr && info.monitorView->contains(row.trackId))
                                   || (blockRecordingTrackId_ != kInvalidTrackId
-                                      && row.trackId == blockRecordingTrackId_);
+                                      && row.trackId == blockRecordingTrackId_)
+                                  || automationHold;
             if (handover)
             {
                 audioThread_discardResetRow(row);
@@ -461,9 +469,15 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
             // Immediate handover (discard): the direct path switches these semantics the same
             // block (monitor suppresses clip playback; recording omits the row's clips), so a
             // gapless drain would over-play queued clip audio. Model doc §5.
+            const bool automationHold = info.automationHoldTracks != nullptr
+                                        && std::find(info.automationHoldTracks,
+                                                     info.automationHoldTracks + info.automationHoldCount,
+                                                     row.trackId)
+                                               != info.automationHoldTracks + info.automationHoldCount;
             const bool handover = (info.monitorView != nullptr && info.monitorView->contains(row.trackId))
                                   || (blockRecordingTrackId_ != kInvalidTrackId
-                                      && row.trackId == blockRecordingTrackId_);
+                                      && row.trackId == blockRecordingTrackId_)
+                                  || automationHold;
             if (handover)
             {
                 audioThread_discardResetRow(row);
@@ -1118,9 +1132,12 @@ bool ReadAheadRenderer::workerRenderOneSegment(Row& row) noexcept
     // `inPlugin` covers exactly this call: the callback's decline path treats it as
     // exclusive ownership and does not live-render the same instance.
     row.inPlugin.store(1, std::memory_order_seq_cst);
+    ChannelAutomationClock segmentClock;
+    segmentClock.engineRate = deviceSampleRate_ > 0.0 ? deviceSampleRate_ : 48000.0;
+    segmentClock.blockStartSample = startAudible;
     playback_mix_helpers::renderAudioTrackPostStripToStereoScratchWithChainAccess(
         *snap, startAudible, seg.run, seg.destFrame, slot.dataL, slot.dataR, access,
-        kInvalidTrackId, end, row.trackIndex, deps_.preGainRamp, soloView);
+        kInvalidTrackId, end, row.trackIndex, deps_.preGainRamp, soloView, &segmentClock);
     row.inPlugin.store(0, std::memory_order_seq_cst);
 
     slot.start = startAudible;

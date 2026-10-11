@@ -6,6 +6,7 @@
 #include "domain/Track.h"
 #include "domain/TrackStereoPan.h"
 #include "engine/PlaybackEngine.h"
+#include "engine/TrackAutomationRuntime.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
 
@@ -16,6 +17,67 @@
 
 namespace playback_mix_helpers
 {
+
+namespace
+{
+[[nodiscard]] bool channelStripAutomationVaries(const Track& track,
+                                                const ChannelAutomationClock* clock) noexcept
+{
+    if (clock == nullptr || !(clock->engineRate > 0.0) || !trackKindHasChannelAutomation(track.getKind()))
+    {
+        return false;
+    }
+    if (clock->find(track.getId(), kTrackAutomationVolumeId) != nullptr
+        || clock->find(track.getId(), kTrackAutomationPanId) != nullptr)
+    {
+        return true;
+    }
+    const TrackAutomationState& state = track.getAutomation();
+    return state.read && (!state.volume.points.empty() || !state.pan.points.empty());
+}
+
+void scaleStereoByAutomation(float* const left,
+                             float* const right,
+                             const int numSamples,
+                             const std::int64_t timelineStart,
+                             const Track& track,
+                             const ChannelAutomationClock* clock) noexcept
+{
+    if (left == nullptr || right == nullptr || clock == nullptr || numSamples <= 0)
+    {
+        return;
+    }
+    const double rate = clock->engineRate;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const double seconds = trackAutomationEngineSampleToSeconds(timelineStart + i, rate);
+        const float gain = channelAutomationValueAt(track, kTrackAutomationVolumeId, clock, seconds);
+        left[i] *= gain;
+        right[i] *= gain;
+    }
+}
+
+void panStereoByAutomation(float* const left,
+                           float* const right,
+                           const int numSamples,
+                           const std::int64_t timelineStart,
+                           const Track& track,
+                           const ChannelAutomationClock* clock) noexcept
+{
+    if (left == nullptr || right == nullptr || clock == nullptr || numSamples <= 0)
+    {
+        return;
+    }
+    const double rate = clock->engineRate;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const double seconds = trackAutomationEngineSampleToSeconds(timelineStart + i, rate);
+        const float pan = channelAutomationValueAt(track, kTrackAutomationPanId, clock, seconds);
+        left[i] *= trackPanLawGainLeft(pan);
+        right[i] *= trackPanLawGainRight(pan);
+    }
+}
+} // namespace
 
 const Track* findCanonicalMasterTrack(const SessionSnapshot& snap) noexcept
 {
@@ -403,7 +465,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             const int onlyTrackIndex,
                                             PreGainRampState* const preGainRamp,
                                             const LiveInputMonitorSnapshot* const monitored,
-                                            const SoloMuteView* const soloView) noexcept
+                                            const SoloMuteView* const soloView,
+                                            const ChannelAutomationClock* const automation) noexcept
 {
     if (audibleRun <= 0)
     {
@@ -442,7 +505,7 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
         const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, tr);
         const float storedFaderGain = tr.getChannelFaderGain();
         const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
-        if (!effectiveMuted && storedFaderGain <= 0.0f)
+        if (!effectiveMuted && storedFaderGain <= 0.0f && !channelStripAutomationVaries(tr, automation))
         {
             continue;
         }
@@ -487,7 +550,7 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                                             * ((float)(out0 + run) / (float)audibleRun)
                                        : preGainTarget;
 
-                if (useInsert && effectiveGain > 0.0f)
+                if (useInsert && (effectiveGain > 0.0f || (channelStripAutomationVaries(tr, automation) && !effectiveMuted)))
                 {
                     pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
                     if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
@@ -502,18 +565,47 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                             scaleStereoScratch(scratch, run, preGainTarget);
                         }
                         pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, run);
-                        scaleStereoScratch(scratch, run, effectiveGain);
+                        if (channelStripAutomationVaries(tr, automation) && !effectiveMuted)
+                        {
+                            scaleStereoByAutomation(scratch[0], scratch[1], run, t, tr, automation);
+                        }
+                        else
+                        {
+                            scaleStereoScratch(scratch, run, effectiveGain);
+                        }
                         pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, run);
-                        multiplyStereoScratchLR(scratch,
-                                                run,
-                                                trackPanLawGainLeft(tr.getStereoPan()),
-                                                trackPanLawGainRight(tr.getStereoPan()));
+                        if (channelStripAutomationVaries(tr, automation) && !effectiveMuted)
+                        {
+                            panStereoByAutomation(scratch[0], scratch[1], run, t, tr, automation);
+                        }
+                        else
+                        {
+                            multiplyStereoScratchLR(scratch,
+                                                    run,
+                                                    trackPanLawGainLeft(tr.getStereoPan()),
+                                                    trackPanLawGainRight(tr.getStereoPan()));
+                        }
                         addStereoScratchToDeviceOutputs(scratch,
                                                         run,
                                                         destFrame,
                                                         numOutputChannels,
                                                         outputChannelData,
                                                         1.0f);
+                    }
+                }
+                else if (channelStripAutomationVaries(tr, automation) && !effectiveMuted)
+                {
+                    for (int i = 0; i < run; ++i)
+                    {
+                        const double seconds = trackAutomationEngineSampleToSeconds(t + i, automation->engineRate);
+                        const float gain = channelAutomationValueAt(tr, kTrackAutomationVolumeId, automation, seconds);
+                        const float pan = channelAutomationValueAt(tr, kTrackAutomationPanId, automation, seconds);
+                        const float pre = preGainRamping
+                                              ? preGainStart + (preGainTarget - preGainStart)
+                                                                   * (static_cast<float>(out0 + i) / static_cast<float>(audibleRun))
+                                              : preGainTarget;
+                        addClipRunToOutputs(c, off + i, 1, destFrame + i, numOutputChannels,
+                                            outputChannelData, gain * pre, pan);
                     }
                 }
                 else if (preGainRamping)
@@ -545,7 +637,8 @@ void processBusChannelStripToOutputs(const Track& busTrack,
                                      const int numOutputChannels,
                                      float* const* outputChannelData,
                                      PluginInsertHost* pluginHost,
-                                     const SoloMuteView* const soloView) noexcept
+                                     const SoloMuteView* const soloView,
+                                     const ChannelAutomationClock* const automation) noexcept
 {
     if (numSamples <= 0 || busScratchStereo == nullptr || outputChannelData == nullptr)
     {
@@ -559,7 +652,7 @@ void processBusChannelStripToOutputs(const Track& busTrack,
     const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, busTrack);
     const float storedFaderGain = busTrack.getChannelFaderGain();
     const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
-    if (!effectiveMuted && storedFaderGain <= 0.0f)
+    if (!effectiveMuted && storedFaderGain <= 0.0f && !channelStripAutomationVaries(busTrack, automation))
     {
         return;
     }
@@ -567,7 +660,7 @@ void processBusChannelStripToOutputs(const Track& busTrack,
     const bool useInsert = pluginHost != nullptr
                            && pluginHost->audioThread_hasActivePluginForTrack(busTrack.getId());
 
-    if (useInsert && effectiveGain > 0.0f)
+    if (useInsert && (effectiveGain > 0.0f || (channelStripAutomationVaries(busTrack, automation) && !effectiveMuted)))
     {
         pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, numSamples);
         if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
@@ -583,18 +676,71 @@ void processBusChannelStripToOutputs(const Track& busTrack,
                                                   numSamples);
             }
             pluginHost->audioThread_processChainForTrack(busTrack.getId(), InsertStage::Pre, numSamples);
-            scaleStereoScratch(scratch, numSamples, effectiveGain);
+            if (channelStripAutomationVaries(busTrack, automation) && !effectiveMuted)
+            {
+                const std::int64_t origin = automation->blockStartSample + destOutFrame0;
+                scaleStereoByAutomation(scratch[0] + destOutFrame0, scratch[1] + destOutFrame0,
+                                        numSamples, origin, busTrack, automation);
+            }
+            else
+            {
+                scaleStereoScratch(scratch, numSamples, effectiveGain);
+            }
             pluginHost->audioThread_processChainForTrack(busTrack.getId(), InsertStage::Post, numSamples);
-            multiplyStereoScratchLR(scratch,
-                                    numSamples,
-                                    trackPanLawGainLeft(busTrack.getStereoPan()),
-                                    trackPanLawGainRight(busTrack.getStereoPan()));
+            if (channelStripAutomationVaries(busTrack, automation) && !effectiveMuted)
+            {
+                const std::int64_t origin = automation->blockStartSample + destOutFrame0;
+                panStereoByAutomation(scratch[0] + destOutFrame0, scratch[1] + destOutFrame0,
+                                      numSamples, origin, busTrack, automation);
+            }
+            else
+            {
+                multiplyStereoScratchLR(scratch,
+                                        numSamples,
+                                        trackPanLawGainLeft(busTrack.getStereoPan()),
+                                        trackPanLawGainRight(busTrack.getStereoPan()));
+            }
             addStereoScratchToDeviceOutputs(scratch,
                                             numSamples,
                                             destOutFrame0,
                                             numOutputChannels,
                                             outputChannelData,
                                             1.0f);
+        }
+        return;
+    }
+
+    if (channelStripAutomationVaries(busTrack, automation) && !effectiveMuted
+        && busScratchStereo[0] != nullptr && busScratchStereo[1] != nullptr)
+    {
+        const std::int64_t origin = automation->blockStartSample + destOutFrame0;
+        const float* const l = busScratchStereo[0] + destOutFrame0;
+        const float* const r = busScratchStereo[1] + destOutFrame0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double seconds = trackAutomationEngineSampleToSeconds(origin + i, automation->engineRate);
+            const float gain = channelAutomationValueAt(busTrack, kTrackAutomationVolumeId, automation, seconds);
+            const float pan = channelAutomationValueAt(busTrack, kTrackAutomationPanId, automation, seconds);
+            const float leftGain = gain * trackPanLawGainLeft(pan);
+            const float rightGain = gain * trackPanLawGainRight(pan);
+            if (numOutputChannels == 1)
+            {
+                if (float* d = outputChannelData[0])
+                {
+                    d[destOutFrame0 + i] += gain * 0.5f * (trackPanLawGainLeft(pan) * l[i] + trackPanLawGainRight(pan) * r[i]);
+                }
+            }
+            else
+            {
+                if (numOutputChannels >= 1 && outputChannelData[0] != nullptr)
+                {
+                    outputChannelData[0][destOutFrame0 + i] += leftGain * l[i];
+                }
+                if (numOutputChannels >= 2 && outputChannelData[1] != nullptr)
+                {
+                    outputChannelData[1][destOutFrame0 + i] += rightGain * r[i];
+                }
+            }
         }
         return;
     }
@@ -762,7 +908,8 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               const std::int64_t timelineEnd,
                                               const int trackIndex,
                                               PreGainRampState* const preGainRamp,
-                                              const SoloMuteView* const soloView) noexcept
+                                              const SoloMuteView* const soloView,
+                                              const ChannelAutomationClock* const automation) noexcept
 {
     // Serial wrapper: resolve the chain entry and the host's shared buffers, then run the same
     // strip core the render-pool jobs run (one DSP implementation, Stage A1).
@@ -785,7 +932,7 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                                             audibleRun, destOutFrame0, stageL,
                                                             stageR, access, omitClipPlaybackForTrack,
                                                             timelineEnd, trackIndex, preGainRamp,
-                                                            soloView);
+                                                            soloView, automation);
 }
 
 void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapshot& sessionSnap,
@@ -799,7 +946,8 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                                                              const std::int64_t timelineEnd,
                                                              const int trackIndex,
                                                              PreGainRampState* const preGainRamp,
-                                                             const SoloMuteView* const soloView) noexcept
+                                                             const SoloMuteView* const soloView,
+                                                             const ChannelAutomationClock* const automation) noexcept
 {
     if (audibleRun <= 0 || stageL == nullptr || stageR == nullptr || trackIndex < 0
         || trackIndex >= sessionSnap.getNumTracks())
@@ -823,7 +971,8 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
     const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, tr);
     const float storedFaderGain = tr.getChannelFaderGain();
     const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
-    if (!effectiveMuted && storedFaderGain <= 0.0f)
+    const bool automationVaries = channelStripAutomationVaries(tr, automation);
+    if (!effectiveMuted && storedFaderGain <= 0.0f && !automationVaries)
     {
         return;
     }
@@ -871,7 +1020,7 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                                                         * ((float)(out0 + run) / (float)audibleRun)
                                    : preGainTarget;
 
-            if (useInsert && effectiveGain > 0.0f)
+            if (useInsert && (effectiveGain > 0.0f || (automationVaries && !effectiveMuted)))
             {
                 if (access.buffersUsable())
                 {
@@ -889,18 +1038,47 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                     access.host->audioThread_processEntryChain(*access.entry, InsertStage::Pre, run,
                                                                scratch, access.chainScratchCapacity,
                                                                *access.chainMidiScratch, access.laneIndex);
-                    scaleStereoScratch(scratch, run, effectiveGain);
+                    if (automationVaries && !effectiveMuted)
+                    {
+                        scaleStereoByAutomation(scratch[0], scratch[1], run, t, tr, automation);
+                    }
+                    else
+                    {
+                        scaleStereoScratch(scratch, run, effectiveGain);
+                    }
                     access.host->audioThread_processEntryChain(*access.entry, InsertStage::Post, run,
                                                                scratch, access.chainScratchCapacity,
                                                                *access.chainMidiScratch, access.laneIndex);
-                    multiplyStereoScratchLR(scratch,
-                                            run,
-                                            trackPanLawGainLeft(tr.getStereoPan()),
-                                            trackPanLawGainRight(tr.getStereoPan()));
+                    if (automationVaries && !effectiveMuted)
+                    {
+                        panStereoByAutomation(scratch[0], scratch[1], run, t, tr, automation);
+                    }
+                    else
+                    {
+                        multiplyStereoScratchLR(scratch,
+                                                run,
+                                                trackPanLawGainLeft(tr.getStereoPan()),
+                                                trackPanLawGainRight(tr.getStereoPan()));
+                    }
                     // Chain data lives at scratch[0, run): add it at the stage's destination
                     // offset (dest-offset-only — see `addChainScratchToStageAtDest`).
                     addChainScratchToStageAtDest(
                         stageL, stageR, scratch[0], scratch[1], destFrame, run);
+                }
+            }
+            else if (automationVaries && !effectiveMuted)
+            {
+                float* const stagePtrs[2] = { stageL, stageR };
+                for (int i = 0; i < run; ++i)
+                {
+                    const double seconds = trackAutomationEngineSampleToSeconds(t + i, automation->engineRate);
+                    const float gain = channelAutomationValueAt(tr, kTrackAutomationVolumeId, automation, seconds);
+                    const float pan = channelAutomationValueAt(tr, kTrackAutomationPanId, automation, seconds);
+                    const float pre = preGainRamping
+                                          ? preGainStart + (preGainTarget - preGainStart)
+                                                               * (static_cast<float>(out0 + i) / static_cast<float>(audibleRun))
+                                          : preGainTarget;
+                    addClipRunToOutputs(c, off + i, 1, destFrame + i, 2, stagePtrs, gain * pre, pan);
                 }
             }
             else if (preGainRamping)
@@ -931,7 +1109,8 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& tr,
                                                   float* stageR,
                                                   PluginInsertHost* pluginHost,
                                                   PreGainRampState* const preGainRamp,
-                                                  const SoloMuteView* const soloView) noexcept
+                                                  const SoloMuteView* const soloView,
+                                                  const ChannelAutomationClock* const automation) noexcept
 {
     if (numSamples <= 0 || stageL == nullptr || stageR == nullptr)
     {
@@ -947,7 +1126,7 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& tr,
     const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, tr);
     const float storedFaderGain = tr.getChannelFaderGain();
     const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
-    if (!effectiveMuted && storedFaderGain <= 0.0f)
+    if (!effectiveMuted && storedFaderGain <= 0.0f && !channelStripAutomationVaries(tr, automation))
     {
         return;
     }
@@ -961,7 +1140,7 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& tr,
     const bool useInsert
         = pluginHost != nullptr && pluginHost->audioThread_hasActivePluginForTrack(tr.getId());
 
-    if (useInsert && effectiveGain > 0.0f)
+    if (useInsert && (effectiveGain > 0.0f || (channelStripAutomationVaries(tr, automation) && !effectiveMuted)))
     {
         // Insert path — identical stage order to the clip insert path: source → pre-gain →
         // Pre inserts → fader → Post inserts → pan → accumulate into stage. Unresolved/None input
@@ -985,19 +1164,56 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& tr,
                 scaleStereoScratch(scratch, numSamples, preGainTarget);
             }
             pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, numSamples);
-            scaleStereoScratch(scratch, numSamples, effectiveGain);
+            if (channelStripAutomationVaries(tr, automation) && !effectiveMuted)
+            {
+                const std::int64_t origin = automation != nullptr ? automation->blockStartSample : 0;
+                scaleStereoByAutomation(scratch[0], scratch[1], numSamples, origin, tr, automation);
+            }
+            else
+            {
+                scaleStereoScratch(scratch, numSamples, effectiveGain);
+            }
             pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, numSamples);
-            multiplyStereoScratchLR(scratch,
-                                    numSamples,
-                                    trackPanLawGainLeft(tr.getStereoPan()),
-                                    trackPanLawGainRight(tr.getStereoPan()));
+            if (channelStripAutomationVaries(tr, automation) && !effectiveMuted)
+            {
+                const std::int64_t origin = automation != nullptr ? automation->blockStartSample : 0;
+                panStereoByAutomation(scratch[0], scratch[1], numSamples, origin, tr, automation);
+            }
+            else
+            {
+                multiplyStereoScratchLR(scratch,
+                                        numSamples,
+                                        trackPanLawGainLeft(tr.getStereoPan()),
+                                        trackPanLawGainRight(tr.getStereoPan()));
+            }
             addStereoScratchToStereoScratch(stageL, stageR, scratch[0], scratch[1], 0, numSamples);
         }
         return;
     }
 
-    // Dry path (no active inserts, or muted): silence and zero gain contribute nothing.
-    if (effectiveGain <= 0.0f || inA == nullptr)
+    // Dry path (no active inserts). A stored fader of 0 still plays when the volume curve moves.
+    if (inA == nullptr)
+    {
+        return;
+    }
+    if (channelStripAutomationVaries(tr, automation) && !effectiveMuted)
+    {
+        const float* const srcB = inB != nullptr ? inB : inA;
+        const std::int64_t origin = automation->blockStartSample;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double seconds = trackAutomationEngineSampleToSeconds(origin + i, automation->engineRate);
+            const float gain = channelAutomationValueAt(tr, kTrackAutomationVolumeId, automation, seconds);
+            const float pan = channelAutomationValueAt(tr, kTrackAutomationPanId, automation, seconds);
+            const float pre = preGainRamping
+                                  ? preGainStart + (preGainTarget - preGainStart) * (static_cast<float>(i) / static_cast<float>(numSamples))
+                                  : preGainTarget;
+            stageL[i] += inA[i] * pre * gain * trackPanLawGainLeft(pan);
+            stageR[i] += srcB[i] * pre * gain * trackPanLawGainRight(pan);
+        }
+        return;
+    }
+    if (effectiveGain <= 0.0f)
     {
         return;
     }
@@ -1030,7 +1246,8 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               const int numSamples,
                                               PluginInsertHost* pluginHost,
                                               ExperimentalInstrumentHost* auditionHost,
-                                              const SoloMuteView* const soloView) noexcept
+                                              const SoloMuteView* const soloView,
+                                              const ChannelAutomationClock* const automation) noexcept
 {
     // Serial wrapper: resolve the chain entry and the host's shared buffers, then run the same
     // strip core the render-pool jobs run (one DSP implementation, Stage A2).
@@ -1051,7 +1268,7 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
     }
     renderInstrumentPostStripToStereoScratchWithChainAccess(host, track, stageL, stageR,
                                                             destOutFrame0, numSamples, access,
-                                                            auditionHost, soloView);
+                                                            auditionHost, soloView, automation);
 }
 
 void renderInstrumentPostStripToStereoScratchWithChainAccess(
@@ -1063,7 +1280,8 @@ void renderInstrumentPostStripToStereoScratchWithChainAccess(
     const int numSamples,
     const AudioStripInsertAccess& access,
     ExperimentalInstrumentHost* auditionHost,
-    const SoloMuteView* const soloView) noexcept
+    const SoloMuteView* const soloView,
+    const ChannelAutomationClock* const automation) noexcept
 {
     if (host == nullptr || numSamples <= 0 || stageL == nullptr || stageR == nullptr)
     {
@@ -1080,12 +1298,14 @@ void renderInstrumentPostStripToStereoScratchWithChainAccess(
     const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, track);
     const float storedFaderGain = track.getChannelFaderGain();
     const float effectiveGain = effectiveMuted ? 0.0f : juce::jmax(0.0f, storedFaderGain);
+    const bool automationVaries = channelStripAutomationVaries(track, automation);
+    const std::int64_t automationOrigin = automation != nullptr ? automation->blockStartSample + destOutFrame0 : 0;
 
     // Same gate as `audioThread_hasActivePluginForTrack`, resolved on the caller's entry.
     const bool useInsert = access.host != nullptr && access.entry != nullptr
                            && PluginInsertHost::audioThread_entryHasActiveSlot(*access.entry);
 
-    if (useInsert && effectiveGain > 0.0f)
+    if (useInsert && (effectiveGain > 0.0f || (automationVaries && !effectiveMuted)))
     {
         if (access.buffersUsable())
         {
@@ -1103,14 +1323,28 @@ void renderInstrumentPostStripToStereoScratchWithChainAccess(
             access.host->audioThread_processEntryChain(*access.entry, InsertStage::Pre, numSamples,
                                                        scratch, access.chainScratchCapacity,
                                                        *access.chainMidiScratch, access.laneIndex);
-            scaleStereoScratch(scratch, numSamples, effectiveGain);
+            if (automationVaries && !effectiveMuted)
+            {
+                scaleStereoByAutomation(scratch[0], scratch[1], numSamples, automationOrigin, track, automation);
+            }
+            else
+            {
+                scaleStereoScratch(scratch, numSamples, effectiveGain);
+            }
             access.host->audioThread_processEntryChain(*access.entry, InsertStage::Post, numSamples,
                                                        scratch, access.chainScratchCapacity,
                                                        *access.chainMidiScratch, access.laneIndex);
-            multiplyStereoScratchLR(scratch,
-                                    numSamples,
-                                    trackPanLawGainLeft(track.getStereoPan()),
-                                    trackPanLawGainRight(track.getStereoPan()));
+            if (automationVaries && !effectiveMuted)
+            {
+                panStereoByAutomation(scratch[0], scratch[1], numSamples, automationOrigin, track, automation);
+            }
+            else
+            {
+                multiplyStereoScratchLR(scratch,
+                                        numSamples,
+                                        trackPanLawGainLeft(track.getStereoPan()),
+                                        trackPanLawGainRight(track.getStereoPan()));
+            }
             // Chain data lives at scratch[0, numSamples): add it at the stage's destination
             // offset (dest-offset-only — see `addChainScratchToStageAtDest`; all current callers
             // pass destOutFrame0 == 0, identical to the legacy source-and-dest-offset add).
@@ -1121,8 +1355,20 @@ void renderInstrumentPostStripToStereoScratchWithChainAccess(
     }
 
     float* const stagePtrs[2] = { stageL, stageR };
-    mixExperimentalInstrumentAfterTracks(
-        host, stagePtrs, 2, numSamples, effectiveGain, track.getStereoPan());
+    if (automationVaries && !effectiveMuted)
+    {
+        mixExperimentalInstrumentAfterTracks(
+            host, stagePtrs, 2, numSamples, 1.0f, kTrackStereoPanCenter);
+        scaleStereoByAutomation(stageL + destOutFrame0, stageR + destOutFrame0, numSamples,
+                                automationOrigin, track, automation);
+        panStereoByAutomation(stageL + destOutFrame0, stageR + destOutFrame0, numSamples,
+                              automationOrigin, track, automation);
+    }
+    else
+    {
+        mixExperimentalInstrumentAfterTracks(
+            host, stagePtrs, 2, numSamples, effectiveGain, track.getStereoPan());
+    }
     if (auditionHost != nullptr && auditionHost != host)
     {
         // P2 Secondary audition (no inserts active): identical fader/mute/pan fold as `host`.
@@ -1139,7 +1385,8 @@ void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
                                               const int destOutFrame0,
                                               const int numSamples,
                                               PluginInsertHost* pluginHost,
-                                              const SoloMuteView* const soloView) noexcept
+                                              const SoloMuteView* const soloView,
+                                              const ChannelAutomationClock* const automation) noexcept
 {
     if (numSamples <= 0 || busInputStereo == nullptr || stageL == nullptr || stageR == nullptr)
     {
@@ -1154,7 +1401,7 @@ void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
     const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, busTrack);
     const float storedFaderGain = busTrack.getChannelFaderGain();
     const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
-    if (!effectiveMuted && storedFaderGain <= 0.0f)
+    if (!effectiveMuted && storedFaderGain <= 0.0f && !channelStripAutomationVaries(busTrack, automation))
     {
         clearStereoScratch(stageL, stageR, numSamples);
         return;
@@ -1163,7 +1410,7 @@ void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
     const bool useInsert = pluginHost != nullptr
                            && pluginHost->audioThread_hasActivePluginForTrack(busTrack.getId());
 
-    if (useInsert && effectiveGain > 0.0f)
+    if (useInsert && (effectiveGain > 0.0f || (channelStripAutomationVaries(busTrack, automation) && !effectiveMuted)))
     {
         pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, numSamples);
         if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
@@ -1179,14 +1426,48 @@ void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
                                                   numSamples);
             }
             pluginHost->audioThread_processChainForTrack(busTrack.getId(), InsertStage::Pre, numSamples);
-            scaleStereoScratch(scratch, numSamples, effectiveGain);
+            if (channelStripAutomationVaries(busTrack, automation) && !effectiveMuted)
+            {
+                const std::int64_t origin = automation->blockStartSample + destOutFrame0;
+                scaleStereoByAutomation(scratch[0] + destOutFrame0, scratch[1] + destOutFrame0,
+                                        numSamples, origin, busTrack, automation);
+            }
+            else
+            {
+                scaleStereoScratch(scratch, numSamples, effectiveGain);
+            }
             pluginHost->audioThread_processChainForTrack(busTrack.getId(), InsertStage::Post, numSamples);
-            multiplyStereoScratchLR(scratch,
-                                    numSamples,
-                                    trackPanLawGainLeft(busTrack.getStereoPan()),
-                                    trackPanLawGainRight(busTrack.getStereoPan()));
+            if (channelStripAutomationVaries(busTrack, automation) && !effectiveMuted)
+            {
+                const std::int64_t origin = automation->blockStartSample + destOutFrame0;
+                panStereoByAutomation(scratch[0] + destOutFrame0, scratch[1] + destOutFrame0,
+                                      numSamples, origin, busTrack, automation);
+            }
+            else
+            {
+                multiplyStereoScratchLR(scratch,
+                                        numSamples,
+                                        trackPanLawGainLeft(busTrack.getStereoPan()),
+                                        trackPanLawGainRight(busTrack.getStereoPan()));
+            }
             juce::FloatVectorOperations::copy(stageL + destOutFrame0, scratch[0] + destOutFrame0, numSamples);
             juce::FloatVectorOperations::copy(stageR + destOutFrame0, scratch[1] + destOutFrame0, numSamples);
+        }
+        return;
+    }
+
+    if (channelStripAutomationVaries(busTrack, automation) && !effectiveMuted)
+    {
+        const std::int64_t origin = automation->blockStartSample + destOutFrame0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double seconds = trackAutomationEngineSampleToSeconds(origin + i, automation->engineRate);
+            const float gain = channelAutomationValueAt(busTrack, kTrackAutomationVolumeId, automation, seconds);
+            const float pan = channelAutomationValueAt(busTrack, kTrackAutomationPanId, automation, seconds);
+            const float inL = busInputStereo[0] != nullptr ? busInputStereo[0][destOutFrame0 + i] : 0.0f;
+            const float inR = busInputStereo[1] != nullptr ? busInputStereo[1][destOutFrame0 + i] : 0.0f;
+            stageL[destOutFrame0 + i] = inL * gain * trackPanLawGainLeft(pan);
+            stageR[destOutFrame0 + i] = inR * gain * trackPanLawGainRight(pan);
         }
         return;
     }

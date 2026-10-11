@@ -112,6 +112,12 @@ struct TrackHeaderModel
     /// alternatives" cell appears at the end of the second row (instrument destination rows only;
     /// opens the anchored popup). Hidden with the whole second row at compact heights.
     bool instrumentAlternativesAvailable = false;
+    /// Channel Volume/Pan automation. False on MIDI rows (no strip). Write is runtime-only.
+    bool automationAvailable = false;
+    bool automationRead = false;
+    bool automationWrite = false;
+    /// True when at least one Volume/Pan lane is open under this track.
+    bool automationLanesOpen = false;
     /// When false, double-click inline rename is disabled (`TrackKind::Master` / Stereo Out).
     bool trackNameRenameEnabled = true;
     /// Live MIDI arrived for this row within the last ~150 ms: a small green dot is painted at
@@ -152,6 +158,10 @@ struct TrackHeaderCallbacks
     /// Solo toggle (S cell). Omit (or leave `soloAvailable` false) to hide the cell (Master row).
     std::function<void()> onToggleSolo;
     std::function<void()> onToggleArm;
+    std::function<void()> onToggleAutomationRead;
+    std::function<void()> onToggleAutomationWrite;
+    /// Chevron at the bottom of the colour segment. Toggles lane visibility.
+    std::function<void()> onToggleAutomationLanes;
     /// Input-monitoring toggle (cell omitted when unset or `monitorAvailable` false).
     std::function<void()> onToggleMonitor;
     /// Optional: opens native instrument / plugin UI (Groove Agent row). Omit for audio lanes.
@@ -277,6 +287,11 @@ public:
     /// The P2 "Instrument alternatives" cell (second row; empty when absent or hidden). Public:
     /// used as the popup's anchor rectangle.
     [[nodiscard]] juce::Rectangle<int> getAlternativesButtonBounds() const noexcept;
+    [[nodiscard]] juce::Rectangle<int> getAutomationReadBounds() const noexcept;
+    [[nodiscard]] juce::Rectangle<int> getAutomationWriteBounds() const noexcept;
+    /// Bottom of the colour segment. Empty when this row has no channel automation.
+    [[nodiscard]] juce::Rectangle<int> getAutomationChevronBounds() const noexcept;
+    bool clickAutomationChevronLikeMouseForStabilityTest();
     /// Colour segment (type icon + number), the name text area and the second-row strip area.
     [[nodiscard]] juce::Rectangle<int> getColourSegmentBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getTypeIconBounds() const noexcept;
@@ -312,6 +327,7 @@ private:
         Solo,
         Power,
         Monitor,
+        Automation,
         RowResize,
         InlineRename,
     };
@@ -328,6 +344,10 @@ private:
         Arm,
         /// P2: "Instrument alternatives" popup trigger — last cell of the second row.
         Alternatives,
+        /// Automation Read. Not the Record Arm cell.
+        AutomationRead,
+        /// Automation Write. Touch is the only write behaviour.
+        AutomationWrite,
     };
 
     bool clickStripCellLikeMouse(TrackHeaderButtonKind kind);
@@ -345,6 +365,7 @@ private:
         bool soloActive = false;
         bool armActive = false;
         bool monitorActive = false;
+        bool automationActive = false;
         juce::Rectangle<int> cellBounds;
     };
 
@@ -373,6 +394,7 @@ private:
     /// Cell `index` (left to right) of the title strip / the second strip (empty when out of range).
     [[nodiscard]] juce::Rectangle<int> titleStripCellAtIndex(int index) const noexcept;
     [[nodiscard]] juce::Rectangle<int> secondStripCellAtIndex(int index) const noexcept;
+    [[nodiscard]] juce::Rectangle<int> automationCell(bool readCell) const noexcept;
 
     [[nodiscard]] juce::Rectangle<int>
     squareStripButtonBodyFromCell(juce::Rectangle<int> cell) const noexcept;
@@ -421,9 +443,55 @@ private:
     int rowResizeStartHeightPx_ = 0;
     int rowResizeStartScreenY_ = 0;
 
+    class AutomationChevronButton final : public juce::Button
+    {
+    public:
+        AutomationChevronButton()
+            : juce::Button("automation lanes")
+        {
+            setWantsKeyboardFocus(true);
+            setMouseClickGrabsKeyboardFocus(true);
+        }
+
+        void setLanesOpen(const bool open) noexcept
+        {
+            if (open_ != open)
+            {
+                open_ = open;
+                repaint();
+            }
+        }
+
+        void paintButton(juce::Graphics& g, const bool highlighted, const bool down) override
+        {
+            const bool parentHover = getParentComponent() != nullptr && getParentComponent()->isMouseOver(true);
+            const bool strong = highlighted || down || hasKeyboardFocus(true) || parentHover;
+            g.setColour(juce::Colours::white.withAlpha(strong ? 0.95f : 0.38f));
+            const auto b = getLocalBounds().toFloat().reduced(2.0f, 3.0f);
+            juce::Path path;
+            if (open_)
+            {
+                path.startNewSubPath(b.getX(), b.getBottom());
+                path.lineTo(b.getCentreX(), b.getY());
+                path.lineTo(b.getRight(), b.getBottom());
+            }
+            else
+            {
+                path.startNewSubPath(b.getX(), b.getY());
+                path.lineTo(b.getCentreX(), b.getBottom());
+                path.lineTo(b.getRight(), b.getY());
+            }
+            g.strokePath(path, juce::PathStrokeType(1.35f));
+        }
+
+    private:
+        bool open_ = false;
+    };
+
     std::unique_ptr<juce::TextEditor> trackNameEditor_;
     bool trackNameRenameSubmitting_ = false;
     bool ignoreTrackNameEditorFocusLoss_ = false;
+    AutomationChevronButton automationChevron_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackHeaderView)
 };

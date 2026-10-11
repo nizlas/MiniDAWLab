@@ -1,8 +1,12 @@
 # Track automation, stage 1: Channel Volume and Pan (2026-10-10)
 
-> **Status: planned, not implemented.** This document is the steering plan for the first
-> automation stage. It does not change production code, the project format, or the 1.3.1
-> read-ahead startup policy.
+> **Status: first version is on `docs/track-automation-volume-pan`, not merged.**
+> Model and playback, Touch Read/Write, arrangement lanes, and the read-ahead hold are
+> in that branch. Project format is 29. Read-ahead startup is unchanged. VST3 parameter
+> automation is still a later stage. The ring holds 8192 events per gesture, not 32768,
+> and a full ring drops further events until the button is released. A seek while the
+> button is still down does not yet open the next stroke. The volume lane draws through
+> the fader scale, so a stored gain above +6 dB sits at the top of the lane.
 >
 > **Correction (2026-10-11).** The curve grab is a point on the curve, moved in time and
 > value, not a handle locked at the segment midpoint. A punch preserves the polynomial
@@ -14,8 +18,8 @@
 > Parallel audio/instrument strips (A1/A2) and the read-ahead prototype are on this
 > revision. Read-ahead is on at depth 3 unless Audio Settings has a saved Off or the
 > process was started with `--no-readahead` (`ReadAheadStartupConfig.h`). Project format
-> is still `kCurrentVersion = 28` (`src/io/ProjectFile.h`). An implementation of this plan
-> will need a later format bump; this planning change does not make one.
+> was `kCurrentVersion = 28` when this plan was written. The implementation on this
+> branch reads older projects as today and writes format 29 when a project is saved.
 >
 > File and function references below are against that revision.
 

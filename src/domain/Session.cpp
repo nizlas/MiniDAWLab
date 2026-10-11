@@ -1407,6 +1407,48 @@ bool Session::setTrackMidiInputAssignment(const TrackId trackId,
     return true;
 }
 
+bool Session::setTrackAutomation(const TrackId trackId,
+                                 TrackAutomationState state,
+                                 const float* const manualGain,
+                                 const float* const manualPan) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int idx = current->findTrackIndexById(trackId);
+    if (idx < 0 || !trackKindHasChannelAutomation(current->getTrack(idx).getKind()))
+    {
+        return false;
+    }
+    std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackAutomation(*current, trackId, std::move(state));
+    if (next == nullptr)
+    {
+        return false;
+    }
+    if (manualGain != nullptr)
+    {
+        next = SessionSnapshot::withTrackChannelFaderGain(
+            *next, trackId, juce::jlimit(0.0f, kTrackChannelFaderGainMax, *manualGain));
+    }
+    if (manualPan != nullptr)
+    {
+        next = SessionSnapshot::withTrackStereoPan(*next, trackId, sanitizeTrackStereoPan(*manualPan));
+    }
+    if (next == nullptr)
+    {
+        return false;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
 void Session::setTrackStereoPan(const TrackId trackId, const float stereoPan) noexcept
 {
     if (trackId == kInvalidTrackId)
@@ -2343,6 +2385,7 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         tr.inputAssignment = t.getInputAssignment();
         tr.midiInputAssignment = t.getMidiInputAssignment();
         tr.stereoPan = t.getStereoPan();
+        tr.automation = t.getAutomation();
         tr.off = (t.getKind() == TrackKind::Master) ? false : t.isTrackOff();
         tr.muted = t.isMuted();
         tr.midiOutputChannel = t.getMidiOutputChannel();
@@ -2813,6 +2856,12 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         if (trDto.preGainDb != kTrackPreGainDbDefault)
         {
             built.back() = built.back().withPreGainDb(trDto.preGainDb);
+        }
+        if (trackKindHasChannelAutomation(tk)
+            && (trDto.automation.read || trDto.automation.volumeLaneVisible || trDto.automation.panLaneVisible
+                || !trDto.automation.volume.points.empty() || !trDto.automation.pan.points.empty()))
+        {
+            built.back() = built.back().withAutomation(trDto.automation);
         }
         // Input assignment (v23) travels the same sanitizing COW route; Audio lanes only (other
         // kinds keep the default and never serialize the fields).

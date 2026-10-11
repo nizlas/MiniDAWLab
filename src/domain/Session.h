@@ -230,6 +230,14 @@ public:
     /// [Message thread] Stereo pan [-1,+1] (full left … full right); applied after fader in playback.
     void setTrackStereoPan(TrackId trackId, float stereoPan) noexcept;
 
+    /// [Message thread] Replace Volume/Pan automation on one strip. Optional manual pointers
+    /// update the Read-off fader or pan in the same snapshot. MIDI rows are refused.
+    /// Returns false when nothing was published.
+    bool setTrackAutomation(TrackId trackId,
+                            TrackAutomationState state,
+                            const float* manualGain = nullptr,
+                            const float* manualPan = nullptr) noexcept;
+
     /// [Message thread] Pre-gain in dB, sanitized to [-24,+24]: applied BEFORE Pre inserts and
     /// fader on Audio lanes (see `Track`). Returns false (nothing published) when the row is
     /// unknown or the sanitized value already matches — callers wrapping this in an undoable
