@@ -20,6 +20,8 @@
 #include <juce_events/juce_events.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -473,6 +475,67 @@ public:
     int calls_ = 0;
 };
 
+/// Pure delay. Output is the sample from `delaySamples` ago; the written sample is
+/// input + feedback * that output. No dry path, so a tail after the event is unambiguous.
+class DelayTailProbe final : public juce::AudioPluginInstance
+{
+public:
+    static constexpr int kDelay = 64;
+
+    explicit DelayTailProbe(const float feedback)
+        : juce::AudioPluginInstance(BusesProperties()
+                                        .withInput("In", juce::AudioChannelSet::stereo(), true)
+                                        .withOutput("Out", juce::AudioChannelSet::stereo(), true))
+        , feedback_(feedback)
+    {
+    }
+    void fillInPluginDescription(juce::PluginDescription& d) const override
+    {
+        d.name = "DelayTailProbe";
+        d.pluginFormatName = "Test";
+    }
+    const juce::String getName() const override { return "DelayTailProbe"; }
+    void prepareToPlay(double, int) override {}
+    void releaseResources() override {}
+    void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
+    {
+        const int n = buffer.getNumSamples();
+        const int chs = juce::jmin(2, buffer.getNumChannels());
+        for (int i = 0; i < n; ++i)
+        {
+            for (int ch = 0; ch < chs; ++ch)
+            {
+                float* const d = buffer.getWritePointer(ch);
+                const float in = d[i];
+                const float y = line_[static_cast<size_t>(ch)][static_cast<size_t>(pos_)];
+                line_[static_cast<size_t>(ch)][static_cast<size_t>(pos_)] = in + feedback_ * y;
+                d[i] = y;
+            }
+            pos_ = (pos_ + 1) % kDelay;
+        }
+        ++calls_;
+    }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.0; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
+    void getStateInformation(juce::MemoryBlock&) override {}
+    void setStateInformation(const void*, int) override {}
+
+    int calls_ = 0;
+
+private:
+    float feedback_ = 0.0f;
+    int pos_ = 0;
+    std::array<std::array<float, kDelay>, 2> line_{};
+};
+
 class StubDevice final : public juce::AudioIODevice
 {
 public:
@@ -844,6 +907,254 @@ void testLaneHandles()
     up({ 3.0f, 6.0f });
 }
 
+/// Reference for DelayTailProbe: the same delay, fed the event source (gain × fade) and
+/// zeros everywhere else. The tail is whatever the delay still holds; it is not scaled again.
+[[nodiscard]] std::vector<float> referenceDelay(const int n,
+                                                const float feedback,
+                                                const float gainDb,
+                                                const std::int64_t fadeOut,
+                                                const int a0,
+                                                const int aLen,
+                                                const float aLevel,
+                                                const int b0,
+                                                const int bLen,
+                                                const float bLevel)
+{
+    std::array<float, DelayTailProbe::kDelay> line{};
+    int pos = 0;
+    const float g = event_amplitude::linearGain(gainDb);
+    std::vector<float> out(static_cast<size_t>(n), 0.0f);
+    for (int i = 0; i < n; ++i)
+    {
+        float src = 0.0f;
+        if (i >= a0 && i < a0 + aLen)
+        {
+            src = aLevel * g * event_amplitude::envelopeAt(i - a0, aLen, 0, fadeOut);
+        }
+        else if (i >= b0 && i < b0 + bLen)
+        {
+            src = bLevel * g * event_amplitude::envelopeAt(i - b0, bLen, 0, 0);
+        }
+        const float y = line[static_cast<size_t>(pos)];
+        line[static_cast<size_t>(pos)] = src + feedback * y;
+        pos = (pos + 1) % DelayTailProbe::kDelay;
+        out[static_cast<size_t>(i)] = y;
+    }
+    return out;
+}
+
+void expectRange(const float* got, const std::vector<float>& want, const int n, const char* what)
+{
+    for (int i = 0; i < n; ++i)
+    {
+        if (!(std::fabs(got[i] - want[static_cast<size_t>(i)]) <= 1.0e-4f))
+        {
+            ++gFailures;
+            std::printf("[FAIL] %s at %d got=%g want=%g\n",
+                        what,
+                        i,
+                        static_cast<double>(got[i]),
+                        static_cast<double>(want[static_cast<size_t>(i)]));
+            return;
+        }
+    }
+}
+
+void placeTailEvents(Session& session, const TrackId tid)
+{
+    expect(session.addPlacedClipFromExistingMaterial(makeDcClip(64, 1.0f, 1.0f, "a"), 0, 0, 64, tid).wasOk(),
+           "tail event a");
+    expect(session.addPlacedClipFromExistingMaterial(makeDcClip(64, 0.2f, 0.2f, "b"), 256, 0, 64, tid).wasOk(),
+           "tail event b");
+    session.setArrangementExtentSamples(static_cast<std::int64_t>(kRate));
+}
+
+void installDelay(PluginInsertHost& host, const TrackId tid, const float feedback)
+{
+    expect(host.installInsertInstanceForTests(tid, InsertStage::Pre, std::make_unique<DelayTailProbe>(feedback)),
+           "install delay");
+}
+
+void testInsertTailAfterEvent()
+{
+    constexpr int kN = 384;
+    constexpr float kFb = 0.5f;
+    const std::vector<float> want = referenceDelay(kN, kFb, 0.0f, 0, 0, 64, 1.0f, 256, 64, 0.2f);
+    expect(want[64] > 0.9f && want[128] < want[64] && want[192] < want[128],
+           "reference tail is present and decays");
+    expect(want[256] < 0.2f && want[256] > 0.05f, "next event continues the decayed tail");
+    expect(std::fabs(want[256] - 1.0f) > 0.5f, "next event does not revive the frozen event level");
+
+    Engine direct(0);
+    direct.session.addTrack();
+    const TrackId dt = direct.session.getActiveTrackId();
+    placeTailEvents(direct.session, dt);
+    installDelay(direct.pluginHost, dt, kFb);
+    direct.start();
+    direct.transport.requestSeek(0);
+    direct.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    std::vector<float> played(static_cast<size_t>(kN), 0.0f);
+    std::vector<float> playedR(static_cast<size_t>(kN), 0.0f);
+    for (int start = 0; start < kN; start += kBlock)
+    {
+        std::vector<float> blockL(static_cast<size_t>(kBlock));
+        std::vector<float> blockR(static_cast<size_t>(kBlock));
+        direct.renderBlock(blockL.data(), blockR.data());
+        for (int i = 0; i < kBlock; ++i)
+        {
+            played[static_cast<size_t>(start + i)] = blockL[static_cast<size_t>(i)];
+            playedR[static_cast<size_t>(start + i)] = blockR[static_cast<size_t>(i)];
+        }
+    }
+    expectRange(played.data(), want, kN, "direct playback tail across the event boundary");
+    expectNear(playedR[64], played[64], 1.0e-4f, "tail uses the same factor on both channels");
+    direct.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    std::vector<float> heldL(static_cast<size_t>(kBlock));
+    std::vector<float> heldR(static_cast<size_t>(kBlock));
+    direct.renderBlock(heldL.data(), heldR.data());
+    float heldPeak = 0.0f;
+    for (float s : heldL)
+    {
+        heldPeak = std::max(heldPeak, std::fabs(s));
+    }
+    expect(heldPeak == 0.0f, "stop does not run the audio-event chain");
+
+    Engine strip(0);
+    strip.session.addTrack();
+    const TrackId st = strip.session.getActiveTrackId();
+    placeTailEvents(strip.session, st);
+    installDelay(strip.pluginHost, st, kFb);
+    strip.start();
+    const auto stripSnap = strip.session.loadSessionSnapshotForAudioThread();
+    const int stripIndex = stripSnap->findTrackIndexById(st);
+    std::vector<float> stripL(static_cast<size_t>(kN), 0.0f);
+    std::vector<float> stripR(static_cast<size_t>(kN), 0.0f);
+    for (int start = 0; start < kN; start += kBlock)
+    {
+        playback_mix_helpers::renderAudioTrackPostStripToStereoScratch(
+            *stripSnap, start, kBlock, 0, stripL.data() + start, stripR.data() + start,
+            &strip.pluginHost, kInvalidTrackId, stripSnap->getArrangementExtentSamples(), stripIndex);
+    }
+    expectRange(stripL.data(), want, kN, "post-strip tail across the event boundary");
+
+    Engine summing(0);
+    summing.session.addTrack();
+    const TrackId mt = summing.session.getActiveTrackId();
+    placeTailEvents(summing.session, mt);
+    installDelay(summing.pluginHost, mt, kFb);
+    summing.start();
+    const auto sumSnap = summing.session.loadSessionSnapshotForAudioThread();
+    std::vector<float> sumL(static_cast<size_t>(kN), 0.0f);
+    for (int start = 0; start < kN; start += kBlock)
+    {
+        juce::AudioBuffer<float> buf(2, kBlock);
+        buf.clear();
+        float* ptrs[2] = { buf.getWritePointer(0), buf.getWritePointer(1) };
+        playback_mix_helpers::renderAudioTracksClipSummingForSegment(
+            *sumSnap, start, kBlock, 0, 2, ptrs, &summing.pluginHost, kInvalidTrackId,
+            sumSnap->getArrangementExtentSamples(), sumSnap->findTrackIndexById(mt));
+        for (int i = 0; i < kBlock; ++i)
+        {
+            sumL[static_cast<size_t>(start + i)] = ptrs[0][i];
+        }
+    }
+    expectRange(sumL.data(), want, kN, "summing path tail across the event boundary");
+
+    Engine offline(0);
+    offline.session.addTrack();
+    const TrackId ot = offline.session.getActiveTrackId();
+    placeTailEvents(offline.session, ot);
+    installDelay(offline.pluginHost, ot, kFb);
+    offline.start();
+    const auto offSnap = offline.session.loadSessionSnapshotForAudioThread();
+    std::vector<float> offL(static_cast<size_t>(kN), 0.0f);
+    for (int start = 0; start < kN; start += kBlock)
+    {
+        juce::AudioBuffer<float> buf(2, kBlock);
+        buf.clear();
+        float* ptrs[2] = { buf.getWritePointer(0), buf.getWritePointer(1) };
+        offline.playback.renderOfflineMixdownBlock(*offSnap, nullptr, start, kBlock, ptrs, false);
+        for (int i = 0; i < kBlock; ++i)
+        {
+            offL[static_cast<size_t>(start + i)] = ptrs[0][i];
+        }
+    }
+    expectRange(offL.data(), want, kN, "offline tail across the event boundary");
+
+    juce::AudioBuffer<float> eventOnly(2, 64);
+    eventOnly.clear();
+    float* eventPtrs[2] = { eventOnly.getWritePointer(0), eventOnly.getWritePointer(1) };
+    Engine exportEnd(0);
+    exportEnd.session.addTrack();
+    const TrackId xt = exportEnd.session.getActiveTrackId();
+    placeTailEvents(exportEnd.session, xt);
+    installDelay(exportEnd.pluginHost, xt, kFb);
+    exportEnd.start();
+    const auto exportSnap = exportEnd.session.loadSessionSnapshotForAudioThread();
+    exportEnd.playback.renderOfflineMixdownBlock(*exportSnap, nullptr, 0, 64, eventPtrs, false);
+    expect(eventOnly.getNumSamples() == 64, "export block stays at the requested length");
+    expectNear(eventPtrs[0][63], want[63], 1.0e-4f, "rendering only the event does not append the tail");
+    juce::AudioBuffer<float> afterEvent(2, 64);
+    afterEvent.clear();
+    float* afterPtrs[2] = { afterEvent.getWritePointer(0), afterEvent.getWritePointer(1) };
+    exportEnd.playback.renderOfflineMixdownBlock(*exportSnap, nullptr, 64, 64, afterPtrs, false);
+    expectNear(afterPtrs[0][0], want[64], 1.0e-4f, "the next requested range still carries the tail");
+
+    Engine ahead(2);
+    ahead.session.addTrack();
+    const TrackId at = ahead.session.getActiveTrackId();
+    placeTailEvents(ahead.session, at);
+    installDelay(ahead.pluginHost, at, kFb);
+    ahead.start();
+    ahead.transport.requestSeek(0);
+    ahead.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    std::vector<float> ra(static_cast<size_t>(kN), 0.0f);
+    for (int start = 0; start < kN; start += kBlock)
+    {
+        if (start > 0)
+        {
+            ahead.pump();
+        }
+        std::vector<float> blockL(static_cast<size_t>(kBlock));
+        std::vector<float> blockR(static_cast<size_t>(kBlock));
+        ahead.renderBlock(blockL.data(), blockR.data());
+        for (int i = 0; i < kBlock; ++i)
+        {
+            ra[static_cast<size_t>(start + i)] = blockL[static_cast<size_t>(i)];
+        }
+    }
+    expectRange(ra.data(), want, kN, "read-ahead tail across the event boundary");
+
+    Engine shaped(0);
+    shaped.session.addTrack();
+    const TrackId ht = shaped.session.getActiveTrackId();
+    expect(shaped.session.addPlacedClipFromExistingMaterial(makeDcClip(128, 1.0f, 1.0f, "fade"), 0, 0, 128, ht).wasOk(),
+           "fade event");
+    const PlacedClipId hid = frontClipId(shaped.session, ht);
+    shaped.session.setClipEventAmplitude(hid, -6.020599f, 0, 128);
+    shaped.session.setArrangementExtentSamples(static_cast<std::int64_t>(kRate));
+    installDelay(shaped.pluginHost, ht, 0.0f);
+    shaped.start();
+    const auto shapedSnap = shaped.session.loadSessionSnapshotForAudioThread();
+    std::vector<float> shapedL(256, 0.0f);
+    std::vector<float> shapedR(256, 0.0f);
+    const std::vector<float> shapedWant = referenceDelay(256, 0.0f, -6.020599f, 128, 0, 128, 1.0f, -1, 0, 0.0f);
+    for (int start = 0; start < 256; start += kBlock)
+    {
+        playback_mix_helpers::renderAudioTrackPostStripToStereoScratch(
+            *shapedSnap, start, kBlock, 0, shapedL.data() + start, shapedR.data() + start,
+            &shaped.pluginHost, kInvalidTrackId, shapedSnap->getArrangementExtentSamples(),
+            shapedSnap->findTrackIndexById(ht));
+    }
+    expectRange(shapedL.data(), shapedWant, 256, "fade and event gain scale the source, not the tail");
+    const float g = event_amplitude::linearGain(-6.020599f);
+    const float delayedSource = g * event_amplitude::envelopeAt(64, 128, 0, 128);
+    expectNear(shapedL[128], delayedSource, 1.0e-4f, "first tail sample is the delayed faded source");
+    expect(std::fabs(shapedL[128]) > 1.0e-3f, "fade-out does not gate the tail to silence");
+    const float during = g * event_amplitude::envelopeAt(16, 128, 0, 128);
+    expectNear(shapedL[80], during, 1.0e-4f, "fade is not applied a second time to the chain output");
+}
+
 } // namespace
 
 int main()
@@ -854,6 +1165,7 @@ int main()
     testProjectFile();
     testAudioPaths();
     testLaneHandles();
+    testInsertTailAfterEvent();
     if (gFailures == 0)
     {
         std::printf("[OK] event envelope\n");

@@ -213,6 +213,8 @@ struct AudioStripInsertAccess
 
 /// One audio lane: clips → pre-gain → Pre → fader/mute/off → Post → pan → `stageL`/`stageR`
 /// (accumulated). Pre-gain is ramped via `preGainRamp` when non-null (see `PreGainRampState`).
+/// An interval with no covering clip still runs an active, unmuted chain on zeros, so its tail
+/// reaches the stage. Event gain and fades scale only clip source. Mute and Off do not run it.
 /// Serial wrapper around `renderAudioTrackPostStripToStereoScratchWithChainAccess` (resolves the
 /// entry and the host's shared buffers itself).
 void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap,

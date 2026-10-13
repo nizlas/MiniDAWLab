@@ -299,8 +299,10 @@ public:
 
     /// Peak-hold levels of ONE track's insert chain as the audio thread processed it: the scratch
     /// BEFORE the first Pre insert (i.e. after pre-gain) and AFTER the last Post insert (before
-    /// pan). Block counters show whether the chain was processed at all — a muted or silent track
-    /// never reaches `audioThread_processChainForTrack`, so its counters stay 0.
+    /// pan). Block counters show whether the chain was processed at all.
+    /// A muted row, an Off row, or a row with no active insert never reaches
+    /// `audioThread_processChainForTrack`. An audible row does, including intervals
+    /// where no clip is feeding source.
     struct InsertLevelTapSnapshot
     {
         float peakBeforeFirstInsert = 0.0f;

@@ -666,6 +666,31 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                         tr.getStereoPan());
                 }
             }
+            else if (useInsert && effectiveGain > 0.0f)
+            {
+                // The event extent chooses when source audio is fed, not when the chain may
+                // sound. Zeros keep an active tail moving, and that output still reaches the
+                // bus. Event gain and fades stay on the source copy above; they do not scale
+                // this tail. Off already returned. Mute and a fader at −∞ still skip.
+                pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
+                if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+                {
+                    const int destFrame = destOutFrame0 + out0;
+                    pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, run);
+                    scaleStereoScratch(scratch, run, effectiveGain);
+                    pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, run);
+                    multiplyStereoScratchLR(scratch,
+                                            run,
+                                            trackPanLawGainLeft(tr.getStereoPan()),
+                                            trackPanLawGainRight(tr.getStereoPan()));
+                    addStereoScratchToDeviceOutputs(scratch,
+                                                    run,
+                                                    destFrame,
+                                                    numOutputChannels,
+                                                    outputChannelData,
+                                                    1.0f);
+                }
+            }
             t += run;
             out0 += run;
         }
@@ -1074,6 +1099,27 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                 addClipRunToStereoScratch(c, off, run, destFrame, stageL, stageR,
                                           dryFader * preGainTarget, tr.getStereoPan());
             }
+        }
+        else if (useInsert && effectiveGain > 0.0f && access.buffersUsable())
+        {
+            // Same rule as the summing renderer: no covering event still feeds zeros through
+            // an active chain so the tail reaches this stage and, after the fan, sends and
+            // the master. Event gain and fades are not applied. Mute and Off still skip.
+            float* const* scratch = access.chainScratch;
+            clearStereoScratch(scratch[0], scratch[1], juce::jmin(run, access.chainScratchCapacity));
+            const int destFrame = destOutFrame0 + out0;
+            access.host->audioThread_processEntryChain(*access.entry, InsertStage::Pre, run,
+                                                       scratch, access.chainScratchCapacity,
+                                                       *access.chainMidiScratch, access.laneIndex);
+            scaleStereoScratch(scratch, run, effectiveGain);
+            access.host->audioThread_processEntryChain(*access.entry, InsertStage::Post, run,
+                                                       scratch, access.chainScratchCapacity,
+                                                       *access.chainMidiScratch, access.laneIndex);
+            multiplyStereoScratchLR(scratch,
+                                    run,
+                                    trackPanLawGainLeft(tr.getStereoPan()),
+                                    trackPanLawGainRight(tr.getStereoPan()));
+            addChainScratchToStageAtDest(stageL, stageR, scratch[0], scratch[1], destFrame, run);
         }
         t += run;
         out0 += run;
