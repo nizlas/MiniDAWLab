@@ -437,8 +437,13 @@ private:
                                      [](const midi_layer_bake::StreamEvent& a, const midi_layer_bake::StreamEvent& b) {
                                          return a.absSample < b.absSample;
                                      });
-                    const std::vector<midi_layer_bake::StreamEvent> audibleEvents
+                    std::vector<midi_layer_bake::StreamEvent> audibleEvents
                         = midi_layer_bake::restrictStreamToAudibleSpans(clipEvents, audible[ci], windows[ci].endExclusive);
+                    if ((int)key.controller == 64)
+                    {
+                        midi_layer_bake::appendSustainReleaseAtOwnAudibleEnd(
+                            audibleEvents, audible[ci], windows[ci].endExclusive);
+                    }
                     const int effCh = midi_channel_diag::effectiveChannel(key.channel, forcedMidiChannel);
                     auto& stream = findOrAddStream(key.controller, effCh);
                     for (const auto& e : audibleEvents)

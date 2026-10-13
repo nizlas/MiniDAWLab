@@ -71,6 +71,13 @@ public:
         /// state for the S cell / locked-M chrome, toggle for S clicks. Both optional — unwired
         /// keeps the pre-solo chrome on Instrument/Midi rows.
         SoloUiHooks soloUiHooks{};
+
+        /// MIDI trim publishes the window during the drag (playback must follow the visible
+        /// edge). The snapshot is taken at mouse-down and recorded once at mouse-up.
+        std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()>
+            captureInstrumentMusicalUndoSnapshot;
+        std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
+            recordAppliedInstrumentMusicalEdit;
     };
 
     /// Install the live-MIDI header / lane seam after construction (composition root).
@@ -93,6 +100,15 @@ public:
 
     /// Install the solo seam after construction (composition root, next to the lanes' hooks).
     void setSoloUiHooks(SoloUiHooks hooks) noexcept { callbacks_.soloUiHooks = std::move(hooks); }
+
+    /// One undo step for a MIDI trim that is published live during the drag.
+    void setMidiTrimUndoCallbacks(
+        std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> capture,
+        std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)> record)
+    {
+        callbacks_.captureInstrumentMusicalUndoSnapshot = std::move(capture);
+        callbacks_.recordAppliedInstrumentMusicalEdit = std::move(record);
+    }
 
     /// [Message thread, once per playhead frame] Invalidate only the strip a running take's
     /// preview grew by since the previous frame on the recording lanes (the playhead overlay

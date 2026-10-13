@@ -516,7 +516,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             const int onlyTrackIndex,
                                             PreGainRampState* const preGainRamp,
                                             const LiveInputMonitorSnapshot* const monitored,
-                                            const SoloMuteView* const soloView) noexcept
+                                            const SoloMuteView* const soloView,
+                                            const bool feedSilenceOnly) noexcept
 {
     if (audibleRun <= 0)
     {
@@ -567,6 +568,32 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
         const std::vector<PlacedClip>& lane = tr.getPlacedClips();
         const bool useInsert = pluginHost != nullptr
                                && pluginHost->audioThread_hasActivePluginForTrack(tr.getId());
+        if (feedSilenceOnly)
+        {
+            // Stop/pause: the playhead is not feeding clips. Zeros keep an active tail moving
+            // through the same chain. Event gain and fades are not applied.
+            if (useInsert && effectiveGain > 0.0f)
+            {
+                pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, audibleRun);
+                if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+                {
+                    pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, audibleRun);
+                    scaleStereoScratch(scratch, audibleRun, effectiveGain);
+                    pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, audibleRun);
+                    multiplyStereoScratchLR(scratch,
+                                            audibleRun,
+                                            trackPanLawGainLeft(tr.getStereoPan()),
+                                            trackPanLawGainRight(tr.getStereoPan()));
+                    addStereoScratchToDeviceOutputs(scratch,
+                                                    audibleRun,
+                                                    destOutFrame0,
+                                                    numOutputChannels,
+                                                    outputChannelData,
+                                                    1.0f);
+                }
+            }
+            continue;
+        }
         std::int64_t t = timelineStartAudible;
         int out0 = 0;
         while (out0 < audibleRun)
@@ -923,7 +950,8 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               const std::int64_t timelineEnd,
                                               const int trackIndex,
                                               PreGainRampState* const preGainRamp,
-                                              const SoloMuteView* const soloView) noexcept
+                                              const SoloMuteView* const soloView,
+                                              const bool feedSilenceOnly) noexcept
 {
     // Serial wrapper: resolve the chain entry and the host's shared buffers, then run the same
     // strip core the render-pool jobs run (one DSP implementation, Stage A1).
@@ -946,7 +974,7 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                                             audibleRun, destOutFrame0, stageL,
                                                             stageR, access, omitClipPlaybackForTrack,
                                                             timelineEnd, trackIndex, preGainRamp,
-                                                            soloView);
+                                                            soloView, feedSilenceOnly);
 }
 
 void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapshot& sessionSnap,
@@ -960,7 +988,8 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                                                              const std::int64_t timelineEnd,
                                                              const int trackIndex,
                                                              PreGainRampState* const preGainRamp,
-                                                             const SoloMuteView* const soloView) noexcept
+                                                             const SoloMuteView* const soloView,
+                                                             const bool feedSilenceOnly) noexcept
 {
     if (audibleRun <= 0 || stageL == nullptr || stageR == nullptr || trackIndex < 0
         || trackIndex >= sessionSnap.getNumTracks())
@@ -999,6 +1028,36 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
     // Same gate as `audioThread_hasActivePluginForTrack`, resolved on the caller's entry.
     const bool useInsert = access.host != nullptr && access.entry != nullptr
                            && PluginInsertHost::audioThread_entryHasActiveSlot(*access.entry);
+    if (feedSilenceOnly)
+    {
+        // Same zero-input chain as a gap, for the whole call. Used while transport is stopped
+        // or paused so the tail decays in real time. No clip samples, no event gain or fades.
+        if (useInsert && effectiveGain > 0.0f && access.buffersUsable())
+        {
+            int done = 0;
+            while (done < audibleRun)
+            {
+                const int run = juce::jmin(audibleRun - done, access.chainScratchCapacity);
+                float* const* scratch = access.chainScratch;
+                clearStereoScratch(scratch[0], scratch[1], run);
+                const int destFrame = destOutFrame0 + done;
+                access.host->audioThread_processEntryChain(*access.entry, InsertStage::Pre, run,
+                                                           scratch, access.chainScratchCapacity,
+                                                           *access.chainMidiScratch, access.laneIndex);
+                scaleStereoScratch(scratch, run, effectiveGain);
+                access.host->audioThread_processEntryChain(*access.entry, InsertStage::Post, run,
+                                                           scratch, access.chainScratchCapacity,
+                                                           *access.chainMidiScratch, access.laneIndex);
+                multiplyStereoScratchLR(scratch,
+                                        run,
+                                        trackPanLawGainLeft(tr.getStereoPan()),
+                                        trackPanLawGainRight(tr.getStereoPan()));
+                addChainScratchToStageAtDest(stageL, stageR, scratch[0], scratch[1], destFrame, run);
+                done += run;
+            }
+        }
+        return;
+    }
     std::int64_t t = timelineStartAudible;
     int out0 = 0;
     while (out0 < audibleRun)

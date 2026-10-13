@@ -1557,6 +1557,20 @@ public:
             });
         // Solo: Instrument + Midi rows consume the same seam as the audio / group headers.
         instrumentTimelineRowCoordinator_->setSoloUiHooks(makeSoloUiHooks());
+        instrumentTimelineRowCoordinator_->setMidiTrimUndoCallbacks(
+            [this]() {
+                if (undoRedoCoordinator_ == nullptr)
+                {
+                    return std::vector<ProjectFileExperimentalInstrumentTrackV1>{};
+                }
+                return undoRedoCoordinator_->captureInstrumentMusicalUndoSnapshot();
+            },
+            [this](const juce::String& label, std::vector<ProjectFileExperimentalInstrumentTrackV1> before) {
+                if (undoRedoCoordinator_ != nullptr)
+                {
+                    undoRedoCoordinator_->recordAppliedInstrumentMusicalEdit(label, std::move(before));
+                }
+            });
         // Live MIDI: Monitor / Arm cells of Instrument + Midi rows read and toggle the runtime
         // flags owned by the live-MIDI coordinator (independent of row selection and of each other).
         instrumentTimelineRowCoordinator_->setLiveMidiCallbacks(

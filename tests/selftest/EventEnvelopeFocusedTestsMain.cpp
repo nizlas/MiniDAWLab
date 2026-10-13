@@ -20,10 +20,18 @@
 #include <juce_events/juce_events.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "engine/ReadAheadStartupConfig.h"
+#include "instruments/InstrumentTrackController.h"
+#include "plugins/ExperimentalInstrumentHost.h"
+#include "ui/experimental/ExperimentalMidiCcAutomation.h"
+
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <thread>
 #include <vector>
 
 namespace
@@ -482,11 +490,13 @@ class DelayTailProbe final : public juce::AudioPluginInstance
 public:
     static constexpr int kDelay = 64;
 
-    explicit DelayTailProbe(const float feedback)
+    explicit DelayTailProbe(const float feedback, const int delaySamples = kDelay)
         : juce::AudioPluginInstance(BusesProperties()
                                         .withInput("In", juce::AudioChannelSet::stereo(), true)
                                         .withOutput("Out", juce::AudioChannelSet::stereo(), true))
         , feedback_(feedback)
+        , delay_(juce::jlimit(1, 4096, delaySamples))
+        , line_(2, std::vector<float>(static_cast<size_t>(delay_), 0.0f))
     {
     }
     void fillInPluginDescription(juce::PluginDescription& d) const override
@@ -499,6 +509,21 @@ public:
     void releaseResources() override {}
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
     {
+        const int already = inProcess_.fetch_add(1, std::memory_order_acq_rel);
+        if (already != 0)
+        {
+            overlaps_.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (hold_.load(std::memory_order_acquire) != 0)
+        {
+            held_.store(1, std::memory_order_release);
+            const auto cap = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (hold_.load(std::memory_order_acquire) != 0 && std::chrono::steady_clock::now() < cap)
+            {
+                std::this_thread::yield();
+            }
+            held_.store(0, std::memory_order_release);
+        }
         const int n = buffer.getNumSamples();
         const int chs = juce::jmin(2, buffer.getNumChannels());
         for (int i = 0; i < n; ++i)
@@ -511,10 +536,20 @@ public:
                 line_[static_cast<size_t>(ch)][static_cast<size_t>(pos_)] = in + feedback_ * y;
                 d[i] = y;
             }
-            pos_ = (pos_ + 1) % kDelay;
+            pos_ = (pos_ + 1) % delay_;
         }
         ++calls_;
+        inProcess_.fetch_sub(1, std::memory_order_acq_rel);
     }
+    void setHoldInProcessBlock(const bool hold) noexcept
+    {
+        hold_.store(hold ? 1 : 0, std::memory_order_release);
+    }
+    [[nodiscard]] bool isHeldInProcessBlock() const noexcept
+    {
+        return held_.load(std::memory_order_acquire) != 0;
+    }
+    [[nodiscard]] int overlaps() const noexcept { return overlaps_.load(std::memory_order_acquire); }
     juce::AudioProcessorEditor* createEditor() override { return nullptr; }
     bool hasEditor() const override { return false; }
     bool acceptsMidi() const override { return false; }
@@ -532,8 +567,13 @@ public:
 
 private:
     float feedback_ = 0.0f;
+    int delay_ = kDelay;
     int pos_ = 0;
-    std::array<std::array<float, kDelay>, 2> line_{};
+    std::vector<std::vector<float>> line_;
+    std::atomic<int> hold_{ 0 };
+    std::atomic<int> held_{ 0 };
+    std::atomic<int> inProcess_{ 0 };
+    std::atomic<int> overlaps_{ 0 };
 };
 
 class StubDevice final : public juce::AudioIODevice
@@ -1008,16 +1048,28 @@ void testInsertTailAfterEvent()
     }
     expectRange(played.data(), want, kN, "direct playback tail across the event boundary");
     expectNear(playedR[64], played[64], 1.0e-4f, "tail uses the same factor on both channels");
+    const std::int64_t playheadAtStop = direct.transport.readPlayheadSamplesForUi();
     direct.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    const std::vector<float> stoppedWant = referenceDelay(kN + kBlock, kFb, 0.0f, 0, 0, 64, 1.0f, 256, 64, 0.2f);
     std::vector<float> heldL(static_cast<size_t>(kBlock));
     std::vector<float> heldR(static_cast<size_t>(kBlock));
     direct.renderBlock(heldL.data(), heldR.data());
-    float heldPeak = 0.0f;
+    expect(direct.transport.readPlayheadSamplesForUi() == playheadAtStop,
+           "playhead stays still while the stopped tail runs");
+    expectRange(heldL.data(), std::vector<float>(stoppedWant.begin() + kN, stoppedWant.begin() + kN + kBlock),
+                kBlock, "stop keeps the delay tail moving");
+    expectNear(heldR[0], heldL[0], 1.0e-4f, "stopped tail is on both channels");
+    float frozen = 0.0f;
+    for (int i = kN - kBlock; i < kN; ++i)
+    {
+        frozen = std::max(frozen, std::fabs(want[static_cast<size_t>(i)]));
+    }
+    float continued = 0.0f;
     for (float s : heldL)
     {
-        heldPeak = std::max(heldPeak, std::fabs(s));
+        continued = std::max(continued, std::fabs(s));
     }
-    expect(heldPeak == 0.0f, "stop does not run the audio-event chain");
+    expect(continued > 0.01f && continued < frozen, "stopped tail decays instead of repeating the frozen block");
 
     Engine strip(0);
     strip.session.addTrack();
@@ -1155,6 +1207,515 @@ void testInsertTailAfterEvent()
     expectNear(shapedL[80], during, 1.0e-4f, "fade is not applied a second time to the chain output");
 }
 
+void renderOne(Engine& engine, float* left, float* right)
+{
+    engine.renderBlock(left, right);
+}
+
+void testStopPauseCycleAndReadAhead()
+{
+    std::printf("\n-- stop, pause, cycle, read-ahead tail --\n");
+    constexpr float kFb = 0.5f;
+
+    Engine gap(0);
+    gap.session.addTrack();
+    const TrackId gt = gap.session.getActiveTrackId();
+    expect(gap.session.addPlacedClipFromExistingMaterial(makeDcClip(64, 1.0f, 1.0f, "impulse"), 0, 0, 64, gt).wasOk(),
+           "impulse event");
+    expect(gap.pluginHost.installInsertInstanceForTests(gt, InsertStage::Pre,
+                                                        std::make_unique<DelayTailProbe>(0.0f, 256)),
+           "install long delay");
+    gap.start();
+    gap.transport.requestSeek(0);
+    gap.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    std::vector<float> block(static_cast<size_t>(kBlock));
+    std::vector<float> blockR(static_cast<size_t>(kBlock));
+    renderOne(gap, block.data(), blockR.data());
+    float earlyPeak = 0.0f;
+    for (float s : block)
+    {
+        earlyPeak = std::max(earlyPeak, std::fabs(s));
+    }
+    expect(earlyPeak < 0.05f, "echo has not arrived during the first block");
+    const std::int64_t heldAt = gap.transport.readPlayheadSamplesForUi();
+    gap.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    renderOne(gap, block.data(), blockR.data());
+    float silentPeak = 0.0f;
+    for (float s : block)
+    {
+        silentPeak = std::max(silentPeak, std::fabs(s));
+    }
+    expect(silentPeak < 0.05f, "stopped transport still waits out the delay");
+    expect(gap.transport.readPlayheadSamplesForUi() == heldAt, "playhead stays during the silent gap");
+    renderOne(gap, block.data(), blockR.data());
+    float echoPeak = 0.0f;
+    for (int i = 0; i < 64; ++i)
+    {
+        echoPeak = std::max(echoPeak, std::fabs(block[static_cast<size_t>(i)]));
+    }
+    expect(echoPeak > 0.9f, "the delayed impulse arrives on time after stop");
+
+    Engine paused(0);
+    paused.session.addTrack();
+    const TrackId pt = paused.session.getActiveTrackId();
+    expect(paused.session.addPlacedClipFromExistingMaterial(makeDcClip(64, 1.0f, 1.0f, "p"), 0, 0, 64, pt).wasOk(),
+           "pause event");
+    installDelay(paused.pluginHost, pt, kFb);
+    paused.start();
+    paused.transport.requestSeek(0);
+    paused.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    renderOne(paused, block.data(), blockR.data());
+    const float frozenSample = block[64];
+    paused.transport.requestPlaybackIntent(PlaybackIntent::Paused);
+    const std::int64_t pausedAt = paused.transport.readPlayheadSamplesForUi();
+    renderOne(paused, block.data(), blockR.data());
+    expect(paused.transport.readPlayheadSamplesForUi() == pausedAt, "pause does not move the playhead");
+    expect(std::fabs(block[0] - 0.5f) < 1.0e-3f, "pause continues the delay instead of freezing it");
+    expect(std::fabs(block[0] - frozenSample) > 0.2f, "paused output is not a repeat of the last playing block");
+    for (int i = 0; i < 16; ++i)
+    {
+        renderOne(paused, block.data(), blockR.data());
+    }
+    paused.transport.requestSeek(0);
+    paused.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    renderOne(paused, block.data(), blockR.data());
+    float revived = 0.0f;
+    for (int i = 0; i < 64; ++i)
+    {
+        revived = std::max(revived, std::fabs(block[static_cast<size_t>(i)]));
+    }
+    expect(revived < 0.05f, "play after the wait does not revive the pre-pause delay state");
+
+    Engine cyc(0);
+    cyc.session.addTrack();
+    const TrackId ct = cyc.session.getActiveTrackId();
+    expect(cyc.session.addPlacedClipFromExistingMaterial(makeDcClip(64, 1.0f, 1.0f, "c"), 0, 0, 64, ct).wasOk(),
+           "cycle event");
+    installDelay(cyc.pluginHost, ct, kFb);
+    cyc.start();
+    cyc.session.setLeftLocatorAtSample(0);
+    cyc.session.setRightLocatorAtSample(256);
+    cyc.transport.requestCycleEnabled(true);
+    cyc.transport.requestSeek(0);
+    cyc.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    std::vector<float> first(static_cast<size_t>(kBlock));
+    std::vector<float> second(static_cast<size_t>(kBlock));
+    std::vector<float> third(static_cast<size_t>(kBlock));
+    renderOne(cyc, first.data(), blockR.data());
+    renderOne(cyc, second.data(), blockR.data());
+    renderOne(cyc, third.data(), blockR.data());
+    expect(std::fabs(first[0]) < 0.05f, "cycle starts with an empty delay");
+    expect(std::fabs(first[64] - 1.0f) < 1.0e-3f, "cycle event reaches the delay");
+    expect(std::fabs(second[0] - 0.5f) < 1.0e-3f, "the tail continues up to the locator");
+    expect(std::fabs(third[0] - 0.125f) < 1.0e-3f, "cycle wrap keeps the decayed tail");
+    expect(std::fabs(third[0]) > 0.05f, "cycle wrap does not reset the delay");
+    float cyclePeak = 0.0f;
+    for (float s : second)
+    {
+        cyclePeak = std::max(cyclePeak, std::fabs(s));
+    }
+    expect(cyclePeak < 1.6f, "cycle does not stack the event on itself");
+
+    Engine ahead(2);
+    ahead.session.addTrack();
+    const TrackId at = ahead.session.getActiveTrackId();
+    expect(ahead.session.addPlacedClipFromExistingMaterial(makeDcClip(64, 1.0f, 1.0f, "near"), 0, 0, 64, at).wasOk(),
+           "read-ahead near event");
+    expect(ahead.session.addPlacedClipFromExistingMaterial(makeDcClip(64, 1.0f, 1.0f, "far"), 200000, 0, 64, at).wasOk(),
+           "read-ahead far event");
+    installDelay(ahead.pluginHost, at, kFb);
+    ahead.start();
+    ahead.transport.requestSeek(0);
+    ahead.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    ahead.pump();
+    renderOne(ahead, block.data(), blockR.data());
+    const std::int64_t aheadAt = ahead.transport.readPlayheadSamplesForUi();
+    ahead.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    renderOne(ahead, block.data(), blockR.data());
+    float stoppedPeak = 0.0f;
+    for (float s : block)
+    {
+        stoppedPeak = std::max(stoppedPeak, std::fabs(s));
+    }
+    expect(ahead.transport.readPlayheadSamplesForUi() == aheadAt, "read-ahead stop leaves the playhead");
+    expect(stoppedPeak > 0.2f && stoppedPeak < 1.2f, "read-ahead stop rings the tail and does not play the far event");
+    const float firstStopped = stoppedPeak;
+    renderOne(ahead, block.data(), blockR.data());
+    float laterPeak = 0.0f;
+    for (float s : block)
+    {
+        laterPeak = std::max(laterPeak, std::fabs(s));
+    }
+    expect(laterPeak < firstStopped, "read-ahead tail keeps decaying after the queue is dropped");
+
+    Engine sum(0);
+    sum.session.addTrack();
+    const TrackId st = sum.session.getActiveTrackId();
+    expect(sum.session.addPlacedClipFromExistingMaterial(makeDcClip(64, 1.0f, 1.0f, "s"), 0, 0, 64, st).wasOk(),
+           "summing event");
+    installDelay(sum.pluginHost, st, kFb);
+    sum.start();
+    sum.transport.requestSeek(0);
+    sum.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    renderOne(sum, block.data(), blockR.data());
+    sum.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    const auto sumSnap = sum.session.loadSessionSnapshotForAudioThread();
+    juce::AudioBuffer<float> sumBuf(2, kBlock);
+    sumBuf.clear();
+    float* sumPtrs[2] = { sumBuf.getWritePointer(0), sumBuf.getWritePointer(1) };
+    playback_mix_helpers::renderAudioTracksClipSummingForSegment(
+        *sumSnap, 128, kBlock, 0, 2, sumPtrs, &sum.pluginHost, kInvalidTrackId,
+        sumSnap->getArrangementExtentSamples(), sumSnap->findTrackIndexById(st), nullptr, nullptr, nullptr, true);
+    expect(std::fabs(sumPtrs[0][0] - 0.5f) < 1.0e-3f, "summing silence feed continues the same delay");
+}
+
+class ReleaseProbe final : public juce::AudioPluginInstance
+{
+public:
+    static constexpr int kRelease = 64;
+
+    ReleaseProbe()
+        : juce::AudioPluginInstance(BusesProperties().withOutput("Out", juce::AudioChannelSet::stereo(), true))
+    {
+    }
+    void fillInPluginDescription(juce::PluginDescription& d) const override
+    {
+        d.name = "ReleaseProbe";
+        d.pluginFormatName = "Test";
+        d.isInstrument = true;
+    }
+    const juce::String getName() const override { return "ReleaseProbe"; }
+    void prepareToPlay(double, int) override {}
+    void releaseResources() override {}
+    void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
+    {
+        const int n = buffer.getNumSamples();
+        float* left = buffer.getNumChannels() > 0 ? buffer.getWritePointer(0) : nullptr;
+        float* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr;
+        auto midiIt = midi.begin();
+        const auto midiEnd = midi.end();
+        for (int i = 0; i < n; ++i)
+        {
+            while (midiIt != midiEnd && (*midiIt).samplePosition <= i)
+            {
+                const juce::MidiMessage m = (*midiIt++).getMessage();
+                if (m.isAllNotesOff() || m.isAllSoundOff())
+                {
+                    sawAllNotesOff_ = true;
+                }
+                else if (m.isNoteOn())
+                {
+                    const int note = juce::jlimit(0, 127, m.getNoteNumber());
+                    peak_[static_cast<size_t>(note)] = m.getFloatVelocity();
+                    releaseLeft_[static_cast<size_t>(note)] = 0;
+                }
+                else if (m.isNoteOff())
+                {
+                    const int note = juce::jlimit(0, 127, m.getNoteNumber());
+                    if (peak_[static_cast<size_t>(note)] > 0.0f && releaseLeft_[static_cast<size_t>(note)] == 0)
+                    {
+                        releaseLeft_[static_cast<size_t>(note)] = kRelease;
+                        ++noteOffs_;
+                    }
+                }
+            }
+            float s = independent_;
+            for (int note = 0; note < 128; ++note)
+            {
+                if (releaseLeft_[static_cast<size_t>(note)] > 0)
+                {
+                    s += peak_[static_cast<size_t>(note)]
+                         * ((float)releaseLeft_[static_cast<size_t>(note)] / (float)kRelease);
+                    if (--releaseLeft_[static_cast<size_t>(note)] == 0)
+                    {
+                        peak_[static_cast<size_t>(note)] = 0.0f;
+                    }
+                }
+                else
+                {
+                    s += peak_[static_cast<size_t>(note)];
+                }
+            }
+            if (left != nullptr)
+            {
+                left[i] = s;
+            }
+            if (right != nullptr)
+            {
+                right[i] = s;
+            }
+            if (i == 0)
+            {
+                sample0_ = s;
+            }
+            if (i == 96)
+            {
+                sample96_ = s;
+            }
+        }
+        ++blocks_;
+    }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    bool acceptsMidi() const override { return true; }
+    bool producesMidi() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.0; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
+    void getStateInformation(juce::MemoryBlock&) override {}
+    void setStateInformation(const void*, int) override {}
+
+    void holdIndependent(const float level) noexcept { independent_ = level; }
+    [[nodiscard]] bool sawAllNotesOff() const noexcept { return sawAllNotesOff_; }
+    [[nodiscard]] int noteOffs() const noexcept { return noteOffs_; }
+    [[nodiscard]] float sample0() const noexcept { return sample0_; }
+    [[nodiscard]] float sample96() const noexcept { return sample96_; }
+    [[nodiscard]] int blocks() const noexcept { return blocks_; }
+
+private:
+    std::array<float, 128> peak_{};
+    std::array<int, 128> releaseLeft_{};
+    float independent_ = 0.0f;
+    float sample0_ = 0.0f;
+    float sample96_ = 0.0f;
+    bool sawAllNotesOff_ = false;
+    int noteOffs_ = 0;
+    int blocks_ = 0;
+};
+
+void testInstrumentWindowAndRelease()
+{
+    std::printf("\n-- instrument window, release, second source --\n");
+    Engine eng(0);
+    const auto tid = eng.session.appendExperimentalInstrumentShellTrack("Probe");
+    expect(tid.has_value(), "instrument track");
+    if (!tid.has_value())
+    {
+        return;
+    }
+    InstrumentTrackController ctl(nullptr);
+    ctl.setSession(&eng.session);
+    expect(ctl.bootstrapGrooveAgentShellForSessionTrack(*tid), "instrument shell");
+    TimelineMidiNote held;
+    held.midiNote = 60;
+    held.velocity = 127;
+    held.channel = 1;
+    held.startTick = 0;
+    held.durationTicks = 9600;
+    TimelineMidiNote later = held;
+    later.midiNote = 64;
+    later.startTick = 960;
+    const InstrumentMidiClipId id = ctl.appendImportedTimelineMidiClipAtSamples({ held, later }, 0, "Take");
+    expect(id != 0, "midi clip");
+    expect(ctl.applyInstrumentMidiClipVisibleTrim(id, 0, 64), "right trim");
+    const auto trimmed = ctl.loadRenderSnapshotForAudioThread();
+    expect(trimmed != nullptr && trimmed->notes.size() == 1, "only the note that starts inside the window");
+    if (trimmed != nullptr && !trimmed->notes.empty())
+    {
+        expect(trimmed->notes[0].absSample == 0, "note-on at the window start");
+        expect(trimmed->notes[0].noteOffAbsSample == 64, "note-off at the trimmed end");
+        expect(trimmed->notes[0].midiNote == 60, "the later note-on was not scheduled");
+    }
+    expect(ctl.applyInstrumentMidiClipVisibleTrim(id, 100, 500), "left trim");
+    const auto dropped = ctl.loadRenderSnapshotForAudioThread();
+    int outside = 0;
+    if (dropped != nullptr)
+    {
+        for (const auto& n : dropped->notes)
+        {
+            if (n.absSample < 100 || n.absSample >= 600)
+            {
+                ++outside;
+            }
+        }
+    }
+    expect(outside == 0, "left trim emits no note-on outside the window");
+
+    InstrumentTrackController sustainOnly(nullptr);
+    sustainOnly.setSession(&eng.session);
+    const auto tid2 = eng.session.appendExperimentalInstrumentShellTrack("Sustain");
+    expect(tid2.has_value() && sustainOnly.bootstrapGrooveAgentShellForSessionTrack(*tid2), "sustain shell");
+    if (tid2.has_value())
+    {
+        TimelineMidiNote pedalNote = held;
+        pedalNote.durationTicks = 9600;
+        const InstrumentMidiClipId sid = sustainOnly.appendImportedTimelineMidiClipAtSamples({ pedalNote }, 0, "Pedal");
+        if (InstrumentMidiClip* clip = sustainOnly.getClipById(sid))
+        {
+            MidiCcPoint down;
+            down.startTick = 0;
+            down.controller = 64;
+            down.value = 127;
+            down.channel = 1;
+            down.interpolationToNext = MidiCcInterpolation::linear;
+            clip->pattern.ccPoints.push_back(down);
+            sustainOnly.notifyClipPatternMutated(sid);
+        }
+        expect(sustainOnly.applyInstrumentMidiClipVisibleTrim(sid, 0, 400), "trim under a held pedal");
+        const auto pedalSnap = sustainOnly.loadRenderSnapshotForAudioThread();
+        bool pedalUp = false;
+        bool pedalDown = false;
+        if (pedalSnap != nullptr)
+        {
+            for (const auto& stream : pedalSnap->ccStreams)
+            {
+                if ((int)stream.controller != 64)
+                {
+                    continue;
+                }
+                for (const auto& ev : stream.events)
+                {
+                    if (ev.value > 0)
+                    {
+                        pedalDown = true;
+                    }
+                    if (ev.absSample == 400 && ev.value == 0)
+                    {
+                        pedalUp = true;
+                    }
+                }
+            }
+            for (const auto& n : pedalSnap->notes)
+            {
+                expect(n.absSample >= 0 && n.absSample < 400 && n.noteOffAbsSample <= 400,
+                       "pedal clip stays inside its window");
+            }
+        }
+        expect(pedalDown && pedalUp, "a held pedal is released at the clip's own end");
+    }
+
+    expect(ctl.applyInstrumentMidiClipVisibleTrim(id, 0, 64), "restore the sounding window");
+    auto host = std::make_unique<ExperimentalInstrumentHost>();
+    ExperimentalInstrumentHost* const hostPtr = host.get();
+    eng.playback.setExperimentalInstrumentDeviceLifecycleHooks(
+        [hostPtr](const double sr, const int bs) { hostPtr->prepareForDevice(sr, bs); },
+        [hostPtr] { hostPtr->releaseResources(); },
+        {});
+    eng.session.setArrangementExtentSamples(static_cast<std::int64_t>(kRate) * 30);
+    eng.playback.setInstrumentRenderSerialForDiagnostics(true);
+    eng.playback.rebuildRoutingPlanFromSession();
+    eng.playback.audioDeviceAboutToStart(&eng.device);
+    auto probeOwner = std::make_unique<ReleaseProbe>();
+    ReleaseProbe* probe = probeOwner.get();
+    expect(host->installInstrumentInstanceForTests(std::move(probeOwner)), "install release probe");
+    ExperimentalInstrumentPlaybackSnapshot published;
+    published.entries.push_back(ExperimentalInstrumentPlaybackEntry{ *tid, host.get(), &ctl, nullptr });
+    InstrumentTrackController other(nullptr);
+    other.setSession(&eng.session);
+    const auto otherTid = eng.session.appendExperimentalInstrumentShellTrack("Other");
+    if (otherTid.has_value())
+    {
+        expect(other.bootstrapGrooveAgentShellForSessionTrack(*otherTid), "other midi shell");
+        published.midiSources.push_back(ExperimentalMidiSourcePlaybackEntry{ *otherTid, &other });
+    }
+    eng.playback.publishExperimentalInstrumentPlaybackSnapshot(
+        std::make_shared<const ExperimentalInstrumentPlaybackSnapshot>(std::move(published)));
+    eng.playback.rebuildRoutingPlanFromSession();
+    expect(eng.pluginHost.installInsertInstanceForTests(*tid, InsertStage::Post,
+                                                        std::make_unique<DelayTailProbe>(0.5f)),
+           "instrument delay");
+    eng.transport.requestSeek(0);
+    eng.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    std::vector<float> played(static_cast<size_t>(kBlock));
+    std::vector<float> playedR(static_cast<size_t>(kBlock));
+    renderOne(eng, played.data(), playedR.data());
+    expect(probe->sample0() > 0.9f, "the note sounds inside the window");
+    expect(probe->sample96() > 0.05f && probe->sample96() < probe->sample0(),
+           "release continues after the note-off at the window end");
+    expect(probe->noteOffs() >= 1, "the crossing note received a note-off");
+    expect(std::fabs(played[96]) > 0.5f, "the instrument insert delay is heard on the device");
+    probe->holdIndependent(0.2f);
+    const std::int64_t at = eng.transport.readPlayheadSamplesForUi();
+    const int blocksAfterPlay = probe->blocks();
+    eng.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    renderOne(eng, played.data(), playedR.data());
+    expect(eng.transport.readPlayheadSamplesForUi() == at, "instrument stop holds the playhead");
+    expect(!probe->sawAllNotesOff(), "stop does not send All Notes Off");
+    expect(probe->blocks() > blocksAfterPlay, "the instrument keeps processing while stopped");
+    expect(probe->sample0() >= 0.2f, "an independent note is not cleared by stop");
+    float stoppedPeak = 0.0f;
+    for (float s : played)
+    {
+        stoppedPeak = std::max(stoppedPeak, std::fabs(s));
+    }
+    expect(stoppedPeak > 0.05f, "the instrument insert tail continues after stop");
+}
+
+void testReadAheadHandoverWhileWorkerHeld()
+{
+    std::printf("\n-- read-ahead handover while processBlock is in flight --\n");
+    readahead::setConfiguredReadAheadDepth(2);
+    Engine eng(0);
+    readahead::setConfiguredReadAheadDepth(0);
+    readahead::ReadAheadRenderer* const ra = eng.playback.experimentalReadAhead();
+    expect(ra != nullptr, "thread-mode read-ahead");
+    if (ra == nullptr)
+    {
+        return;
+    }
+    eng.session.addTrack();
+    const TrackId tid = eng.session.getActiveTrackId();
+    expect(eng.session.addPlacedClipFromExistingMaterial(makeDcClip(48000, 1.0f, 1.0f, "long"), 0, 0, 48000, tid).wasOk(),
+           "long event");
+    auto probeOwner = std::make_unique<DelayTailProbe>(0.0f);
+    DelayTailProbe* probe = probeOwner.get();
+    expect(eng.pluginHost.installInsertInstanceForTests(tid, InsertStage::Pre, std::move(probeOwner)),
+           "held delay");
+    eng.start();
+    eng.transport.requestSeek(0);
+    eng.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    std::vector<float> block(static_cast<size_t>(kBlock));
+    std::vector<float> blockR(static_cast<size_t>(kBlock));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (ra->countersSnapshot().adopted < 1 && std::chrono::steady_clock::now() < deadline)
+    {
+        renderOne(eng, block.data(), blockR.data());
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    expect(ra->countersSnapshot().adopted >= 1, "a row was adopted before the hold");
+    probe->setHoldInProcessBlock(true);
+    renderOne(eng, block.data(), blockR.data());
+    const auto heldDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!probe->isHeldInProcessBlock() && std::chrono::steady_clock::now() < heldDeadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    expect(probe->isHeldInProcessBlock(), "worker is inside processBlock");
+    eng.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    for (int i = 0; i < 4; ++i)
+    {
+        renderOne(eng, block.data(), blockR.data());
+    }
+    expect(probe->overlaps() == 0, "stop does not process the instance the worker still holds");
+    probe->setHoldInProcessBlock(false);
+    const auto releaseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (probe->isHeldInProcessBlock() && std::chrono::steady_clock::now() < releaseDeadline)
+    {
+        std::this_thread::yield();
+    }
+    const int callsAfterRelease = probe->calls_;
+    float peaks[6] = {};
+    for (int i = 0; i < 6; ++i)
+    {
+        renderOne(eng, block.data(), blockR.data());
+        for (float s : block)
+        {
+            peaks[i] = std::max(peaks[i], std::fabs(s));
+        }
+    }
+    expect(probe->overlaps() == 0, "the callback processes the instance only after the worker left");
+    expect(probe->calls_ > callsAfterRelease, "the stopped callback runs the chain after the handover");
+    float early = 0.0f;
+    for (int i = 0; i < 5; ++i)
+    {
+        early = std::max(early, peaks[i]);
+    }
+    expect(early > 0.5f && peaks[5] < 0.05f, "silence after the handover empties the one-shot delay");
+}
+
 } // namespace
 
 int main()
@@ -1166,6 +1727,9 @@ int main()
     testAudioPaths();
     testLaneHandles();
     testInsertTailAfterEvent();
+    testStopPauseCycleAndReadAhead();
+    testInstrumentWindowAndRelease();
+    testReadAheadHandoverWhileWorkerHeld();
     if (gFailures == 0)
     {
         std::printf("[OK] event envelope\n");

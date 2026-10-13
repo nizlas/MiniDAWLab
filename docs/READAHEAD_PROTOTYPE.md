@@ -17,9 +17,9 @@ checkbox changes the next start only. Parallel strip processing does not read th
 This is DAL's own pre-processing of eligible audio tracks; it is **not** an integration with
 Steinberg's ASIO-Guard.
 
-This is the v2 model. v1 (the first prototype commit) treated every transport pause as a
-discontinuity and gated cycle off entirely; v2 replaces those with a coherent stream model
-that supports pause/resume without re-feeding, cycle playback, and a defined save path.
+This is the v2 model, with one later change: pause and stop hand the instance back to the
+callback so its tail can decay (§3). v1 treated every pause as a discontinuity and gated
+cycle off; v2 kept cycle and a defined save path. The pause queue is no longer resumed.
 The implementation lives in `src/engine/ReadAheadRenderer.{h,cpp}` plus narrow integration
 points in `PlaybackEngine`, `PluginInsertHost`, `ProjectIoCoordinator` and `Main`.
 
@@ -98,11 +98,18 @@ moving positions backwards.
 
 ## 3. Transport transitions
 
-**Pause / resume (Space):** *not* a discontinuity. The playhead keeps its position, rows
-stay owned, the queue stays intact (the worker may keep filling it to the bounded depth).
-Resume at the same position continues consuming from the queue: the instance stream is
-contiguous and exactly-once across the pause — **no re-feed, no discarded state** (v1
-discarded at every stop and re-fed ≤ depth blocks on replay; that artifact is gone).
+**Pause / resume (Space) and Stop:** a handover, not a frozen queue. The playhead stays
+where the transport left it. Owned rows are discarded: `stopProduce` is set, the ring is
+purged, and the row returns to live when the worker is not inside `processBlock`. The
+callback then feeds silence through that same instance so the tail decays in real time
+(`isPlaying` stays false). Resume adopts again from that decayed instance. The pre-pause
+queue is not consumed and not reused — the instance has moved on. A worker still inside
+`processBlock` leaves the row `Abandoning` (silent, never live-rendered at the same time).
+The release is typically under one block and is bounded only by that `processBlock`.
+Anything the worker already rendered into the instance (at most the in-flight segment,
+plus any lead already processed before the handover) is not rewound; the queued PCM of
+that lead is not played again. v1's "discard and re-feed the same frozen state" is not
+what this handover does.
 
 **Stop button (= stop + seek 0), seek, locator/cycle-geometry edits, playback-offset
 changes:** deliberate discontinuities. Queued outputs are discarded (counted), rows return
@@ -128,10 +135,9 @@ the plugin's `processBlock` duration — **no fixed block count is guaranteed** 
 consume-absence check (a row that is owned but was never offered a consume this block left
 the routing plan or the rendered path) release ownership within one block.
 
-**Edits while paused** (fader, clip, plugin parameters on an owned row): the queue already
-holds ≤ depth rendered segments with pre-edit values, so after resume the edit is audible at
-most depth segments late — the same explicit late-apply window as during playback (§6). This
-is a stated experimental decision, not a hidden behavior.
+**Edits while paused** (fader, clip, plugin parameters): the row is no longer owned, so the
+edit applies on the next callback through the live strip. There is no paused queue of
+pre-edit segments to drain on resume.
 
 ## 4. Cycle
 
@@ -295,11 +301,10 @@ Window mechanics per transport state:
 * **During playback:** adoption is gated off and every owned row takes a gapless draining
   release as consumption proceeds (bounded message-thread wait); then the acknowledged worker
   pause. The drain is inaudible — a successful window changes nothing audible.
-* **While paused/stopped:** nothing consumes, so no drain is attempted (a Playing → Paused
-  transition *during* the wait resolves to this branch instead of stalling); the worker pause
-  is still required and acknowledged. The captured state corresponds to the end of the
-  instance's contiguous fed stream, ≤ depth segments past the paused playhead — a defined,
-  bounded, documented capture point.
+* **While paused/stopped:** the callback has taken the instance back (or it is `Abandoning`
+  until the in-flight `processBlock` returns) and is feeding silence, so the captured DSP
+  state is that live decay, not a lead of queued future source. Nothing from the discarded
+  ring is drained. The worker pause is still required and acknowledged before state is read.
 * Unavailable-plugin placeholders re-emit their saved blobs byte-for-byte, unchanged.
 
 **Failure contract (the window can fail):** when the drain cannot complete (e.g. the

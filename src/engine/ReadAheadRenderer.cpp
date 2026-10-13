@@ -362,9 +362,9 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
     const bool holdActive = captureHold_.load(std::memory_order_acquire) > 0;
 
     // Geometry/offset edits while owned are deliberate discontinuities (model doc §3/§4): the
-    // queue was predicted under the old basis. Pause is NOT one — position continuity is only
-    // checked while playing, against the prediction from the last playing block (which a pause
-    // leaves untouched, so resume-at-the-same-position continues the queue).
+    // queue was predicted under the old basis. Pause and stop are a handover, not a frozen
+    // queue: the callback keeps the instance so its tail can decay, so a queued future segment
+    // must not be consumed or resumed.
     const bool geometryChanged = anyOwned
                                  && (info.cycleActive != lastCycleActive_
                                      || (info.cycleActive
@@ -382,7 +382,11 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
                                                 info.arrangementEnd);
         haveExpectedNextT0_ = true;
     }
-    // (not playing: keep the continuation basis — a pause must resume against it)
+    else
+    {
+        // Resume adopts from the decayed instance. The pre-pause queue is not a continuation.
+        haveExpectedNextT0_ = false;
+    }
     lastPlaybackShift_ = info.playbackShift;
     lastCycleActive_ = info.cycleActive;
     lastLocL_ = info.locLeft;
@@ -393,6 +397,27 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
         const auto state = (RowState)row.state.load(std::memory_order_relaxed);
         if (state == RowState::Live)
         {
+            continue;
+        }
+        if (!info.playing)
+        {
+            // Hand the instance back. If the worker is inside processBlock the row stays
+            // Abandoning (silent, not live-rendered) until that call returns. The ring is
+            // purged so queued future source is not played and not reused after the tail
+            // has moved on.
+            audioThread_discardResetRow(row);
+            const auto handed = (RowState)row.state.load(std::memory_order_relaxed);
+            if (handed == RowState::Abandoning)
+            {
+                const bool workerDone = row.workerAckedStop.load(std::memory_order_acquire)
+                                        || row.busy.load(std::memory_order_seq_cst) == 0;
+                if (workerDone)
+                {
+                    audioThread_purgeRing(row);
+                    row.workerActive.store(false, std::memory_order_release);
+                    row.state.store((int)RowState::Live, std::memory_order_release);
+                }
+            }
             continue;
         }
         if (discontinuity)
@@ -476,7 +501,7 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
                                  < (std::int64_t)(depth_ + 2) * (std::int64_t)juce::jmax(1, info.numSamples);
             const bool armed = blockArmedTrackId_ != kInvalidTrackId && row.trackId == blockArmedTrackId_;
             // Gapless drains: the queued audio is still correct; stop producing and play it out.
-            // (While paused nothing consumes, so the drain simply completes after resume.)
+            // Pause and stop never reach here — they hand the row back before this check.
             const bool wantDrain = (!info.cycleActive && nearEnd) || holdActive || armed
                                    || row.workerSelfStopped.load(std::memory_order_acquire);
             if (wantDrain)

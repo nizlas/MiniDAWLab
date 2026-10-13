@@ -708,7 +708,10 @@ public:
                                                      bool soloSuppressNewEvents = false,
                                                      bool soloForceAudibleOverridesMute = false) noexcept;
 
-    /// [Audio thread] Stop/flush: pending transport offs + allNotesOff(1).
+    /// [Audio thread] Stop/flush: this controller's pending note-offs, then CC64=0 on channels
+    /// where it last sent the pedal down. No All Notes Off and no All Sound Off — a live note
+    /// on the same instrument stays. CC64 is channel-wide, so that pedal-up also lifts sustain
+    /// from a live note that was already released and held only by the pedal.
     void audioThread_flushTransportMidi(ExperimentalInstrumentHost& host,
                                         int offsetInDevice,
                                         int deviceBlockNumSamples) noexcept;
@@ -739,6 +742,7 @@ public:
     {
         rtPendingOffCount_ = 0;
         rtLastSegEndTimeline_ = -1;
+        rtTransportSustainMask_ = 0;
     }
 
 private:
@@ -865,6 +869,12 @@ private:
     /// lose the resend-suppression (still correct, just less deduplication).
     static constexpr int kMaxRtCcStreams = 64;
     std::array<int, (size_t)kMaxRtCcStreams> rtCcLastSentValue_{};
+    /// Bit (channel − 1) where this controller last delivered CC64 above 0. Cleared when it
+    /// sends the pedal up, or when the destination is gone and nothing can be delivered.
+    std::uint16_t rtTransportSustainMask_ = 0;
+    /// [Audio thread] CC64=0 for every channel in `rtTransportSustainMask_`, then clear it.
+    void audioThread_releaseTransportOwnedSustain(ExperimentalInstrumentHost& host,
+                                                  int offsetInDevice) noexcept;
     /// Chases every stream at `timelineSegStart` and emits due in-segment CC events, keeping
     /// per-stream dedup state. Runs before note-ons so a CC at a note's start precedes its
     /// Note On in the block buffer (insertion order is preserved at equal offsets).

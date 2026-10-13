@@ -160,7 +160,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             int onlyTrackIndex = -1,
                                             PreGainRampState* preGainRamp = nullptr,
                                             const LiveInputMonitorSnapshot* monitored = nullptr,
-                                            const SoloMuteView* soloView = nullptr) noexcept;
+                                            const SoloMuteView* soloView = nullptr,
+                                            bool feedSilenceOnly = false) noexcept;
 
 /// [Audio thread] Apply one bus row's channel strip (Pre → fader/mute/off → Post → pan) from stereo
 /// `busScratchStereo` (`[0]`/ `[1]` = L/R) into `outputChannelData` at `destOutFrame0` for `numSamples`.
@@ -214,7 +215,9 @@ struct AudioStripInsertAccess
 /// One audio lane: clips → pre-gain → Pre → fader/mute/off → Post → pan → `stageL`/`stageR`
 /// (accumulated). Pre-gain is ramped via `preGainRamp` when non-null (see `PreGainRampState`).
 /// An interval with no covering clip still runs an active, unmuted chain on zeros, so its tail
-/// reaches the stage. Event gain and fades scale only clip source. Mute and Off do not run it.
+/// reaches the stage. `feedSilenceOnly` does that for the whole call (no clip samples) — the
+/// stopped/paused callback uses it so the tail keeps moving while the playhead stands still.
+/// Event gain and fades scale only clip source. Mute and Off do not run it.
 /// Serial wrapper around `renderAudioTrackPostStripToStereoScratchWithChainAccess` (resolves the
 /// entry and the host's shared buffers itself).
 void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap,
@@ -228,7 +231,8 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               std::int64_t timelineEnd,
                                               int trackIndex,
                                               PreGainRampState* preGainRamp = nullptr,
-                                              const SoloMuteView* soloView = nullptr) noexcept;
+                                              const SoloMuteView* soloView = nullptr,
+                                              bool feedSilenceOnly = false) noexcept;
 
 /// The ONE strip-core body (serial path and render-pool jobs run exactly this code). The caller
 /// owns `access` exclusively while the call runs; the chain's transport context must already be
@@ -245,7 +249,8 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                                                              std::int64_t timelineEnd,
                                                              int trackIndex,
                                                              PreGainRampState* preGainRamp = nullptr,
-                                                             const SoloMuteView* soloView = nullptr) noexcept;
+                                                             const SoloMuteView* soloView = nullptr,
+                                                             bool feedSilenceOnly = false) noexcept;
 
 /// One MONITORED audio lane: selected live device input → pre-gain → Pre → fader/mute/off →
 /// Post → pan → `stageL`/`stageR` (accumulated) — the identical strip order as

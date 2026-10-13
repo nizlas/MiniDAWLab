@@ -636,6 +636,58 @@ void UndoRedoCoordinator::executeUndoableRecordingCommit(const juce::String& lab
     }
 }
 
+std::vector<ProjectFileExperimentalInstrumentTrackV1>
+UndoRedoCoordinator::captureInstrumentMusicalUndoSnapshot() const
+{
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return {};
+    }
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> musical;
+    if (callbacks_.buildSortedInstrumentMusicalUndoSnapshot)
+    {
+        musical = callbacks_.buildSortedInstrumentMusicalUndoSnapshot();
+    }
+    if (callbacks_.stableSortInstrumentMusicalUndoVector)
+    {
+        callbacks_.stableSortInstrumentMusicalUndoVector(musical);
+    }
+    return musical;
+}
+
+void UndoRedoCoordinator::recordAppliedInstrumentMusicalEdit(
+    const juce::String& label,
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> before)
+{
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr || before.empty())
+    {
+        return;
+    }
+    if (callbacks_.stableSortInstrumentMusicalUndoVector)
+    {
+        callbacks_.stableSortInstrumentMusicalUndoVector(before);
+    }
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> after = captureInstrumentMusicalUndoSnapshot();
+    if (after.empty() || experimentalInstrumentTracksMusicalUndoEqual(before, after))
+    {
+        return;
+    }
+    sessionHistory_.record(label,
+                           snap,
+                           snap,
+                           std::nullopt,
+                           InstrumentUndoStepSides{ std::move(before), std::move(after) });
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
+}
+
 void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& label,
                                                        std::function<bool()> mutator)
 {

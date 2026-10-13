@@ -2832,8 +2832,13 @@ void InstrumentTrackController::publishRenderSnapshot()
                                  [](const midi_layer_bake::StreamEvent& a, const midi_layer_bake::StreamEvent& b) {
                                      return a.absSample < b.absSample;
                                  });
-                const std::vector<midi_layer_bake::StreamEvent> audibleEvents
+                std::vector<midi_layer_bake::StreamEvent> audibleEvents
                     = midi_layer_bake::restrictStreamToAudibleSpans(clipEvents, audible[ci], windows[ci].endExclusive);
+                if ((int)key.controller == 64)
+                {
+                    midi_layer_bake::appendSustainReleaseAtOwnAudibleEnd(
+                        audibleEvents, audible[ci], windows[ci].endExclusive);
+                }
                 const int effCh = midi_channel_diag::effectiveChannel(key.channel, forcedMidiChannel);
                 auto& stream = findOrAddStream(key.controller, effCh);
                 for (const auto& e : audibleEvents)
@@ -3006,6 +3011,26 @@ void InstrumentTrackController::publishRenderSnapshot()
                                std::memory_order_release);
 }
 
+void InstrumentTrackController::audioThread_releaseTransportOwnedSustain(ExperimentalInstrumentHost& host,
+                                                                         const int offsetInDevice) noexcept
+{
+    const std::uint16_t mask = rtTransportSustainMask_;
+    rtTransportSustainMask_ = 0;
+    if (mask == 0)
+    {
+        return;
+    }
+    for (int ch = 1; ch <= 16; ++ch)
+    {
+        if ((mask & (std::uint16_t)(1u << (ch - 1))) == 0)
+        {
+            continue;
+        }
+        host.audioThread_addMidiEventForCurrentBlock(offsetInDevice,
+                                                     juce::MidiMessage::controllerEvent(ch, 64, 0));
+    }
+}
+
 void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstrumentHost& host,
                                                                const int offsetInDevice,
                                                                const int deviceBlockNumSamples) noexcept
@@ -3014,6 +3039,7 @@ void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstr
     {
         rtPendingOffCount_ = 0;
         rtLastSegEndTimeline_ = -1;
+        rtTransportSustainMask_ = 0;
         return;
     }
     const int off0 = juce::jlimit(0, deviceBlockNumSamples - 1, offsetInDevice);
@@ -3026,14 +3052,11 @@ void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstr
     }
     rtPendingOffCount_ = 0;
     rtLastSegEndTimeline_ = -1;
-    // Controllers are sticky and have no universal reset value, so no CC reset is sent — but the
-    // delivery memory is dropped so the next start/seek chases the curve fresh.
+    // Pedal-up after the note-offs so a sustain-held transport note actually releases. No All
+    // Notes Off: that would also end a live note on the same instrument.
+    audioThread_releaseTransportOwnedSustain(host, off0);
     rtCcLastSentValue_.fill(-1);
     rtPitchBendLastSentValue_.fill(-1);
-    for (int c = 1; c <= 16; ++c)
-    {
-        host.audioThread_addMidiEventForCurrentBlock(off0, juce::MidiMessage::allNotesOff(c));
-    }
 }
 
 void InstrumentTrackController::audioThread_flushPendingTransportOffsInto(
@@ -3045,6 +3068,7 @@ void InstrumentTrackController::audioThread_flushPendingTransportOffsInto(
     {
         rtPendingOffCount_ = 0;
         rtLastSegEndTimeline_ = -1;
+        rtTransportSustainMask_ = 0;
         return;
     }
     const int off0 = juce::jlimit(0, deviceBlockNumSamples - 1, offsetInDevice);
@@ -3057,9 +3081,8 @@ void InstrumentTrackController::audioThread_flushPendingTransportOffsInto(
     }
     rtPendingOffCount_ = 0;
     rtLastSegEndTimeline_ = -1;
-    // Called on stop and on MIDI-source reroute: the next destination has received none of this
-    // source's controller state, so forget delivery memory and let the next segment chase. No
-    // reset value is sent to the OLD destination (controllers are sticky; none exists generically).
+    // This source's pedal only. Other MIDI sources on the same destination are not all-notes-off'd.
+    audioThread_releaseTransportOwnedSustain(host, off0);
     rtCcLastSentValue_.fill(-1);
     rtPitchBendLastSentValue_.fill(-1);
 }
@@ -3143,6 +3166,18 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
                             c, p.midiNote, (juce::uint8)juce::jlimit(0, 127, p.offVelocity)));
         }
         rtPendingOffCount_ = 0;
+        // Release this source's pedal before the chase restates the NEW position. A note-off
+        // while CC64 is still down would leave the abandoned note hanging across the jump.
+        // Forget the CC64 delivery slots so the chase is not deduped against the pre-release
+        // value (the pedal-up we just sent is not what those slots remember).
+        audioThread_releaseTransportOwnedSustain(host, off0);
+        for (int si = 0; si < (int)snap->ccStreams.size() && si < kMaxRtCcStreams; ++si)
+        {
+            if ((int)snap->ccStreams[(size_t)si].controller == 64)
+            {
+                rtCcLastSentValue_[(size_t)si] = -1;
+            }
+        }
     }
     else
     {
@@ -3274,6 +3309,18 @@ void InstrumentTrackController::audioThread_scheduleCcForSegment(
             if (trackedSlot && rtCcLastSentValue_[(size_t)si] == value)
             {
                 return; // unchanged: repeated blocks / chases never flood the plugin
+            }
+            if ((int)s.controller == 64)
+            {
+                const unsigned bit = 1u << (juce::jlimit(1, 16, (int)s.midiChannel) - 1);
+                if (value > 0)
+                {
+                    rtTransportSustainMask_ = (std::uint16_t)(rtTransportSustainMask_ | bit);
+                }
+                else
+                {
+                    rtTransportSustainMask_ = (std::uint16_t)(rtTransportSustainMask_ & ~bit);
+                }
             }
             host.audioThread_addMidiEventForCurrentBlock(
                 offset,

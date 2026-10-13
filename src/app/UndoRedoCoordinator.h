@@ -118,6 +118,16 @@ public:
                                   std::shared_ptr<const SessionSnapshot> after);
     void executeUndoableInstrumentEdit(const juce::String& label, std::function<bool()> mutator);
 
+    /// Musical snapshot for a gesture that publishes as it goes (MIDI trim drag). Empty when
+    /// the undo callbacks are unwired or a project load owns the session.
+    [[nodiscard]] std::vector<ProjectFileExperimentalInstrumentTrackV1>
+    captureInstrumentMusicalUndoSnapshot() const;
+
+    /// One history step for a musical edit that is already published. `before` is the snapshot
+    /// taken before the gesture; the after side is read now. Same-state is a no-op.
+    void recordAppliedInstrumentMusicalEdit(const juce::String& label,
+                                            std::vector<ProjectFileExperimentalInstrumentTrackV1> before);
+
     /// Solo (spec §7): ONE narrow undo step for a content change of Solo memory `memoryIndex`
     /// (an S click while that memory is active, applied by `mutator`). Captures the memory's
     /// TrackId set before/after around the mutator and records a step that carries ONLY that

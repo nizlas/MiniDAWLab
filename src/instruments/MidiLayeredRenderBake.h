@@ -221,4 +221,33 @@ namespace midi_layer_bake
                          [](const StreamEvent& a, const StreamEvent& b) { return a.absSample < b.absSample; });
         return out;
     }
+
+    /// Sustain (CC64) still down at this clip's own audible end would hold every note on that
+    /// channel past the window: a trim drops the later pedal-up, and a note-off does not release
+    /// while the pedal is down. Append one pedal-up at `clipEndExclusive` when the clip itself
+    /// owns that edge. A clip above that covers the edge is left alone — it owns the channel.
+    inline void appendSustainReleaseAtOwnAudibleEnd(std::vector<StreamEvent>& audibleEvents,
+                                                    const std::vector<SampleSpan>& spans,
+                                                    const std::int64_t clipEndExclusive)
+    {
+        if (spans.empty() || spans.back().endExclusive != clipEndExclusive)
+        {
+            return;
+        }
+        int lastValue = 0;
+        bool any = false;
+        for (const StreamEvent& e : audibleEvents)
+        {
+            if (e.absSample <= clipEndExclusive)
+            {
+                lastValue = e.value;
+                any = true;
+            }
+        }
+        if (!any || lastValue <= 0)
+        {
+            return;
+        }
+        audibleEvents.push_back(StreamEvent{ clipEndExclusive, 0 });
+    }
 } // namespace midi_layer_bake

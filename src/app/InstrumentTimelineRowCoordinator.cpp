@@ -667,6 +667,12 @@ private:
                 trimLaneInitialLengthSamples_ = c->lengthSamples;
                 trimLanePreviewStartSamples_ = c->startSamples;
                 trimLanePreviewLengthSamples_ = c->lengthSamples;
+                trimLanePublishedDuringDrag_ = false;
+                trimLaneUndoBefore_.clear();
+                if (owner_.callbacks_.captureInstrumentMusicalUndoSnapshot)
+                {
+                    trimLaneUndoBefore_ = owner_.callbacks_.captureInstrumentMusicalUndoSnapshot();
+                }
 
                 const bool toggleMultiTrim = e.mods.isShiftDown();
                 if (toggleMultiTrim)
@@ -821,6 +827,17 @@ private:
                 trimLanePreviewLengthSamples_ = ne - trimLaneInitialStartSamples_;
             }
             trimLaneDragging_ = true;
+            if (InstrumentTrackController* const live = activeControllerNullable();
+                live != nullptr && !owner_.trackLanes_.isInstrumentMidiClipMoveBlocked())
+            {
+                // The picture and the sounding window move together. Undo is one step at mouse-up.
+                if (live->applyInstrumentMidiClipVisibleTrim(trimLaneClipId_,
+                                                             trimLanePreviewStartSamples_,
+                                                             trimLanePreviewLengthSamples_))
+                {
+                    trimLanePublishedDuringDrag_ = true;
+                }
+            }
             repaint();
             return;
         }
@@ -916,33 +933,50 @@ private:
                 const InstrumentMidiClipId cid = trimLaneClipId_;
                 const std::int64_t ns = trimLanePreviewStartSamples_;
                 const std::int64_t nl = trimLanePreviewLengthSamples_;
-                auto execute = owner_.callbacks_.executeUndoableInstrumentEdit;
-                if (execute != nullptr)
+                if (trimLanePublishedDuringDrag_)
                 {
-                    execute(juce::String("Trim MIDI clip"), [this, laneTid, cid, ns, nl]() mutable -> bool {
-                        InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
-                        InstrumentTrackController* ctl = rc.getMidiClipControllerForTrack(laneTid);
-                        if (ctl == nullptr || !ctl->hasInstrumentTrack())
-                        {
-                            return false;
-                        }
-                        const bool ok = ctl->applyInstrumentMidiClipVisibleTrim(cid, ns, nl);
-                        if (ok)
-                        {
-                            owner_.trackLanes_.repaint();
-                            owner_.inspector_.refreshFromSession();
-                        }
-                        return ok;
-                    });
-                }
-                else if (ac->applyInstrumentMidiClipVisibleTrim(cid, ns, nl))
-                {
+                    (void)ac->applyInstrumentMidiClipVisibleTrim(cid, ns, nl);
+                    if (owner_.callbacks_.recordAppliedInstrumentMusicalEdit
+                        && !trimLaneUndoBefore_.empty())
+                    {
+                        owner_.callbacks_.recordAppliedInstrumentMusicalEdit(
+                            juce::String("Trim MIDI clip"), std::move(trimLaneUndoBefore_));
+                    }
                     owner_.trackLanes_.repaint();
                     owner_.inspector_.refreshFromSession();
+                }
+                else
+                {
+                    auto execute = owner_.callbacks_.executeUndoableInstrumentEdit;
+                    if (execute != nullptr)
+                    {
+                        execute(juce::String("Trim MIDI clip"), [this, laneTid, cid, ns, nl]() mutable -> bool {
+                            InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
+                            InstrumentTrackController* ctl = rc.getMidiClipControllerForTrack(laneTid);
+                            if (ctl == nullptr || !ctl->hasInstrumentTrack())
+                            {
+                                return false;
+                            }
+                            const bool ok = ctl->applyInstrumentMidiClipVisibleTrim(cid, ns, nl);
+                            if (ok)
+                            {
+                                owner_.trackLanes_.repaint();
+                                owner_.inspector_.refreshFromSession();
+                            }
+                            return ok;
+                        });
+                    }
+                    else if (ac->applyInstrumentMidiClipVisibleTrim(cid, ns, nl))
+                    {
+                        owner_.trackLanes_.repaint();
+                        owner_.inspector_.refreshFromSession();
+                    }
                 }
             }
             trimLaneGestureActive_ = false;
             trimLaneDragging_ = false;
+            trimLanePublishedDuringDrag_ = false;
+            trimLaneUndoBefore_.clear();
         }
 
         if (ac != nullptr && !owner_.trackLanes_.isInstrumentMidiClipMoveBlocked() && dragCouldMove_
@@ -1626,6 +1660,8 @@ private:
     std::int64_t trimLaneInitialLengthSamples_ = 0;
     std::int64_t trimLanePreviewStartSamples_ = 0;
     std::int64_t trimLanePreviewLengthSamples_ = 0;
+    bool trimLanePublishedDuringDrag_ = false;
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> trimLaneUndoBefore_;
 
     std::optional<InstrumentMidiClipId> hoverEventTrimCueId_;
     std::optional<InstrumentMidiClipId> hoverLeftTrimHandleId_;

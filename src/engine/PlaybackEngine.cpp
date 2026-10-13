@@ -1426,8 +1426,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     {
         if (instrumentSnap != nullptr)
         {
-            // MIDI sources first: emit their pending note-offs into their last destination and
-            // clear their queues, then the destination flush below finishes with allNotesOff.
+                // MIDI sources first: their own pending note-offs and transport sustain into the last
+                // destination. The destination flush below releases that lane's own notes and pedal.
+                // Neither sends All Notes Off, so a live note on the instrument is left sounding.
             for (const auto& src : instrumentSnap->midiSources)
             {
                 if (src.midiController == nullptr)
@@ -2569,9 +2570,102 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
     };
 
+    // Stop and pause do not run `renderRun`, so audio-event chains would otherwise freeze.
+    // Feed zeros through the same strip (no clip samples) and fan to sends and buses. The
+    // instrument mix and the master finalize below keep running, with isPlaying still false.
+    // Owned read-ahead rows are skipped: the worker may still be inside processBlock.
+    // Monitored rows stay on the live-input pass (already running on this path).
+    const auto renderStoppedAudioInsertTails = [&]() noexcept
+    {
+        if (playbackIntent == PlaybackIntent::Playing || sessionSnap == nullptr || numSamples <= 0)
+        {
+            return;
+        }
+        setInsertProcessContext(t0);
+        TrackId omitClipPlaybackForTrack = kInvalidTrackId;
+        if (recorder_ != nullptr && recorder_->isRecording())
+        {
+            omitClipPlaybackForTrack = recorder_->getRecordingTrackId();
+        }
+        const bool stageReady = postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
+                                && postStripStageCapacity_ >= numSamples;
+        if (rp != nullptr && !rp->sourceSteps.empty() && stageReady)
+        {
+            for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
+            {
+                if (step.destBusIndex < 0
+                    || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+                {
+                    continue;
+                }
+                if (step.trackIndex < 0 || step.trackIndex >= sessionSnap->getNumTracks())
+                {
+                    continue;
+                }
+                const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
+                if (srcTr.getKind() != TrackKind::Audio)
+                {
+                    continue;
+                }
+                if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
+                {
+                    continue;
+                }
+                if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+                {
+                    continue;
+                }
+                playback_mix_helpers::clearStereoScratch(postStripStagePtrs_[0],
+                                                         postStripStagePtrs_[1],
+                                                         numSamples);
+                playback_mix_helpers::renderAudioTrackPostStripToStereoScratch(
+                    *sessionSnap,
+                    t0,
+                    numSamples,
+                    0,
+                    postStripStagePtrs_[0],
+                    postStripStagePtrs_[1],
+                    pluginHost_,
+                    omitClipPlaybackForTrack,
+                    t0 + static_cast<std::int64_t>(numSamples),
+                    step.trackIndex,
+                    &preGainRampState_,
+                    soloView,
+                    true);
+                audioThread_foldTrackMeterIfMetered(srcTr.getId(),
+                                                    postStripStagePtrs_[0],
+                                                    postStripStagePtrs_[1],
+                                                    numSamples);
+                playback_mix_helpers::fanPostStripStageToDryAndSends(postStripStagePtrs_[0],
+                                                                     postStripStagePtrs_[1],
+                                                                     0,
+                                                                     numSamples,
+                                                                     step.destBusIndex,
+                                                                     step.sends,
+                                                                     *rp);
+            }
+            return;
+        }
+        playback_mix_helpers::renderAudioTracksClipSummingForSegment(*sessionSnap,
+                                                                     t0,
+                                                                     numSamples,
+                                                                     0,
+                                                                     numOutputChannels,
+                                                                     mixSumTarget,
+                                                                     pluginHost_,
+                                                                     omitClipPlaybackForTrack,
+                                                                     t0 + static_cast<std::int64_t>(numSamples),
+                                                                     -1,
+                                                                     &preGainRampState_,
+                                                                     monitorPtr,
+                                                                     soloView,
+                                                                     true);
+    };
+
     const auto mixInstrumentsAndFinalizeMaster = [&]() noexcept
     {
         using audio_profiler::Phase;
+        renderStoppedAudioInsertTails();
         std::int64_t tPhase = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
         dispatchRowJobsAndSumAudioStages();
         if (prof)
