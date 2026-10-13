@@ -97,6 +97,40 @@ void MixerWindow::applyStoredBounds(const juce::Rectangle<int> bounds)
     applyingBounds_ = false;
 }
 
+void MixerWindow::restoreForProject(const bool open,
+                                    const juce::Rectangle<int> bounds,
+                                    const mixer_layout::SectionVisibility& sections,
+                                    const mixer_layout::SectionHeights& heights)
+{
+    stopTimer();
+    applyingBounds_ = true;
+    if (!bounds.isEmpty())
+    {
+        setBounds(clampToDisplays(bounds));
+    }
+    if (content_ != nullptr)
+    {
+        content_->setSectionVisibility(sections);
+        content_->setSectionHeights(heights);
+    }
+    if (open)
+    {
+        if (!isVisible())
+        {
+            setVisible(true);
+        }
+        if (content_ != nullptr)
+        {
+            content_->refreshFromSession();
+        }
+    }
+    else if (isVisible())
+    {
+        setVisible(false);
+    }
+    applyingBounds_ = false;
+}
+
 void MixerWindow::showMixer()
 {
     if (!isVisible())

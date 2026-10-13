@@ -2123,6 +2123,8 @@ public:
                         midiEditorPresenter_->tryRestoreMidiEditorWorkspaceAfterProjectLoad(loaded);
                     }
                 },
+                [this]() -> std::optional<ProjectFileMixerWindowV1> { return captureMixerWindowForProjectSave(); },
+                [this](const ProjectFileV1& loaded) { restoreMixerWindowFromLoadedProject(loaded); },
                 [this] { showSavingProjectToast(); },
                 // P1H onProjectAboutToBeReplaced: obsolete/cancel the OLD project's proxy work
                 // and drop the runtime-only policy timers before runtimes are cleared (§13.3).
@@ -6770,6 +6772,95 @@ private:
             // The picker is anchored at the mixer content once the window exists (set below).
             b.inserts = PluginHostUiBindings::makeInsertSeam(pluginHost_, *vst3PluginPickerCoordinator_, nullptr);
         }
+    }
+
+    /// [Message thread] The mixer mode written by Save, Save As and autosave. Layout edits stay
+    /// out of the dirty flag and out of undo; they are captured only when a project file is written.
+    [[nodiscard]] std::optional<ProjectFileMixerWindowV1> captureMixerWindowForProjectSave()
+    {
+        if (mixerWindow_ == nullptr)
+        {
+            return std::nullopt;
+        }
+        ProjectFileMixerWindowV1 mx;
+        mx.open = mixerWindow_->isVisible();
+        const juce::Rectangle<int> b = mixerWindow_->getBounds();
+        if (b.getWidth() > 0 && b.getHeight() > 0)
+        {
+            mx.hasBounds = true;
+            mx.x = b.getX();
+            mx.y = b.getY();
+            mx.width = b.getWidth();
+            mx.height = b.getHeight();
+        }
+        const mixer_layout::SectionVisibility& vis = mixerWindow_->content().sectionVisibility();
+        const mixer_layout::SectionHeights& heights = mixerWindow_->content().sectionHeights();
+        for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+        {
+            const auto s = static_cast<mixer_layout::Section>(i);
+            mx.sections.emplace_back(mixer_layout::sectionKey(s), vis.get(s));
+            if (mixer_layout::isUpperSection(s))
+            {
+                mx.sectionHeights.emplace_back(mixer_layout::sectionKey(s), heights.get(s));
+            }
+        }
+        return mx;
+    }
+
+    /// [Message thread] After the load has finished. A saved mixer object replaces the window.
+    /// An older project keeps the machine-local layout and hides the mixer, so the previous
+    /// project's visibility is not inherited. Neither path marks the project dirty.
+    void restoreMixerWindowFromLoadedProject(const ProjectFileV1& loaded)
+    {
+        if (mixerWindow_ == nullptr)
+        {
+            return;
+        }
+        if (!loaded.hasMixerWindow)
+        {
+            restoreMixerLayoutFromSettings();
+            if (!uiLayoutSettings_.getMixerWindowBounds().has_value())
+            {
+                mixerWindow_->applyStoredBounds(MixerWindow::defaultBoundsForDisplay());
+            }
+            mixerWindow_->hideMixer();
+            appendProjectLoadDiagnosticLine("load: no mixerWindow in project (machine layout, hidden)");
+            return;
+        }
+        const ProjectFileMixerWindowV1& mx = loaded.mixerWindow;
+        mixer_layout::SectionVisibility vis;
+        mixer_layout::SectionHeights heights;
+        for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+        {
+            const auto s = static_cast<mixer_layout::Section>(i);
+            const juce::String key = mixer_layout::sectionKey(s);
+            for (const auto& [storedKey, shown] : mx.sections)
+            {
+                if (storedKey == key)
+                {
+                    vis.set(s, shown);
+                }
+            }
+            if (mixer_layout::isUpperSection(s))
+            {
+                for (const auto& [storedKey, px] : mx.sectionHeights)
+                {
+                    if (storedKey == key)
+                    {
+                        heights.set(s, px);
+                    }
+                }
+            }
+        }
+        const juce::Rectangle<int> bounds = mx.hasBounds ? juce::Rectangle<int>(mx.x, mx.y, mx.width, mx.height)
+                                                         : juce::Rectangle<int>();
+        mixerWindow_->restoreForProject(mx.open, bounds, vis, heights);
+        appendProjectLoadDiagnosticLine(
+            juce::String("load: mixer ") + (mx.open ? "open" : "hidden")
+            + " x=" + juce::String(mixerWindow_->getX())
+            + " y=" + juce::String(mixerWindow_->getY())
+            + " w=" + juce::String(mixerWindow_->getWidth())
+            + " h=" + juce::String(mixerWindow_->getHeight()));
     }
 
     /// [Message thread] Restore the mixer's machine-local layout (bounds clamped to a display,

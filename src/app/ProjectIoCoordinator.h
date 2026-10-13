@@ -47,6 +47,10 @@ public:
         std::function<std::optional<ProjectFileMidiEditorWorkspaceV1>()> getMidiEditorWorkspaceForProjectSave;
         /// Optional (Conny 1B): after load end, reopen the MIDI editor when the project saved it open.
         std::function<void(const ProjectFileV1&)> restoreMidiEditorWorkspaceFromLoadedProject;
+        /// Optional: the one mixer window's visibility, bounds and sections. nullopt omits the key.
+        std::function<std::optional<ProjectFileMixerWindowV1>()> getMixerWindowForProjectSave;
+        /// Optional: after load end, apply that project's mixer mode (or the machine-local fallback).
+        std::function<void(const ProjectFileV1&)> restoreMixerWindowFromLoadedProject;
 
         /// Optional: transient "Saving project" indicator, invoked right before the project file write.
         std::function<void()> showSavingProjectIndicator;

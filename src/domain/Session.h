@@ -487,7 +487,10 @@ public:
         std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave = std::nullopt,
         // Optional **v26** UI row heights from the arrangement view (preset key + every row's
         // actual height); nullopt = omit both keys (heights then load as preset defaults).
-        std::optional<ProjectFileTrackRowHeightsV1> trackRowHeightsForSave = std::nullopt);
+        std::optional<ProjectFileTrackRowHeightsV1> trackRowHeightsForSave = std::nullopt,
+        /// Optional mixer window. nullopt omits the key (older projects, and any save that
+        /// has no mixer window yet). Present on Save, Save As and autosave when the window exists.
+        std::optional<ProjectFileMixerWindowV1> mixerWindowForSave = std::nullopt);
 
     // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
     // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).

@@ -27,8 +27,9 @@
 //   A 10 Hz poll (same cadence as the Inspector) reads the published snapshot: strips are
 //   created / removed / reordered to match the row list, each strip refreshes its controls from
 //   its own row, the active row is highlighted. Nothing here is a second source of truth — all
-//   state is the session's; the layout flags / heights are machine-local preferences reported
-//   to the owner for persistence.
+//   state is the session's. The layout flags / heights are reported to the owner: the project
+//   file is the mode that reopens with that project, and ui-layout.xml is the fallback when
+//   an older project has no mixer object.
 //
 // THREADING
 //   [Message thread] only.

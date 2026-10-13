@@ -372,6 +372,22 @@ struct ProjectFileMainWindowBoundsV1
     bool followPlayhead = true;
 };
 
+/// Optional mixer window (root `mixerWindow`); omitted in older projects. The saved project is
+/// the mixer mode that reopens with the file. Machine-local `ui-layout.xml` is only the fallback
+/// when this object is absent. Section keys match `mixer_layout::sectionKey`.
+struct ProjectFileMixerWindowV1
+{
+    bool open = false;
+    bool hasBounds = false;
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    /// Present keys only. A missing key keeps the mixer's default for that section.
+    std::vector<std::pair<juce::String, bool>> sections;
+    std::vector<std::pair<juce::String, int>> sectionHeights;
+};
+
 /// Optional MIDI editor workspace (root `midiEditorWorkspace`); omitted in older projects and when
 /// the editor was closed at save. Window bounds live separately in `midiEditorWindow`. Horizontal
 /// roll scroll/zoom/Follow are per-clip (`midiRoll*` clip fields), not duplicated here.
@@ -496,6 +512,9 @@ struct ProjectFileV1
     /// Optional root `midiEditorWorkspace` object; absent in older files → no auto-reopen.
     bool hasMidiEditorWorkspace = false;
     ProjectFileMidiEditorWorkspaceV1 midiEditorWorkspace;
+    /// Optional root `mixerWindow` object; absent in older files → machine-local layout, mixer hidden.
+    bool hasMixerWindow = false;
+    ProjectFileMixerWindowV1 mixerWindow;
     /// v25: four persisted Solo memories (explicit `TrackId` sets). Index 0 = memory "1". Entries
     /// are deduplicated and validated against `tracks` on load by `Session` (unknown ids dropped
     /// silently — never a crash, never a false-active solo).

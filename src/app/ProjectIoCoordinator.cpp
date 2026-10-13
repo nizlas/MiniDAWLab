@@ -572,6 +572,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             trackRowHeights = callbacks_.getTrackRowHeightsForProjectSave();
         }
+        std::optional<ProjectFileMixerWindowV1> mixerWindow;
+        if (callbacks_.getMixerWindowForProjectSave != nullptr)
+        {
+            mixerWindow = callbacks_.getMixerWindowForProjectSave();
+        }
         writeLastOperationBreadcrumb("project save start: "
                                      + session_.getCurrentProjectFile().getFullPathName());
         juce::Result r = juce::Result::ok();
@@ -591,7 +596,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
                           mainWinBounds,
                           midiEditorWinBounds,
                           midiEditorWorkspace,
-                          trackRowHeights)
+                          trackRowHeights,
+                          mixerWindow)
                     : failedCaptureWindowResult();
         }
         if (!r.wasOk())
@@ -722,6 +728,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             trackRowHeights = callbacks_.getTrackRowHeightsForProjectSave();
         }
+        std::optional<ProjectFileMixerWindowV1> mixerWindow;
+        if (callbacks_.getMixerWindowForProjectSave != nullptr)
+        {
+            mixerWindow = callbacks_.getMixerWindowForProjectSave();
+        }
         writeLastOperationBreadcrumb("project save start: " + projectFile.getFullPathName());
         juce::Result r = juce::Result::ok();
         {
@@ -739,7 +750,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
                           mainWinBounds,
                           midiEditorWinBounds,
                           midiEditorWorkspace,
-                          trackRowHeights)
+                          trackRowHeights,
+                          mixerWindow)
                     : failedCaptureWindowResult();
         }
         if (!r.wasOk())
@@ -1637,6 +1649,12 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
             {
                 callbacks_.restoreMidiEditorWorkspaceFromLoadedProject(j.parsed);
             }
+            // Mixer: the opened project's saved mode. An older file has no object, so the callee
+            // falls back to ui-layout.xml and hides the window instead of keeping the previous project.
+            if (callbacks_.restoreMixerWindowFromLoadedProject != nullptr)
+            {
+                callbacks_.restoreMixerWindowFromLoadedProject(j.parsed);
+            }
             juce::String body;
             if (j.infoNote.isNotEmpty() || j.skipped.size() > 0)
             {
@@ -2091,6 +2109,11 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
     {
         trackRowHeights = callbacks_.getTrackRowHeightsForProjectSave();
     }
+    std::optional<ProjectFileMixerWindowV1> mixerWindow;
+    if (callbacks_.getMixerWindowForProjectSave != nullptr)
+    {
+        mixerWindow = callbacks_.getMixerWindowForProjectSave();
+    }
     juce::Result r = juce::Result::ok();
     {
         // Autosave uses the same bounded capture window as explicit saves: inaudible (gapless
@@ -2111,7 +2134,8 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
                       mainWinBounds,
                       midiEditorWinBounds,
                       midiEditorWorkspace,
-                      trackRowHeights)
+                      trackRowHeights,
+                      mixerWindow)
                 : failedCaptureWindowResult();
     }
     session_.setCurrentProjectFile(normalProjectFile);

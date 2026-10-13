@@ -19,11 +19,14 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "engine/TrackMeterBank.h"
+#include "io/ProjectFile.h"
+#include "transport/Transport.h"
 #include "ui/LevelMeterHub.h"
 #include "ui/TrackChannelOptions.h"
 #include "ui/UiLayoutSettingsStore.h"
 #include "ui/mixer/MixerChannelStrip.h"
 #include "ui/mixer/MixerSectionLayout.h"
+#include "ui/mixer/MixerWindow.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -578,17 +581,189 @@ namespace
         }
         (void)file.deleteFile();
     }
+
+    [[nodiscard]] bool sectionShown(const ProjectFileMixerWindowV1& mx, const char* key, bool& out)
+    {
+        for (const auto& [stored, shown] : mx.sections)
+        {
+            if (stored == key)
+            {
+                out = shown;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool sectionHeight(const ProjectFileMixerWindowV1& mx, const char* key, int& out)
+    {
+        for (const auto& [stored, px] : mx.sectionHeights)
+        {
+            if (stored == key)
+            {
+                out = px;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The project file is the mixer mode. Two files do not share visibility. A file without the
+    /// object stays without it (the app then uses ui-layout.xml and hides the mixer).
+    void testMixerProjectFile()
+    {
+        Session session;
+        Transport transport;
+        const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-mixer-project-state");
+        (void)dir.deleteRecursively();
+        (void)dir.createDirectory();
+        const juce::File openFile = dir.getChildFile("mixer-open.dalproj");
+        const juce::File closedFile = dir.getChildFile("mixer-closed.dalproj");
+        const juce::File oldFile = dir.getChildFile("mixer-absent.dalproj");
+
+        ProjectFileMixerWindowV1 openState;
+        openState.open = true;
+        openState.hasBounds = true;
+        openState.x = 80;
+        openState.y = -4000;
+        openState.width = 900;
+        openState.height = 640;
+        openState.sections = { { "sends", false }, { "meters", true }, { "notASection", false } };
+        openState.sectionHeights = { { "postInserts", 111 }, { "preInserts", 87 } };
+        check(session.saveProjectToFile(transport, openFile, 48000.0, nullptr, {}, false, "1_4",
+                                         std::nullopt, std::nullopt, std::nullopt, std::nullopt, openState)
+                  .wasOk(),
+              "project: save with the mixer open");
+        ProjectFileV1 openRead;
+        check(readProjectFile(openFile, openRead).wasOk() && openRead.hasMixerWindow && openRead.mixerWindow.open,
+              "project: open mixer reloads");
+        check(openRead.version == ProjectFileV1::kCurrentVersion, "project: format version stays current");
+        check(openRead.mixerWindow.hasBounds && openRead.mixerWindow.x == 80 && openRead.mixerWindow.y == -4000
+                  && openRead.mixerWindow.width == 900 && openRead.mixerWindow.height == 640,
+              "project: off-screen bounds are stored for the window to clamp");
+        bool sends = true;
+        bool meters = false;
+        int post = 0;
+        int pre = 0;
+        check(sectionShown(openRead.mixerWindow, "sends", sends) && !sends
+                  && sectionShown(openRead.mixerWindow, "meters", meters) && meters
+                  && sectionHeight(openRead.mixerWindow, "postInserts", post) && post == 111
+                  && sectionHeight(openRead.mixerWindow, "preInserts", pre) && pre == 87,
+              "project: section flags and heights round trip");
+
+        ProjectFileMixerWindowV1 closedState;
+        closedState.open = false;
+        closedState.hasBounds = true;
+        closedState.x = 10;
+        closedState.y = 20;
+        closedState.width = 800;
+        closedState.height = 500;
+        check(session.saveProjectToFile(transport, closedFile, 48000.0, nullptr, {}, false, "1_4",
+                                         std::nullopt, std::nullopt, std::nullopt, std::nullopt, closedState)
+                  .wasOk(),
+              "project: save with the mixer hidden");
+        ProjectFileV1 closedRead;
+        check(readProjectFile(closedFile, closedRead).wasOk() && closedRead.hasMixerWindow && !closedRead.mixerWindow.open
+                  && closedRead.mixerWindow.width == 800,
+              "project: hidden mixer reloads hidden, and does not keep the other file's bounds");
+        check(openRead.mixerWindow.open && openRead.mixerWindow.width == 900,
+              "project: the open file is unchanged by saving the hidden one");
+
+        check(session.saveProjectToFile(transport, oldFile, 48000.0).wasOk(), "project: save without a mixer object");
+        ProjectFileV1 oldRead;
+        check(readProjectFile(oldFile, oldRead).wasOk() && !oldRead.hasMixerWindow, "project: absent mixer object stays absent");
+        (void)oldFile.replaceWithText(oldFile.loadFileAsString().replace("\"version\"", "\"mixerWindow\": { \"open\": \"yes\", \"sections\": { \"sends\": \"maybe\" } }, \"version\""));
+        ProjectFileV1 junk;
+        check(readProjectFile(oldFile, junk).wasOk() && junk.hasMixerWindow && !junk.mixerWindow.open
+                  && junk.mixerWindow.sections.empty(),
+              "project: a non-bool open and a non-bool section are ignored");
+        (void)dir.deleteRecursively();
+    }
+
+    /// The one window: project restore shows or hides it, clamps an off-screen rect, and F3 still
+    /// toggles that same instance.
+    void testMixerWindowRestore()
+    {
+        MixerStripBindings bindings;
+        MixerWindow window(bindings, nullptr, {});
+        mixer_layout::SectionVisibility hiddenSends;
+        hiddenSends.set(mixer_layout::Section::Sends, false);
+        mixer_layout::SectionHeights heights;
+        heights.set(mixer_layout::Section::PostInserts, 111);
+        window.restoreForProject(true, { 80, -4000, 900, 640 }, hiddenSends, heights);
+        check(window.isVisible(), "window: a saved open mixer is shown");
+        const juce::Displays::Display* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+        const juce::Rectangle<int> area = display != nullptr ? display->userArea : juce::Rectangle<int>(0, 0, 1920, 1080);
+        const juce::Rectangle<int> b = window.getBounds();
+        const int fitW = juce::jmin(900, juce::jmax(480, area.getWidth()));
+        const int fitH = juce::jmin(640, juce::jmax(320, area.getHeight()));
+        check(b.getWidth() == fitW && b.getHeight() == fitH, "window: size is kept when it fits, else clamped to the display");
+        const juce::Displays::Display* const home = juce::Desktop::getInstance().getDisplays().getDisplayForRect(b);
+        const juce::Rectangle<int> homeArea = home != nullptr ? home->userArea : area;
+        const juce::Rectangle<int> overlap = b.getIntersection(homeArea);
+        const int overlapArea = juce::jmax(0, overlap.getWidth()) * juce::jmax(0, overlap.getHeight());
+        const int windowArea = juce::jmax(1, b.getWidth() * b.getHeight());
+        check(home != nullptr && overlapArea * 2 > windowArea && b.getY() > -200,
+              "window: off-screen bounds are brought onto a display");
+        check(!window.content().sectionVisibility().get(mixer_layout::Section::Sends)
+                  && window.content().sectionHeights().get(mixer_layout::Section::PostInserts) == 111,
+              "window: restored sections and heights");
+        window.toggleMixer();
+        check(!window.isVisible(), "window: F3 hides the same instance");
+        window.toggleMixer();
+        check(window.isVisible(), "window: F3 shows the same instance again");
+        window.restoreForProject(false, { 10, 20, 800, 500 }, mixer_layout::SectionVisibility{}, mixer_layout::SectionHeights{});
+        check(!window.isVisible(), "window: the next project's hidden mixer hides this instance");
+        check(window.getWidth() == 800 && window.getHeight() == 500, "window: the next project's size replaces the previous one");
+        window.restoreForProject(true, {}, hiddenSends, heights);
+        check(window.isVisible() && window.getWidth() == 800, "window: an open restore without bounds keeps the current size");
+    }
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI gui;
+    if (argc >= 3 && juce::String(argv[1]) == "--write-fixtures")
+    {
+        Session session;
+        Transport transport;
+        const juce::File dir(juce::String::fromUTF8(argv[2]));
+        (void)dir.createDirectory();
+        ProjectFileMixerWindowV1 openState;
+        openState.open = true;
+        openState.hasBounds = true;
+        openState.x = 40;
+        openState.y = -5000;
+        openState.width = 980;
+        openState.height = 620;
+        openState.sections = { { "sends", false } };
+        openState.sectionHeights = { { "postInserts", 140 } };
+        ProjectFileMixerWindowV1 closedState;
+        closedState.open = false;
+        closedState.hasBounds = true;
+        closedState.x = 200;
+        closedState.y = 120;
+        closedState.width = 700;
+        closedState.height = 480;
+        const bool openOk = session.saveProjectToFile(transport, dir.getChildFile("mixer-open.dalproj"), 48000.0,
+                                                       nullptr, {}, false, "1_4", std::nullopt, std::nullopt,
+                                                       std::nullopt, std::nullopt, openState)
+                                 .wasOk();
+        const bool closedOk = session.saveProjectToFile(transport, dir.getChildFile("mixer-closed.dalproj"), 48000.0,
+                                                         nullptr, {}, false, "1_4", std::nullopt, std::nullopt,
+                                                         std::nullopt, std::nullopt, closedState)
+                                   .wasOk();
+        std::printf("%s\n", (openOk && closedOk) ? "fixtures written" : "fixtures failed");
+        return (openOk && closedOk) ? 0 : 1;
+    }
     testTrackMeterBank();
     testLevelMeterHub();
     testSectionLayout();
     testDividers();
     testStripBinding();
     testLayoutStore();
+    testMixerProjectFile();
+    testMixerWindowRestore();
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -2235,7 +2235,8 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                                        std::optional<ProjectFileMainWindowBoundsV1> mainWindowBoundsForSave,
                                        std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsForSave,
                                        std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave,
-                                       std::optional<ProjectFileTrackRowHeightsV1> trackRowHeightsForSave)
+                                       std::optional<ProjectFileTrackRowHeightsV1> trackRowHeightsForSave,
+                                       std::optional<ProjectFileMixerWindowV1> mixerWindowForSave)
 {
     const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
     if (s == nullptr)
@@ -2299,6 +2300,11 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     {
         out.hasMidiEditorWorkspace = true;
         out.midiEditorWorkspace = *midiEditorWorkspaceForSave;
+    }
+    if (mixerWindowForSave.has_value())
+    {
+        out.hasMixerWindow = true;
+        out.mixerWindow = *mixerWindowForSave;
     }
     // Visual track groups (v27): persist only groups that are displayable right now (≥2 existing
     // members, contiguous), with members filtered to the saved snapshot in session order — stale

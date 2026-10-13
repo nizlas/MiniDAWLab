@@ -20,6 +20,9 @@
 // PERSISTENCE
 //   Bounds changes are reported through `onBoundsSettled` ~300 ms after the last move / resize
 //   (one write per gesture, never per mouse move); the owner stores them in `ui-layout.xml`.
+//   The project file is the mixer mode that reopens with that project (`restoreForProject`).
+//   `ui-layout.xml` is the fallback for a project that has no mixer object. Restoring a project
+//   does not report a bounds settle, so the machine file cannot overwrite the project afterwards.
 //
 // THREADING
 //   [Message thread] only.
@@ -60,6 +63,12 @@ public:
     void toggleMixer();
     /// Apply stored bounds (clamped to a display); call before the first `showMixer`.
     void applyStoredBounds(juce::Rectangle<int> bounds);
+    /// One project load, one window. Empty `bounds` keeps the current placement. Showing does
+    /// not take keyboard focus. An already-visible window is not brought forward again.
+    void restoreForProject(bool open,
+                           juce::Rectangle<int> bounds,
+                           const mixer_layout::SectionVisibility& sections,
+                           const mixer_layout::SectionHeights& heights);
     /// Default size fitted to the main display's user area (~1200×720, smaller on small screens).
     [[nodiscard]] static juce::Rectangle<int> defaultBoundsForDisplay();
 

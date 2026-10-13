@@ -1346,6 +1346,44 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         }
         root->setProperty("midiEditorWorkspace", juce::var(o.get()));
     }
+    if (data.hasMixerWindow)
+    {
+        const ProjectFileMixerWindowV1& mx = data.mixerWindow;
+        juce::DynamicObject::Ptr o = new juce::DynamicObject();
+        o->setProperty("open", mx.open);
+        if (mx.hasBounds && mx.width >= 1 && mx.height >= 1)
+        {
+            o->setProperty("x", mx.x);
+            o->setProperty("y", mx.y);
+            o->setProperty("width", mx.width);
+            o->setProperty("height", mx.height);
+        }
+        if (!mx.sections.empty())
+        {
+            juce::DynamicObject::Ptr sections = new juce::DynamicObject();
+            for (const auto& [key, shown] : mx.sections)
+            {
+                if (key.isNotEmpty())
+                {
+                    sections->setProperty(key, shown);
+                }
+            }
+            o->setProperty("sections", juce::var(sections.get()));
+        }
+        if (!mx.sectionHeights.empty())
+        {
+            juce::DynamicObject::Ptr heights = new juce::DynamicObject();
+            for (const auto& [key, px] : mx.sectionHeights)
+            {
+                if (key.isNotEmpty() && px > 0)
+                {
+                    heights->setProperty(key, px);
+                }
+            }
+            o->setProperty("sectionHeights", juce::var(heights.get()));
+        }
+        root->setProperty("mixerWindow", juce::var(o.get()));
+    }
     root->setProperty("tracks", juce::var(trackVars));
 
     if (data.version >= 11 && !data.experimentalInstrumentTracks.empty())
@@ -2071,6 +2109,70 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                 ws.rowLabelMode = (mode == 1 || mode == 2) ? mode : 0;
                 out.hasMidiEditorWorkspace = true;
             }
+        }
+    }
+
+    {
+        const juce::var& mxVar = root.getProperty("mixerWindow", {});
+        if (const auto* dyn = mxVar.getDynamicObject())
+        {
+            ProjectFileMixerWindowV1& mx = out.mixerWindow;
+            const juce::var open = dyn->getProperty("open");
+            mx.open = open.isBool() && static_cast<bool>(open);
+            const juce::var x = dyn->getProperty("x");
+            const juce::var y = dyn->getProperty("y");
+            const juce::var w = dyn->getProperty("width");
+            const juce::var h = dyn->getProperty("height");
+            auto asInt = [](const juce::var& v, int fallback) -> int {
+                if (v.isInt() || v.isInt64() || v.isDouble())
+                {
+                    return static_cast<int>(static_cast<juce::int64>(v));
+                }
+                return fallback;
+            };
+            const int xi = asInt(x, 0);
+            const int yi = asInt(y, 0);
+            const int wi = asInt(w, 0);
+            const int hi = asInt(h, 0);
+            if (!x.isVoid() && !y.isVoid() && wi >= 1 && hi >= 1 && wi <= 20000 && hi <= 20000
+                && std::abs(xi) <= 20000 && std::abs(yi) <= 20000)
+            {
+                mx.hasBounds = true;
+                mx.x = xi;
+                mx.y = yi;
+                mx.width = wi;
+                mx.height = hi;
+            }
+            if (const auto* sections = dyn->getProperty("sections").getDynamicObject())
+            {
+                const juce::NamedValueSet& props = sections->getProperties();
+                for (int i = 0; i < props.size(); ++i)
+                {
+                    const juce::var value = props.getValueAt(i);
+                    if (value.isBool())
+                    {
+                        mx.sections.emplace_back(props.getName(i).toString(), static_cast<bool>(value));
+                    }
+                }
+            }
+            if (const auto* heights = dyn->getProperty("sectionHeights").getDynamicObject())
+            {
+                const juce::NamedValueSet& props = heights->getProperties();
+                for (int i = 0; i < props.size(); ++i)
+                {
+                    const juce::var value = props.getValueAt(i);
+                    int px = 0;
+                    if (value.isInt() || value.isInt64() || value.isDouble())
+                    {
+                        px = static_cast<int>(static_cast<juce::int64>(value));
+                    }
+                    if (px > 0 && px <= 5000)
+                    {
+                        mx.sectionHeights.emplace_back(props.getName(i).toString(), px);
+                    }
+                }
+            }
+            out.hasMixerWindow = true;
         }
     }
 

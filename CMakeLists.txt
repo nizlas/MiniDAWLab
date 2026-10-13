@@ -895,7 +895,9 @@ target_sources(MixerFocusedTests PRIVATE
     src/ui/LevelMeterComponent.cpp
     src/ui/LevelMeterHub.cpp
     src/ui/UiLayoutSettingsStore.cpp
-    src/ui/mixer/MixerChannelStrip.cpp)
+    src/ui/mixer/MixerChannelStrip.cpp
+    src/ui/mixer/MixerContentComponent.cpp
+    src/ui/mixer/MixerWindow.cpp)
 target_include_directories(MixerFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(MixerFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
     JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)
