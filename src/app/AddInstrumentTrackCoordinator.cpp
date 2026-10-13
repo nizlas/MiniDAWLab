@@ -132,6 +132,14 @@ AddInstrumentTrackCoordinator::AddInstrumentTrackCoordinator(Refs refs, Callback
 {
 }
 
+void AddInstrumentTrackCoordinator::republishRoutingPlanAfterStructuralEdit()
+{
+    if (callbacks_.republishRoutingPlan != nullptr)
+    {
+        callbacks_.republishRoutingPlan();
+    }
+}
+
 void AddInstrumentTrackCoordinator::addGrooveAgentInstrumentTrackFromMenu()
 {
     InstrumentRuntimeCoordinator& instrumentRuntimeCoordinator = refs_.instrumentRuntimeCoordinator;
@@ -283,6 +291,9 @@ void AddInstrumentTrackCoordinator::finishAddGrooveAgentInstrumentTrackAfterInst
     }
 
     const TrackId tid = *newIdOpt;
+    // The row is already the published snapshot. Republish the routing plan before any plugin
+    // work so existing tracks keep reaching Stereo Out while this instrument loads — or fails.
+    republishRoutingPlanAfterStructuralEdit();
     // Groove Agent is a drum instrument and maps its kit to the General MIDI drum channel, so this
     // one creation path opts into channel 10 while every other new track keeps the melodic default
     // of 1. This is a property of the menu entry the user picked, never inferred from a track or
@@ -314,6 +325,7 @@ void AddInstrumentTrackCoordinator::finishAddGrooveAgentInstrumentTrackAfterInst
                                                 "Instrument track",
                                                 "Could not allocate Groove Agent instrument runtime.");
         session.removeTrack(tid);
+        republishRoutingPlanAfterStructuralEdit();
         if (!registryWasEmpty)
         {
             instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
@@ -330,6 +342,7 @@ void AddInstrumentTrackCoordinator::finishAddGrooveAgentInstrumentTrackAfterInst
                                                     "Instrument track",
                                                     "Could not load Groove Agent into this instrument track.");
             session.removeTrack(tid);
+            republishRoutingPlanAfterStructuralEdit();
             if (!registryWasEmpty)
             {
                 instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
@@ -345,6 +358,7 @@ void AddInstrumentTrackCoordinator::finishAddGrooveAgentInstrumentTrackAfterInst
                                                 "Instrument track",
                                                 "Could not bind Groove Agent to the new timeline row.");
         session.removeTrack(tid);
+        republishRoutingPlanAfterStructuralEdit();
         if (!registryWasEmpty)
         {
             instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
@@ -534,6 +548,7 @@ void AddInstrumentTrackCoordinator::finishAddHalionSonicInstrumentTrackAfterInst
     }
 
     const TrackId tid = *newIdOpt;
+    republishRoutingPlanAfterStructuralEdit();
     const bool registryWasEmpty = instrumentRuntimeCoordinator.isKeyedRuntimeRegistryEmpty();
     ExperimentalInstrumentHost* mh = nullptr;
     InstrumentTrackController* ctl = nullptr;
@@ -560,6 +575,7 @@ void AddInstrumentTrackCoordinator::finishAddHalionSonicInstrumentTrackAfterInst
                                                 "Instrument track",
                                                 "Could not allocate HALion Sonic instrument runtime.");
         session.removeTrack(tid);
+        republishRoutingPlanAfterStructuralEdit();
         if (!registryWasEmpty)
         {
             instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
@@ -576,6 +592,7 @@ void AddInstrumentTrackCoordinator::finishAddHalionSonicInstrumentTrackAfterInst
                                                     "Instrument track",
                                                     "Could not load HALion Sonic into this instrument track.");
             session.removeTrack(tid);
+            republishRoutingPlanAfterStructuralEdit();
             if (!registryWasEmpty)
             {
                 instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
@@ -591,6 +608,7 @@ void AddInstrumentTrackCoordinator::finishAddHalionSonicInstrumentTrackAfterInst
                                                 "Instrument track",
                                                 "Could not bind HALion Sonic to the new timeline row.");
         session.removeTrack(tid);
+        republishRoutingPlanAfterStructuralEdit();
         if (!registryWasEmpty)
         {
             instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
@@ -813,6 +831,7 @@ void AddInstrumentTrackCoordinator::addGenericInstrumentTrackFromCatalog(
     }
 
     const TrackId tid = *newIdOpt;
+    republishRoutingPlanAfterStructuralEdit();
     const auto pr = instrumentRuntimeCoordinator.getOrCreateInstrumentRuntimeForTrack(tid);
     ExperimentalInstrumentHost* mh = pr.first;
     InstrumentTrackController* ctl = pr.second;
@@ -823,6 +842,7 @@ void AddInstrumentTrackCoordinator::addGenericInstrumentTrackFromCatalog(
                                                 "Instrument track",
                                                 "Could not allocate instrument runtime.");
         session.removeTrack(tid);
+        republishRoutingPlanAfterStructuralEdit();
         instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
         callbacks_.refreshInstrumentUi();
         return;
@@ -840,6 +860,7 @@ void AddInstrumentTrackCoordinator::addGenericInstrumentTrackFromCatalog(
             "Could not load \"" + trackName + "\" into a new instrument track.\n\n"
                 + loadRes.getErrorMessage());
         session.removeTrack(tid);
+        republishRoutingPlanAfterStructuralEdit();
         instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
         callbacks_.refreshInstrumentUi();
         return;
@@ -852,6 +873,7 @@ void AddInstrumentTrackCoordinator::addGenericInstrumentTrackFromCatalog(
                                                 "Could not bind the loaded instrument to the new timeline row.");
         mh->unloadInstrument();
         session.removeTrack(tid);
+        republishRoutingPlanAfterStructuralEdit();
         instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
         callbacks_.refreshInstrumentUi();
         return;

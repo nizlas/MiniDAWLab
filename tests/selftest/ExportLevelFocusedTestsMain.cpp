@@ -1325,6 +1325,131 @@ void testFaderRoundTripThroughProjectFile()
     }
     (void)root.deleteRecursively();
 }
+
+/// Adding an instrument shell publishes a snapshot that inserts the row in front of Stereo Out.
+/// The live callback keeps the previous RoutingPlan: the master bus step's index now names the
+/// new instrument, the kind check skips it, and the callback returns without copying the mix to
+/// the device. Every existing source goes silent until `rebuildRoutingPlanFromSession` — the call
+/// the + → Add Instrument Track path makes immediately, and again if the row is removed.
+void testInstrumentShellAddDoesNotSilenceExistingAudio()
+{
+    const juce::File root = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                .getChildFile("dal-instrument-add-routing");
+    (void)root.deleteRecursively();
+    (void)root.createDirectory();
+    const juce::File wav = writeToneWav(root, "tone.wav", 2.0, 0.5f, 440.0);
+
+    Session session;
+    Transport transport;
+    PlaybackEngine engine(transport, session);
+    const TrackId audioId = session.getActiveTrackId();
+    expect(session.addRecordedTakeAtSample(wav, kRate, 0, audioId, (std::int64_t)(2.0 * kRate)).wasOk(),
+           "instrument-add: audio take on the existing track");
+    engine.rebuildRoutingPlanFromSession();
+
+    TrackId masterId = kInvalidTrackId;
+    {
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        for (int i = 0; i < snap->getNumTracks(); ++i)
+        {
+            if (snap->getTrack(i).getKind() == TrackKind::Master)
+            {
+                masterId = snap->getTrack(i).getId();
+            }
+        }
+    }
+    expect(masterId != kInvalidTrackId, "instrument-add: Stereo Out present");
+
+    StubDevice dev;
+    engine.audioDeviceAboutToStart(&dev);
+    transport.requestSeek((std::int64_t)(0.25 * kRate));
+    transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    juce::AudioBuffer<float> blk(2, kBlock);
+    float* ptrs[2] = { blk.getWritePointer(0), blk.getWritePointer(1) };
+    juce::AudioIODeviceCallbackContext ctx;
+    const auto renderPeak = [&]() {
+        double peak = 0.0;
+        for (int i = 0; i < 8; ++i)
+        {
+            blk.clear();
+            engine.audioDeviceIOCallbackWithContext(nullptr, 0, ptrs, 2, kBlock, ctx);
+            peak = std::max(peak, (double)peakOf(std::vector<float>(ptrs[0], ptrs[0] + kBlock)));
+        }
+        return peak;
+    };
+    const auto masterStepNamesMaster = [&]() {
+        const auto plan = engine.loadRoutingPlanForDiagnostics();
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        if (plan == nullptr || snap == nullptr)
+        {
+            return false;
+        }
+        for (const RoutingPlan::BusStep& step : plan->busSteps)
+        {
+            if (step.destBusIndex >= 0)
+            {
+                continue;
+            }
+            if (step.trackIndex < 0 || step.trackIndex >= snap->getNumTracks())
+            {
+                return false;
+            }
+            const Track& row = snap->getTrack(step.trackIndex);
+            return row.getKind() == TrackKind::Master && row.getId() == masterId;
+        }
+        return false;
+    };
+    const auto audioRowUntouched = [&]() {
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        const int idx = snap != nullptr ? snap->findTrackIndexById(audioId) : -1;
+        return idx >= 0 && !snap->getTrack(idx).isMuted() && !snap->getTrack(idx).isTrackOff();
+    };
+
+    const double before = renderPeak();
+    expect(before > 0.05, "instrument-add: existing audio reaches the device before the new row");
+    expect(masterStepNamesMaster(), "instrument-add: master bus step names Stereo Out before the new row");
+
+    const std::optional<TrackId> shell = session.appendExperimentalInstrumentShellTrack("New instrument");
+    expect(shell.has_value(), "instrument-add: shell row published");
+    expect(!masterStepNamesMaster(), "instrument-add: stale plan's master index no longer names Stereo Out");
+    const double silenced = renderPeak();
+    expect(silenced < 1.0e-6, "instrument-add: device output is silent while the plan is stale");
+    expect(audioRowUntouched(), "instrument-add: the existing track was not muted or switched off");
+
+    engine.rebuildRoutingPlanFromSession();
+    expect(masterStepNamesMaster(), "instrument-add: republished plan names Stereo Out again");
+    {
+        const auto plan = engine.loadRoutingPlanForDiagnostics();
+        bool audioStillRouted = false;
+        if (plan != nullptr)
+        {
+            for (const RoutingPlan::SourceStep& step : plan->sourceSteps)
+            {
+                if (step.builtFromTrackId == audioId)
+                {
+                    audioStillRouted = true;
+                }
+            }
+        }
+        expect(audioStillRouted, "instrument-add: the existing audio track is still a source step");
+    }
+    const double restored = renderPeak();
+    expect(restored > before * 0.5, "instrument-add: existing audio returns as soon as the plan is republished");
+
+    session.removeTrack(*shell);
+    expect(!masterStepNamesMaster(), "instrument-add: removing the failed row stale the plan again");
+    expect(renderPeak() < 1.0e-6, "instrument-add: an aborted add is silent until the plan is republished");
+    engine.rebuildRoutingPlanFromSession();
+    expect(masterStepNamesMaster(), "instrument-add: republish after remove names Stereo Out");
+    expect(renderPeak() > before * 0.5, "instrument-add: existing audio survives an aborted instrument add");
+    expect(audioRowUntouched(), "instrument-add: mute and off are unchanged after the aborted add");
+
+    transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    blk.clear();
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, ptrs, 2, kBlock, ctx);
+    engine.audioDeviceStopped();
+    (void)root.deleteRecursively();
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -1357,6 +1482,7 @@ int main(int argc, char** argv)
     testFaderRoundTripThroughProjectFile();
     testRealtimeVsOfflineDeterministic();
     testSoloFollowsBothRenderPaths();
+    testInstrumentShellAddDoesNotSilenceExistingAudio();
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

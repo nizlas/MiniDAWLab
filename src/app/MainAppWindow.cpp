@@ -1724,6 +1724,7 @@ public:
                         midiEditorPresenter_->syncInstrumentClipTimelineFromDevice();
                     }
                 },
+                [this] { playbackEngine_.rebuildRoutingPlanFromSession(); },
             });
 
         playbackEngine_.setExperimentalInstrumentDeviceLifecycleHooks(

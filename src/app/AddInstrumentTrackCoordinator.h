@@ -32,6 +32,11 @@ public:
         std::function<void()> refreshInstrumentUi;
         std::function<void()> requestLayoutResized;
         std::function<void()> syncMidiEditorInstrumentClipTimelineFromDeviceIfOpen;
+        /// The shell append (and a failed add's `removeTrack`) publishes a new snapshot before any
+        /// plugin work. The live callback walks the previous `RoutingPlan` by track index; the new
+        /// row sits in front of Stereo Out, so the master's index now names the instrument and the
+        /// device copy is skipped. Republish in the same turn, before the slow load.
+        std::function<void()> republishRoutingPlan;
     };
 
     AddInstrumentTrackCoordinator(Refs refs, Callbacks callbacks);
@@ -55,6 +60,7 @@ private:
 
     void finishAddHalionSonicInstrumentTrackAfterInstrumentResolved();
     void beginAsyncHalionSonicOopScanForAddTrack(mini_daw::Vst3GrooveCacheLoadCandidate v1Cand);
+    void republishRoutingPlanAfterStructuralEdit();
 
     Refs refs_;
     Callbacks callbacks_;
