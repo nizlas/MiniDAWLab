@@ -1006,19 +1006,25 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile, co
     }
     if (!projectFile.existsAsFile())
     {
-        juce::AlertWindow::showMessageBoxAsync(
-            juce::AlertWindow::WarningIcon,
-            "Load project",
-            "Project file not found:\n" + projectFile.getFullPathName());
+        if (drive == LoadDrive::Interactive)
+        {
+            activateMainWindowForUserAttention();
+        }
+        showLoadMessageAsync(juce::AlertWindow::WarningIcon,
+                             "Load project",
+                             "Project file not found:\n" + projectFile.getFullPathName());
         return;
     }
     juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
     if (device == nullptr)
     {
-        juce::AlertWindow::showMessageBoxAsync(
-            juce::AlertWindow::WarningIcon,
-            "Load project",
-            "No active audio device; cannot match sample rate to decode project clips.");
+        if (drive == LoadDrive::Interactive)
+        {
+            activateMainWindowForUserAttention();
+        }
+        showLoadMessageAsync(juce::AlertWindow::WarningIcon,
+                             "Load project",
+                             "No active audio device; cannot match sample rate to decode project clips.");
         return;
     }
     loadJob_start(projectFile, drive, {});
@@ -1679,8 +1685,8 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
             loadJob_finish(true, {});
             if (body.isNotEmpty())
             {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::InfoIcon, "Load project (partial or note)", body);
+                // After loadJob_finish has activated the main window, so the note stays in front.
+                showLoadMessageAsync(juce::AlertWindow::InfoIcon, "Load project (partial or note)", body);
             }
             return;
         }
@@ -1699,13 +1705,22 @@ void ProjectIoCoordinator::loadJob_finish(const bool ok, const juce::String& err
     // `errorBodyRef` may refer INTO the job (e.g. `parseResult.getErrorMessage()`), which is
     // destroyed below - take an owning copy first.
     const juce::String errorBody = errorBodyRef;
+    const bool userInitiatedOpen = loadJob_->drive == LoadDrive::Interactive;
     // Release order: the progress window first (modal state ends), then the gate (instrument
     // processing resumes) with the job. The worker thread (if any) has already posted its result.
+    // The progress window is topmost for the whole load. Mixer restore (and a restored MIDI
+    // editor) run before this and can reorder the main window; nothing else brings it back when
+    // the progress window closes. One activation here, only for a user-initiated open — after the
+    // progress window is gone, before any error alert, so the alert is not covered.
     if (loadProgressWindow_ != nullptr)
     {
         loadProgressWindow_->exitModalState(0);
         loadProgressWindow_->setVisible(false);
         loadProgressWindow_.reset();
+    }
+    if (userInitiatedOpen)
+    {
+        activateMainWindowForUserAttention();
     }
     const juce::File f = loadJob_->file;
     appendProjectLoadDiagnosticLine(juce::String("load: staged load ") + (ok ? "finished ok" : "FAILED")
@@ -1726,13 +1741,32 @@ void ProjectIoCoordinator::loadJob_finish(const bool ok, const juce::String& err
         }
         else
         {
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Load project", errorBody);
+            showLoadMessageAsync(juce::AlertWindow::WarningIcon, "Load project", errorBody);
         }
     }
     if (onProjectLoadFinished_)
     {
         onProjectLoadFinished_(ok);
     }
+}
+
+void ProjectIoCoordinator::activateMainWindowForUserAttention()
+{
+    if (isStabilityTestModeActive())
+    {
+        return;
+    }
+    if (callbacks_.activateMainWindowForUserAttention != nullptr)
+    {
+        callbacks_.activateMainWindowForUserAttention();
+    }
+}
+
+void ProjectIoCoordinator::showLoadMessageAsync(const juce::MessageBoxIconType icon, const juce::String& title,
+                                                const juce::String& message)
+{
+    juce::Component* anchor = callbacks_.getProgressWindowAnchor ? callbacks_.getProgressWindowAnchor() : nullptr;
+    juce::AlertWindow::showMessageBoxAsync(icon, title, message, {}, anchor);
 }
 
 bool ProjectIoCoordinator::captureLoadProgressWindowPng(const juce::File& png) const

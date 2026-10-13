@@ -58,13 +58,11 @@ MainWindow::MainWindow(const juce::String& name,
     {
         c->setWantsKeyboardFocus(true);
     }
-    juce::MessageManager::callAsync([this] {
-        if (juce::Component* c = getContentComponent())
-        {
-            c->grabKeyboardFocus();
-        }
-    });
+    // Shown once the device exists. `setVisible` does not activate, and the audio init above can
+    // outlast the shell's foreground permission, so the window would stay behind the app the user
+    // launched us from. One activation here — not a timer.
     setVisible(true);
+    activateForUserAttention();
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         writeUndoDiagnosticLogLine("[UndoDiag] enabled");
@@ -96,6 +94,23 @@ void MainWindow::offerAutosaveRecoveryOnStartup(const bool commandLineProjectOpe
     {
         shortcutTargetFromContent_->invokeAutosaveRecoveryCheckFromStartup(
             commandLineProjectOpenQueued);
+    }
+}
+
+void MainWindow::activateForUserAttention()
+{
+    if (isMinimised())
+    {
+        setMinimised(false);
+    }
+    toFront(true);
+    if (juce::Component* c = getContentComponent())
+    {
+        c->grabKeyboardFocus();
+    }
+    if (!isActiveWindow())
+    {
+        juce::Logger::writeToLog("[Window] main window activation was not granted by the OS");
     }
 }
 

@@ -81,6 +81,11 @@ public:
         /// Optional (v26): after load end, apply saved row heights + preset default. Always invoked
         /// (even for pre-v26 files) so an older project resets to its historical Medium look.
         std::function<void(const ProjectFileV1&)> applyTrackRowHeightsFromLoadedProject;
+
+        /// Optional: restore-if-minimized + foreground + keyboard focus on the main window.
+        /// Fired once when a user-initiated open finishes (after the progress window is gone and
+        /// after mixer / MIDI editor restore). Not used by autosave, playback, or stability loads.
+        std::function<void()> activateMainWindowForUserAttention;
     };
 
     ProjectIoCoordinator(Transport& transport,
@@ -235,6 +240,11 @@ private:
     void loadJob_setProgress(const juce::String& phase, const juce::String& detail, double fraction);
     /// Final common exit: releases the gate + progress window, logs, optional error alert, observer.
     void loadJob_finish(bool ok, const juce::String& errorBody);
+    /// One activation of the main window. No-op in stability mode and when no callback is wired.
+    void activateMainWindowForUserAttention();
+    /// Load alert centred on the main window. Caller activates first when the open was user-initiated,
+    /// so this box is created after that and is not covered by it.
+    void showLoadMessageAsync(juce::MessageBoxIconType icon, const juce::String& title, const juce::String& message);
     std::unique_ptr<LoadJob> loadJob_;
     std::unique_ptr<LoadProgressWindow> loadProgressWindow_;
     std::function<void(bool ok)> onProjectLoadFinished_;

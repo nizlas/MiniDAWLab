@@ -18,6 +18,7 @@
 #include "app/ClipPasteboardController.h"
 #include "app/MainAppDialogs.h"
 #include "app/MainMenuModel.h"
+#include "app/MainWindow.h"
 #include "app/MidiEditorPresenter.h"
 #include "app/PluginHostUiBindings.h"
 #include "app/PortableProjectService.h"
@@ -2203,6 +2204,12 @@ public:
                         + track_row_heights::persistenceKeyForPreset(
                             trackLanesView.lastChosenTrackRowHeightPreset())
                         + (loaded.trackRowHeightPreset.isEmpty() ? " (default, no key)" : ""));
+                },
+                [this] {
+                    if (auto* w = findParentComponentOfClass<MainWindow>())
+                    {
+                        w->activateForUserAttention();
+                    }
                 },
             });
 

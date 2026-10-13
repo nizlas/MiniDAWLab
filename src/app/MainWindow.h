@@ -43,6 +43,10 @@ public:
     /// [Message thread] Load a ".dalproj" passed on the command line through the normal load pipeline.
     void openProjectFileFromCommandLine(const juce::File& projectFile);
 
+    /// [Message thread] One normal activation: restore if minimized, come forward, take keyboard
+    /// focus. Does not set always-on-top. Logs when the OS refuses the foreground change.
+    void activateForUserAttention();
+
     /// [Message thread] Stability Slice 5: returns true when a save-before-quit prompt was shown
     /// (quit resumes or is cancelled from the prompt); false = no unsaved changes, quit now.
     [[nodiscard]] bool tryInterceptQuitForUnsavedChanges();
