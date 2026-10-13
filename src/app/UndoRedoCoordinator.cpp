@@ -496,6 +496,18 @@ void UndoRedoCoordinator::executeUndoableSessionEdit(const juce::String& label, 
     }
 }
 
+void UndoRedoCoordinator::recordAppliedSessionEdit(
+    const juce::String& label,
+    std::shared_ptr<const SessionSnapshot> before,
+    std::shared_ptr<const SessionSnapshot> after)
+{
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return;
+    }
+    sessionHistory_.record(label, std::move(before), std::move(after));
+}
+
 void UndoRedoCoordinator::executeUndoableTrackDelete(
     const juce::String& label,
     std::function<bool(std::optional<PluginUndoStepSides>& outPluginSides,

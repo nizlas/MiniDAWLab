@@ -41,7 +41,10 @@
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 #include "domain/AudioClip.h"
+#include "domain/EventAmplitude.h"
 #include "domain/SessionSnapshot.h"
+
+#include <cstring>
 #include "domain/Track.h"
 #include "transport/Transport.h"
 
@@ -112,7 +115,7 @@ constexpr std::uint64_t kFingerprintSeed = 0x9e3779b97f4a7c15ull;
         return TimelineRulerView::sessionSampleToLocalXForSpan(s, b, visStart, mapSpan);
     }
 
-    enum class LanePixelHitKind { None, TrimLeft, TrimRight, EventBody };
+    enum class LanePixelHitKind { None, FadeIn, FadeOut, EventGain, TrimLeft, TrimRight, EventBody };
 
     struct LanePixelHit
     {
@@ -128,7 +131,8 @@ constexpr std::uint64_t kFingerprintSeed = 0x9e3779b97f4a7c15ull;
         const juce::Rectangle<float>& b,
         const juce::Rectangle<float>& eventTrackY,
         const std::int64_t visStart,
-        const double samplesPerPixel) noexcept
+        const double samplesPerPixel,
+        const track_row_heights::LaneEventDetail detail) noexcept
     {
         LanePixelHit r;
         if (snap == nullptr || tIdx < 0)
@@ -145,7 +149,60 @@ constexpr std::uint64_t kFingerprintSeed = 0x9e3779b97f4a7c15ull;
         }
         const Track& tr = snap->getTrack(tIdx);
         const int n = tr.getNumPlacedClips();
-        // Priority: left band → right band → right corner → left corner → body (per plan). Newest row
+        const bool laneAllowsEnvelope = detail != track_row_heights::LaneEventDetail::Bars;
+        // Envelope handles before the full-height trim bands, so a top corner is a fade and a
+        // bottom corner stays a trim. Newest row (smaller `i`) wins first in each pass.
+        if (laneAllowsEnvelope)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                const PlacedClip& pc = tr.getPlacedClip(i);
+                const std::int64_t a0 = pc.getStartSample();
+                const std::int64_t a1 = a0 + pc.getEffectiveLengthSamples();
+                if (a0 >= a1)
+                {
+                    continue;
+                }
+                const float ex0
+                    = TimelineRulerView::sessionSampleToLocalX(a0, b.getX(), visStart, samplesPerPixel);
+                const float ex1
+                    = TimelineRulerView::sessionSampleToLocalX(a1, b.getX(), visStart, samplesPerPixel);
+                const float x0 = juce::jmin(ex0, ex1);
+                const float x1 = juce::jmax(ex0, ex1);
+                juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(0.5f, x1 - x0),
+                                                  eventTrackY.getHeight() };
+                if (!tc::envelopeHandlesFit(eventRect))
+                {
+                    continue;
+                }
+                const std::int64_t length = pc.getEffectiveLengthSamples();
+                const auto fadeInH = tc::fadeInHandleRect(eventRect, pc.getFadeInSamples(), length);
+                const auto fadeOutH = tc::fadeOutHandleRect(eventRect, pc.getFadeOutSamples(), length);
+                const auto gainH = tc::gainHandleRect(eventRect, fadeInH, fadeOutH);
+                if (fadeInH.contains(p))
+                {
+                    r.kind = LanePixelHitKind::FadeIn;
+                    r.rowInTrack = i;
+                    r.id = pc.getId();
+                    return r;
+                }
+                if (fadeOutH.contains(p))
+                {
+                    r.kind = LanePixelHitKind::FadeOut;
+                    r.rowInTrack = i;
+                    r.id = pc.getId();
+                    return r;
+                }
+                if (gainH.contains(p))
+                {
+                    r.kind = LanePixelHitKind::EventGain;
+                    r.rowInTrack = i;
+                    r.id = pc.getId();
+                    return r;
+                }
+            }
+        }
+        // Priority: left band → right band → right corner → left corner → body. Newest row
         // (smaller `i`) wins first in each pass.
         for (int i = 0; i < n; ++i)
         {
@@ -637,6 +694,123 @@ bool ClipWaveformView::isClipTrimGestureInProgress() const noexcept
         && trimPlacedId_.has_value();
 }
 
+bool ClipWaveformView::isClipEnvelopeGestureInProgress() const noexcept
+{
+    return (pointerLaneMode_ == PointerLaneMode::FadeIn
+            || pointerLaneMode_ == PointerLaneMode::FadeOut
+            || pointerLaneMode_ == PointerLaneMode::EventGain)
+        && envelopeClipId_ != kInvalidPlacedClipId;
+}
+
+void ClipWaveformView::publishEnvelopePreview(const float gainDb,
+                                              const std::int64_t fadeIn,
+                                              const std::int64_t fadeOut)
+{
+    if (envelopeClipId_ == kInvalidPlacedClipId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int tIdx = snap->findTrackIndexById(trackId_);
+    if (tIdx < 0)
+    {
+        return;
+    }
+    const Track& tr = snap->getTrack(tIdx);
+    for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+    {
+        const PlacedClip& p = tr.getPlacedClip(i);
+        if (p.getId() != envelopeClipId_)
+        {
+            continue;
+        }
+        const event_amplitude::Params fitted = event_amplitude::fitToLength(
+            gainDb, fadeIn, fadeOut, p.getEffectiveLengthSamples());
+        if (fitted.gainDb == p.getEventGainDb() && fitted.fadeInSamples == p.getFadeInSamples()
+            && fitted.fadeOutSamples == p.getFadeOutSamples())
+        {
+            return;
+        }
+        session_.setClipEventAmplitude(
+            envelopeClipId_, fitted.gainDb, fitted.fadeInSamples, fitted.fadeOutSamples);
+        return;
+    }
+}
+
+void ClipWaveformView::finishEnvelopeGesture(const bool recordUndo)
+{
+    const std::shared_ptr<const SessionSnapshot> origin = envelopeUndoOrigin_;
+    const std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
+    envelopeUndoOrigin_.reset();
+    envelopeClipId_ = kInvalidPlacedClipId;
+    envelopeReadout_.clear();
+    pointerLaneMode_ = PointerLaneMode::None;
+    if (recordUndo && origin != nullptr && after != nullptr && origin.get() != after.get()
+        && laneHost_.recordAppliedClipEdit)
+    {
+        laneHost_.recordAppliedClipEdit("Event envelope", origin, after);
+    }
+}
+
+void ClipWaveformView::cancelEnvelopeGesture()
+{
+    const std::shared_ptr<const SessionSnapshot> origin = envelopeUndoOrigin_;
+    envelopeUndoOrigin_.reset();
+    envelopeClipId_ = kInvalidPlacedClipId;
+    envelopeReadout_.clear();
+    pointerLaneMode_ = PointerLaneMode::None;
+    if (origin != nullptr)
+    {
+        session_.restoreSessionSnapshotForUndo(origin);
+    }
+    repaint();
+}
+
+void ClipWaveformView::paintEnvelopeChrome(juce::Graphics& g,
+                                           juce::Rectangle<float> eventRect,
+                                           const TimelineStrip& strip,
+                                           const bool showHandles)
+{
+    const std::int64_t length = static_cast<std::int64_t>(strip.materialNumSamples);
+    tc::paintEventAmplitudeOverlay(
+        g, eventRect, strip.fadeInSamples, strip.fadeOutSamples, length, showHandles);
+}
+
+void ClipWaveformView::paintEnvelopeReadout(juce::Graphics& g)
+{
+    if (envelopeReadout_.isEmpty())
+    {
+        return;
+    }
+    g.setFont(12.0f);
+    const int textW = juce::jmax(72, envelopeReadout_.length() * 7 + 12);
+    juce::Rectangle<int> box {
+        juce::roundToInt(envelopeReadoutPos_.x + 8.0f),
+        juce::roundToInt(envelopeReadoutPos_.y - 18.0f),
+        textW,
+        16
+    };
+    box = box.constrainedWithin(getLocalBounds());
+    g.setColour(juce::Colour(0xff121820).withAlpha(0.88f));
+    g.fillRoundedRectangle(box.toFloat(), 2.0f);
+    g.setColour(juce::Colour(0xffd7e3f4));
+    g.drawFittedText(envelopeReadout_, box, juce::Justification::centred, 1);
+}
+
+bool ClipWaveformView::keyPressed(const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::escapeKey && isClipEnvelopeGestureInProgress())
+    {
+        cancelEnvelopeGesture();
+        return true;
+    }
+    return false;
+}
+
 std::int64_t ClipWaveformView::snapTimelineSample(std::int64_t sampleOnTimeline) const noexcept
 {
     sampleOnTimeline = juce::jmax(std::int64_t{ 0 }, sampleOnTimeline);
@@ -664,6 +838,7 @@ ClipWaveformView::ClipWaveformView(
     jassert(trackId_ != kInvalidTrackId);
     // JUCE: selection/drag; seek is on the timeline ruler, not the empty lane.
     setInterceptsMouseClicks(true, false);
+    setWantsKeyboardFocus(true);
     setOpaque(false);
 
     // Deferred raster rebuilds are staggered per lane so several audio lanes never run their
@@ -802,6 +977,9 @@ void ClipWaveformView::clearSelectionOnly()
     publishPlacedClipSelectionToLaneHost();
     pointerLaneMode_ = PointerLaneMode::None;
     trimPlacedId_.reset();
+    envelopeUndoOrigin_.reset();
+    envelopeClipId_ = kInvalidPlacedClipId;
+    envelopeReadout_.clear();
     mouseDownPlacedId_.reset();
     dragMovementBeyondThreshold_ = false;
     hoverEventTrimCueId_.reset();
@@ -831,6 +1009,9 @@ void ClipWaveformView::cancelInteractionStateForSnapshotRestore()
 
     pointerLaneMode_ = PointerLaneMode::None;
     trimPlacedId_.reset();
+    envelopeUndoOrigin_.reset();
+    envelopeClipId_ = kInvalidPlacedClipId;
+    envelopeReadout_.clear();
     trimStartSample_ = 0;
     trimMaterialNumSamples_ = 0;
     trimOriginLeft_ = 0;
@@ -929,7 +1110,43 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
         = (editTool == EditTool::Split)
               ? hitPlacedEventBodyOnlyInLaneAtPixels(
                     snap, tIdx, e.position, b, eventTrackY, visStart, spp)
-              : hitPlacedInLaneAtPixels(snap, tIdx, e.position, b, eventTrackY, visStart, spp);
+              : hitPlacedInLaneAtPixels(
+                    snap, tIdx, e.position, b, eventTrackY, visStart, spp, currentEventDetail());
+    if (ph.kind == LanePixelHitKind::FadeIn || ph.kind == LanePixelHitKind::FadeOut
+        || ph.kind == LanePixelHitKind::EventGain)
+    {
+        const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
+        selectedPlacedId_ = ph.id;
+        publishPlacedClipSelectionToLaneHost();
+        envelopeUndoOrigin_ = snap;
+        envelopeClipId_ = ph.id;
+        envelopeDragFadeIn_ = hitPlaced.getFadeInSamples();
+        envelopeDragFadeOut_ = hitPlaced.getFadeOutSamples();
+        envelopeClickDownY_ = e.position.y;
+        const bool resetGain = ph.kind == LanePixelHitKind::EventGain
+                               && (e.mods.isCommandDown() || e.mods.isCtrlDown());
+        envelopeDragGainDb_ = resetGain ? 0.0f : hitPlaced.getEventGainDb();
+        pointerLaneMode_ = ph.kind == LanePixelHitKind::FadeIn
+                               ? PointerLaneMode::FadeIn
+                               : (ph.kind == LanePixelHitKind::FadeOut ? PointerLaneMode::FadeOut
+                                                                       : PointerLaneMode::EventGain);
+        mouseDownPlacedId_.reset();
+        dragMovementBeyondThreshold_ = false;
+        trimPlacedId_.reset();
+        if (resetGain
+            && (hitPlaced.getEventGainDb() != 0.0f || hitPlaced.getFadeInSamples() != envelopeDragFadeIn_
+                || hitPlaced.getFadeOutSamples() != envelopeDragFadeOut_))
+        {
+            publishEnvelopePreview(0.0f, envelopeDragFadeIn_, envelopeDragFadeOut_);
+        }
+        grabKeyboardFocus();
+        setMouseCursor(juce::MouseCursor(
+            pointerLaneMode_ == PointerLaneMode::EventGain
+                ? juce::MouseCursor::StandardCursorType::UpDownResizeCursor
+                : juce::MouseCursor::StandardCursorType::LeftRightResizeCursor));
+        repaint();
+        return;
+    }
     if (ph.kind == LanePixelHitKind::TrimLeft)
     {
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
@@ -1074,6 +1291,71 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
 {
     if (e.mods.isMiddleButtonDown())
     {
+        return;
+    }
+    if (isClipEnvelopeGestureInProgress())
+    {
+        const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+        const int tIdx = snap != nullptr ? snap->findTrackIndexById(trackId_) : -1;
+        const PlacedClip* placed = nullptr;
+        if (snap != nullptr && tIdx >= 0)
+        {
+            const Track& tr = snap->getTrack(tIdx);
+            for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+            {
+                if (tr.getPlacedClip(i).getId() == envelopeClipId_)
+                {
+                    placed = &tr.getPlacedClip(i);
+                    break;
+                }
+            }
+        }
+        if (placed == nullptr)
+        {
+            return;
+        }
+        const std::int64_t length = placed->getEffectiveLengthSamples();
+        const std::int64_t start = placed->getStartSample();
+        float gainDb = envelopeDragGainDb_;
+        std::int64_t fadeIn = envelopeDragFadeIn_;
+        std::int64_t fadeOut = envelopeDragFadeOut_;
+        const juce::Rectangle<float> b = getLocalBounds().toFloat();
+        const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+        const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples((double)juce::jmax(1.0f, b.getWidth()));
+        const float tClick = juce::jlimit(0.0f, 1.0f, e.position.x / juce::jmax(1.0f, b.getWidth()));
+        const std::int64_t sAtX = visStart + (std::int64_t)std::llround((double)tClick * (double)visLen);
+        if (pointerLaneMode_ == PointerLaneMode::FadeIn)
+        {
+            const std::int64_t other = fadeOut;
+            const std::int64_t cap = juce::jmax(std::int64_t{ 0 }, length - other);
+            fadeIn = juce::jlimit(std::int64_t{ 0 }, cap, sAtX - start);
+        }
+        else if (pointerLaneMode_ == PointerLaneMode::FadeOut)
+        {
+            const std::int64_t other = fadeIn;
+            const std::int64_t cap = juce::jmax(std::int64_t{ 0 }, length - other);
+            fadeOut = juce::jlimit(std::int64_t{ 0 }, cap, (start + length) - sAtX);
+        }
+        else
+        {
+            const float sens = e.mods.isShiftDown() ? 0.05f : 0.25f;
+            gainDb = envelopeDragGainDb_ - (e.position.y - envelopeClickDownY_) * sens;
+        }
+        const double rate = placed->getAudioClip().getSourceSampleRate();
+        if (pointerLaneMode_ == PointerLaneMode::EventGain)
+        {
+            envelopeReadout_ = juce::String(event_amplitude::sanitizeGainDb(gainDb), 1) + " dB";
+        }
+        else
+        {
+            const std::int64_t shown = pointerLaneMode_ == PointerLaneMode::FadeIn ? fadeIn : fadeOut;
+            const double sec = (rate > 0.0 ? static_cast<double>(shown) / rate : 0.0);
+            envelopeReadout_ = sec < 1.0 ? juce::String(juce::roundToInt(sec * 1000.0)) + " ms"
+                                         : juce::String(sec, 2) + " s";
+        }
+        envelopeReadoutPos_ = e.position;
+        publishEnvelopePreview(gainDb, fadeIn, fadeOut);
+        repaint();
         return;
     }
     if (pointerLaneMode_ == PointerLaneMode::TrimLeft && trimPlacedId_.has_value())
@@ -1244,6 +1526,14 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
         laneHost_.clearAllGhosts();
     }
     restoreNormalCursorAfterInvalidDrop();
+
+    if (isClipEnvelopeGestureInProgress())
+    {
+        finishEnvelopeGesture(true);
+        updateTrimHoverAndCursor(e.position);
+        repaint();
+        return;
+    }
 
     if (pointerLaneMode_ == PointerLaneMode::TrimLeft)
     {
@@ -1569,6 +1859,14 @@ void ClipWaveformView::syncClipStripsFromSnapshotIfNeeded()
                 fp = mixFingerprint(fp, (std::uint64_t)p.getStartSample());
                 fp = mixFingerprint(fp, (std::uint64_t)p.getEffectiveLengthSamples());
                 fp = mixFingerprint(fp, (std::uint64_t)(std::uintptr_t)p.getMaterial().get());
+                fp = mixFingerprint(fp, (std::uint64_t)p.getFadeInSamples());
+                fp = mixFingerprint(fp, (std::uint64_t)p.getFadeOutSamples());
+                {
+                    const float db = p.getEventGainDb();
+                    std::uint32_t bits = 0;
+                    std::memcpy(&bits, &db, sizeof(bits));
+                    fp = mixFingerprint(fp, bits);
+                }
             }
         }
     }
@@ -1630,6 +1928,9 @@ void ClipWaveformView::syncClipStripsFromSnapshotIfNeeded()
         strip.materialWindowStart = placed.getMaterialWindowStartSamples();
         strip.materialWindowEndExcl = placed.getMaterialWindowEndExclusiveSamples();
         strip.displayName = placed.getDisplayName();
+        strip.eventGainDb = placed.getEventGainDb();
+        strip.fadeInSamples = placed.getFadeInSamples();
+        strip.fadeOutSamples = placed.getFadeOutSamples();
         {
             const std::int64_t eff = placed.getEffectiveLengthSamples();
             strip.materialNumSamples
@@ -2671,11 +2972,24 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
         {
             tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
+        {
+            const bool showEnvelopeHandles
+                = detail != track_row_heights::LaneEventDetail::Bars
+                  && tc::envelopeHandlesFit(eventRect)
+                  && ((selectedPlacedId_.has_value() && *selectedPlacedId_ == strip.clipId)
+                      || hoverEventTrimCueId_ == strip.clipId
+                      || hoverLeftTrimHandleId_ == strip.clipId
+                      || hoverRightTrimHandleId_ == strip.clipId
+                      || envelopeClipId_ == strip.clipId);
+            paintEnvelopeChrome(g, eventRect, strip, showEnvelopeHandles);
+        }
         if (detail == track_row_heights::LaneEventDetail::Full)
         {
             tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));
         }
     }
+
+    paintEnvelopeReadout(g);
 
     // --- (3) Same shade+hatch *style* for every row the interval function marks. **Order r = n-1…0**:
     //     the **newest** row’s pass (`r==0`) is **last** so if a pixel is somehow shared, the front
@@ -2934,6 +3248,17 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
         {
             tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
+        {
+            const bool showEnvelopeHandles
+                = detail != track_row_heights::LaneEventDetail::Bars
+                  && tc::envelopeHandlesFit(eventRect)
+                  && ((selectedPlacedId_.has_value() && *selectedPlacedId_ == strip.clipId)
+                      || hoverEventTrimCueId_ == strip.clipId
+                      || hoverLeftTrimHandleId_ == strip.clipId
+                      || hoverRightTrimHandleId_ == strip.clipId
+                      || envelopeClipId_ == strip.clipId);
+            paintEnvelopeChrome(g, eventRect, strip, showEnvelopeHandles);
+        }
         // Live label over the blitted raster: never stale after rename (raster fingerprint does not
         // include the display name). Bars / Content rows carry no label (the content has priority).
         if (detail == track_row_heights::LaneEventDetail::Full)
@@ -2941,6 +3266,7 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
             tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));
         }
     }
+    paintEnvelopeReadout(g);
 
     if (recordingCycleBehindLayersActive_)
     {
@@ -3003,10 +3329,18 @@ void ClipWaveformView::updateTrimHoverAndCursor(const juce::Point<float> pos) no
         return;
     }
     if (pointerLaneMode_ == PointerLaneMode::TrimRight
-        || pointerLaneMode_ == PointerLaneMode::TrimLeft)
+        || pointerLaneMode_ == PointerLaneMode::TrimLeft
+        || pointerLaneMode_ == PointerLaneMode::FadeIn
+        || pointerLaneMode_ == PointerLaneMode::FadeOut)
     {
         setMouseCursor(
             juce::MouseCursor(juce::MouseCursor::StandardCursorType::LeftRightResizeCursor));
+        return;
+    }
+    if (pointerLaneMode_ == PointerLaneMode::EventGain)
+    {
+        setMouseCursor(
+            juce::MouseCursor(juce::MouseCursor::StandardCursorType::UpDownResizeCursor));
         return;
     }
     if (mouseDownPlacedId_.has_value() && pointerLaneMode_ == PointerLaneMode::MoveClip)
@@ -3141,10 +3475,11 @@ void ClipWaveformView::updateTrimHoverAndCursor(const juce::Point<float> pos) no
         return;
     }
     const LanePixelHit ph
-        = hitPlacedInLaneAtPixels(snap, tIdx, pos, b, eventTrackY, visStart, spp);
+        = hitPlacedInLaneAtPixels(snap, tIdx, pos, b, eventTrackY, visStart, spp, currentEventDetail());
     hoverEventTrimCueId_.reset();
     hoverLeftTrimHandleId_.reset();
     hoverRightTrimHandleId_.reset();
+    juce::String nextReadout;
     if (ph.kind == LanePixelHitKind::TrimLeft)
     {
         hoverLeftTrimHandleId_ = ph.id;
@@ -3153,19 +3488,62 @@ void ClipWaveformView::updateTrimHoverAndCursor(const juce::Point<float> pos) no
     {
         hoverRightTrimHandleId_ = ph.id;
     }
+    else if (ph.kind == LanePixelHitKind::FadeIn || ph.kind == LanePixelHitKind::FadeOut
+             || ph.kind == LanePixelHitKind::EventGain)
+    {
+        hoverEventTrimCueId_ = ph.id;
+        const PlacedClip& pc = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
+        const double rate = pc.getAudioClip().getSourceSampleRate();
+        if (ph.kind == LanePixelHitKind::EventGain)
+        {
+            nextReadout = juce::String(pc.getEventGainDb(), 1) + " dB";
+        }
+        else
+        {
+            const std::int64_t shown = ph.kind == LanePixelHitKind::FadeIn ? pc.getFadeInSamples()
+                                                                           : pc.getFadeOutSamples();
+            const double sec = rate > 0.0 ? static_cast<double>(shown) / rate : 0.0;
+            nextReadout = sec < 1.0 ? juce::String(juce::roundToInt(sec * 1000.0)) + " ms"
+                                    : juce::String(sec, 2) + " s";
+        }
+    }
     else if (ph.kind == LanePixelHitKind::EventBody)
     {
         hoverEventTrimCueId_ = ph.id;
+        const PlacedClip& pc = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
+        const float ex0 = TimelineRulerView::sessionSampleToLocalX(
+            pc.getStartSample(), b.getX(), visStart, spp);
+        const float ex1 = TimelineRulerView::sessionSampleToLocalX(
+            pc.getStartSample() + pc.getEffectiveLengthSamples(), b.getX(), visStart, spp);
+        juce::Rectangle<float> eventRect{ juce::jmin(ex0, ex1), eventTrackY.getY(),
+                                          juce::jmax(0.5f, std::abs(ex1 - ex0)), eventTrackY.getHeight() };
+        if (currentEventDetail() == track_row_heights::LaneEventDetail::Bars
+            || !tc::envelopeHandlesFit(eventRect))
+        {
+            nextReadout = "Enlarge the row to edit fades and gain";
+        }
+    }
+    if (nextReadout != envelopeReadout_ && !isClipEnvelopeGestureInProgress())
+    {
+        envelopeReadout_ = nextReadout;
+        envelopeReadoutPos_ = pos;
+        repaint();
     }
     if (beforeCue != hoverEventTrimCueId_ || beforeL != hoverLeftTrimHandleId_
         || beforeR != hoverRightTrimHandleId_)
     {
         repaint();
     }
-    if (ph.kind == LanePixelHitKind::TrimLeft || ph.kind == LanePixelHitKind::TrimRight)
+    if (ph.kind == LanePixelHitKind::TrimLeft || ph.kind == LanePixelHitKind::TrimRight
+        || ph.kind == LanePixelHitKind::FadeIn || ph.kind == LanePixelHitKind::FadeOut)
     {
         setMouseCursor(
             juce::MouseCursor(juce::MouseCursor::StandardCursorType::LeftRightResizeCursor));
+    }
+    else if (ph.kind == LanePixelHitKind::EventGain)
+    {
+        setMouseCursor(
+            juce::MouseCursor(juce::MouseCursor::StandardCursorType::UpDownResizeCursor));
     }
     else if (!cursorOverriddenForInvalidDrop_)
     {
@@ -3182,11 +3560,15 @@ void ClipWaveformView::mouseMove(const juce::MouseEvent& e)
 void ClipWaveformView::mouseExit(const juce::MouseEvent& e)
 {
     juce::ignoreUnused(e);
-    if (hoverEventTrimCueId_ || hoverLeftTrimHandleId_ || hoverRightTrimHandleId_)
+    if (hoverEventTrimCueId_ || hoverLeftTrimHandleId_ || hoverRightTrimHandleId_ || envelopeReadout_.isNotEmpty())
     {
         hoverEventTrimCueId_.reset();
         hoverLeftTrimHandleId_.reset();
         hoverRightTrimHandleId_.reset();
+        if (!isClipEnvelopeGestureInProgress())
+        {
+            envelopeReadout_.clear();
+        }
         repaint();
     }
     if (!cursorOverriddenForInvalidDrop_ && pointerLaneMode_ != PointerLaneMode::TrimRight

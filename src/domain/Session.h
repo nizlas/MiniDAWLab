@@ -198,6 +198,13 @@ public:
     // [Message thread] Non-destructive left-edge trim (material offset L); one snapshot publish.
     void setClipLeftEdgeTrim(PlacedClipId id, std::int64_t newLeftTrimSamples) noexcept;
 
+    /// [Message thread] One snapshot publish of this placement's event gain and fade lengths.
+    /// Does not change shared material, track pre-gain, fader or pan.
+    void setClipEventAmplitude(PlacedClipId id,
+                               float gainDb,
+                               std::int64_t fadeInSamples,
+                               std::int64_t fadeOutSamples) noexcept;
+
     // [Message thread] Split one placement into two at `splitSampleOnTimeline` (strictly inside the
     // clip's audible span). Returns the new ids `{left, right}` on success; no publish on failure.
     [[nodiscard]] std::optional<std::pair<PlacedClipId, PlacedClipId>> splitClip(

@@ -37,6 +37,12 @@ struct ProjectFileClipV1
     // Optional user-facing event name (project metadata only; never renames the source file).
     // Empty = absent in JSON; UI falls back to the source file stem.
     juce::String name;
+    /// v31: per-placement event gain in dB. Omitted when 0. Absent key loads as 0 dB.
+    float eventGainDb = 0.0f;
+    /// v31: linear fade-in / fade-out lengths in timeline samples, measured from the current
+    /// edges. Omitted when 0. Absent or invalid loads as no fade.
+    std::int64_t fadeInSamples = 0;
+    std::int64_t fadeOutSamples = 0;
 };
 
 struct ProjectFileInsertV1
@@ -426,7 +432,11 @@ struct ProjectFileV1
     /// Solo memories persisted per project (root `soloMemories`): exactly four slots.
     static constexpr int kSoloMemoryCount = 4;
 
-    /// Current JSON writer version (**28** adds the optional per-track `tracks[].colour` palette
+    /// Current JSON writer version (**31** adds the optional per-clip `eventGainDb`,
+    /// `fadeInSamples` and `fadeOutSamples` on each placed audio clip. Omitted at 0 dB / no
+    /// fade; absent keys load as 0 dB and no fades. Versions **29** and **30** are reserved
+    /// for the unmerged Volume/Pan automation branch and are rejected, not interpreted.)
+    /// (**28** adds the optional per-track `tracks[].colour` palette
     /// key — `"blue" | "teal" | "green" | "ochre" | "orange" | "red" | "purple"`, omitted for the
     /// default grey — and extends the root `trackRowHeightPreset` vocabulary with `"micro"` and
     /// `"mini"`; row heights now live on the Micro + n x 14 px grid (`ui/TrackRowHeightPresets.h`),
@@ -468,7 +478,7 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 28;
+    static constexpr int kCurrentVersion = 31;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

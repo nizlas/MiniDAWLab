@@ -83,6 +83,13 @@ struct ClipWaveformLaneHost
     std::function<bool(PlacedClipId clipId, ClipTrimEdge edge, std::int64_t newValueSamples)>
         commitClipTrimAsUndoable;
 
+    /** One undo step for an event-gain or fade drag that already published `after`.
+        `before` is the snapshot captured at mouse-down. Escape does not call this. */
+    std::function<void(const juce::String& label,
+                       std::shared_ptr<const SessionSnapshot> before,
+                       std::shared_ptr<const SessionSnapshot> after)>
+        recordAppliedClipEdit;
+
     /** Undoable clip rename ("Rename clip"): display name is project metadata only — the source
         audio file on disk is never renamed. Empty after trim is rejected by the caller. */
     std::function<bool(PlacedClipId clipId, juce::String newDisplayName)> commitClipRenameAsUndoable;
@@ -138,6 +145,9 @@ public:
     // [Message thread] True during in-flight **left or right trim** (mouse down on handle … mouse up).
     [[nodiscard]] bool isClipTrimGestureInProgress() const noexcept;
 
+    // [Message thread] True during an in-flight fade or event-gain drag.
+    [[nodiscard]] bool isClipEnvelopeGestureInProgress() const noexcept;
+
     // [Message thread] Clear UI selection without starting a move (used from `TrackLanesView`).
     void clearSelectionOnly();
 
@@ -189,6 +199,7 @@ public:
     void mouseUp(const juce::MouseEvent& e) override;
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
+    bool keyPressed(const juce::KeyPress& key) override;
 
 private:
     [[nodiscard]] std::int64_t snapTimelineSample(std::int64_t sampleOnTimeline) const noexcept;
@@ -207,6 +218,9 @@ private:
         std::int64_t materialWindowEndExcl = 0;
         // User-facing event name (project metadata; empty = fall back to source file stem).
         juce::String displayName;
+        float eventGainDb = 0.0f;
+        std::int64_t fadeInSamples = 0;
+        std::int64_t fadeOutSamples = 0;
     };
     // Top-left event label: custom display name if set, else the source file stem.
     [[nodiscard]] static juce::String clipDisplayLabelForStrip(const TimelineStrip& strip);
@@ -377,8 +391,9 @@ private:
     // UI-local selection; never published in `SessionSnapshot` (see `PHASE_PLAN` / `ARCHITECTURE_…`).
     std::optional<PlacedClipId> selectedPlacedId_;
 
-    // Move vs. trim: trim never calls `Session::moveClip`.
-    enum class PointerLaneMode { None, MoveClip, TrimRight, TrimLeft };
+    // Move vs. trim vs. per-event amplitude. Trim never calls `Session::moveClip`.
+    // A fade or gain drag keeps its mode after the pointer leaves the handle.
+    enum class PointerLaneMode { None, MoveClip, TrimRight, TrimLeft, FadeIn, FadeOut, EventGain };
     PointerLaneMode pointerLaneMode_ = PointerLaneMode::None;
     // Trim in flight (separate from move preview).
     std::optional<PlacedClipId> trimPlacedId_;
@@ -422,6 +437,27 @@ private:
     std::int64_t dragGhostLengthSamples_ = 0;
 
     bool cursorOverriddenForInvalidDrop_ = false;
+
+    // In-flight event gain / fade. Live publishes go through `Session::setClipEventAmplitude`.
+    // `envelopeUndoOrigin_` is the snapshot from mouse-down; one history step is recorded on
+    // mouse-up. Escape restores that snapshot and records nothing.
+    std::shared_ptr<const SessionSnapshot> envelopeUndoOrigin_;
+    PlacedClipId envelopeClipId_ = kInvalidPlacedClipId;
+    float envelopeDragGainDb_ = 0.0f;
+    std::int64_t envelopeDragFadeIn_ = 0;
+    std::int64_t envelopeDragFadeOut_ = 0;
+    float envelopeClickDownY_ = 0.0f;
+    juce::String envelopeReadout_;
+    juce::Point<float> envelopeReadoutPos_;
+
+    void publishEnvelopePreview(float gainDb, std::int64_t fadeIn, std::int64_t fadeOut);
+    void finishEnvelopeGesture(bool recordUndo);
+    void cancelEnvelopeGesture();
+    void paintEnvelopeChrome(juce::Graphics& g,
+                             juce::Rectangle<float> eventRect,
+                             const TimelineStrip& strip,
+                             bool showHandles);
+    void paintEnvelopeReadout(juce::Graphics& g);
 
     // UI-only live take preview (see `setRecordingPreviewOverlay`); cleared when recording stops.
     bool recordingPreviewActive_ = false;

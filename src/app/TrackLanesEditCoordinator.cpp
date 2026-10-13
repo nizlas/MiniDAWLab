@@ -473,6 +473,25 @@ void TrackLanesEditCoordinator::install()
             return committed;
         });
 
+    trackLanesView_.setOnAppliedClipEditRequested(
+        [this](const juce::String& label,
+               std::shared_ptr<const SessionSnapshot> before,
+               std::shared_ptr<const SessionSnapshot> after) {
+            if (callbacks_.isRecording() || callbacks_.isCountInActive())
+            {
+                return;
+            }
+            if (callbacks_.recordAppliedSessionEdit)
+            {
+                callbacks_.recordAppliedSessionEdit(label, std::move(before), std::move(after));
+            }
+            callbacks_.syncViewportFromSession();
+            trackLanesView_.syncTracksFromSession();
+            rulerView_.repaint();
+            trackLanesView_.repaint();
+            inspectorView_.refreshFromSession();
+        });
+
     trackLanesView_.setOnUndoableClipRenameRequested(
         [this](const PlacedClipId clipId, juce::String newName) -> bool {
             if (clipId == kInvalidPlacedClipId)

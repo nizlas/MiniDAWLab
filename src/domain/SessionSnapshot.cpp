@@ -14,6 +14,7 @@
 #include "domain/SessionSnapshot.h"
 
 #include "domain/AudioClip.h"
+#include "domain/EventAmplitude.h"
 #include "domain/ProjectMusicalTime.h"
 #include "domain/SessionRouting.h"
 #include "domain/TrackStereoPan.h"
@@ -1216,6 +1217,66 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipLeftEdgeTrimmed(
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipEventAmplitude(
+    const SessionSnapshot& previous,
+    const PlacedClipId id,
+    const float gainDb,
+    const std::int64_t fadeInSamples,
+    const std::int64_t fadeOutSamples) noexcept
+{
+    if (id == kInvalidPlacedClipId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
+                                                                         previous.arrangementExtentSamples_,
+                                                                         previous.getLeftLocatorSamples(),
+                                                                         previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    bool any = false;
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int ti = 0; ti < previous.getNumTracks(); ++ti)
+    {
+        const Track& t = previous.getTrack(ti);
+        const std::vector<PlacedClip>& oldC = t.getPlacedClips();
+        std::vector<PlacedClip> v;
+        v.reserve(oldC.size());
+        bool rowChanged = false;
+        for (const PlacedClip& p : oldC)
+        {
+            if (p.getId() == id)
+            {
+                v.push_back(p.withEventAmplitude(gainDb, fadeInSamples, fadeOutSamples));
+                any = true;
+                rowChanged = true;
+            }
+            else
+            {
+                v.push_back(p);
+            }
+        }
+        if (rowChanged)
+        {
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
+        }
+        else
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+    }
+    if (!any)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
+                                                                         previous.arrangementExtentSamples_,
+                                                                         previous.getLeftLocatorSamples(),
+                                                                         previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+}
+
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipSplit(
     const SessionSnapshot& previous,
     const PlacedClipId targetId,
@@ -1263,11 +1324,19 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipSplit(
             std::shared_ptr<const AudioClip> mat = orig.getMaterial();
             const std::int64_t ws = orig.getMaterialWindowStartSamples();
             const std::int64_t we = orig.getMaterialWindowEndExclusiveSamples();
+            const event_amplitude::Params srcAmp {
+                orig.getEventGainDb(), orig.getFadeInSamples(), orig.getFadeOutSamples()
+            };
+            const event_amplitude::Params leftAmp = event_amplitude::splitLeft(srcAmp, vLeft);
+            const event_amplitude::Params rightAmp = event_amplitude::splitRight(srcAmp, vRight);
             // Both halves inherit the user-facing display name (split is not a rename).
+            // Fade-in stays on the left part only; fade-out stays on the right part only.
             v.push_back(PlacedClip(leftNewId, mat, S, L, vLeft, ws, we)
-                            .withDisplayName(orig.getDisplayName()));
+                            .withDisplayName(orig.getDisplayName())
+                            .withEventAmplitude(leftAmp.gainDb, leftAmp.fadeInSamples, leftAmp.fadeOutSamples));
             v.push_back(PlacedClip(rightNewId, mat, splitT, L + vLeft, vRight, ws, we)
-                            .withDisplayName(orig.getDisplayName()));
+                            .withDisplayName(orig.getDisplayName())
+                            .withEventAmplitude(rightAmp.gainDb, rightAmp.fadeInSamples, rightAmp.fadeOutSamples));
             any = true;
             rowChanged = true;
         }

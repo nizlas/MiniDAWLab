@@ -1,6 +1,7 @@
 #include "engine/PlaybackMixHelpers.h"
 
 #include "domain/AudioClip.h"
+#include "domain/EventAmplitude.h"
 #include "domain/PlacedClip.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -389,6 +390,118 @@ namespace
             }
         }
     }
+
+    /// Event gain × linear fade on both scratch channels. Unity (0 dB, no fades) returns
+    /// without touching the buffer. A constant run is one vector multiply; a fade is per sample.
+    /// No allocation. Same factor on L and R.
+    void applyEventAmplitudeToStereo(float* scratchL,
+                                     float* scratchR,
+                                     const int run,
+                                     const std::int64_t rel0,
+                                     const std::int64_t eventLength,
+                                     const float gainDb,
+                                     const std::int64_t fadeInSamples,
+                                     const std::int64_t fadeOutSamples) noexcept
+    {
+        if (run <= 0 || scratchL == nullptr || scratchR == nullptr)
+        {
+            return;
+        }
+        if (gainDb == 0.0f && fadeInSamples <= 0 && fadeOutSamples <= 0)
+        {
+            return;
+        }
+        const float g = event_amplitude::linearGain(gainDb);
+        if (event_amplitude::isConstantOverRun(rel0, run, eventLength, fadeInSamples, fadeOutSamples))
+        {
+            if (g != 1.0f)
+            {
+                juce::FloatVectorOperations::multiply(scratchL, g, run);
+                juce::FloatVectorOperations::multiply(scratchR, g, run);
+            }
+            return;
+        }
+        for (int i = 0; i < run; ++i)
+        {
+            const float a = g * event_amplitude::envelopeAt(
+                                    rel0 + static_cast<std::int64_t>(i), eventLength, fadeInSamples, fadeOutSamples);
+            scratchL[i] *= a;
+            scratchR[i] *= a;
+        }
+    }
+
+    /// Dry path when the run crosses a fade (and, if asked, a pre-gain ramp). Event gain,
+    /// the fade, pre-gain, fader and pan are each applied once. The pre-gain step matches
+    /// `addClipRunToOutputsPreGainRamped`.
+    void addClipRunToOutputsWithEventEnvelope(const AudioClip& clip,
+                                              const int offInMaterial,
+                                              const int run,
+                                              const int outFrame0,
+                                              const int numOutChannels,
+                                              float* const* outputChannelData,
+                                              const float trackGain,
+                                              const float stereoPan,
+                                              const float pre0,
+                                              const float pre1,
+                                              const std::int64_t rel0,
+                                              const std::int64_t eventLength,
+                                              const float eventGainDb,
+                                              const std::int64_t fadeInSamples,
+                                              const std::int64_t fadeOutSamples) noexcept
+    {
+        if (run <= 0 || outputChannelData == nullptr)
+        {
+            return;
+        }
+        const int numSourceChannels = clip.getNumChannels();
+        const juce::AudioBuffer<float>& buf = clip.getAudio();
+        const float gL = trackPanLawGainLeft(stereoPan);
+        const float gR = trackPanLawGainRight(stereoPan);
+        const float eg = event_amplitude::linearGain(eventGainDb);
+        const float preStep = (pre1 - pre0) / static_cast<float>(run);
+
+        auto addEnv = [&](float* dest, const float* src, const float constGain) noexcept {
+            float pre = pre0;
+            for (int i = 0; i < run; ++i)
+            {
+                const float env = event_amplitude::envelopeAt(
+                    rel0 + static_cast<std::int64_t>(i), eventLength, fadeInSamples, fadeOutSamples);
+                dest[i] += src[i] * pre * constGain * eg * env;
+                pre += preStep;
+            }
+        };
+
+        if (numOutChannels == 1 && numSourceChannels == 1)
+        {
+            if (float* d = outputChannelData[0])
+            {
+                addEnv(d + outFrame0, buf.getReadPointer(0) + offInMaterial,
+                       0.5f * (gL + gR) * trackGain);
+            }
+            return;
+        }
+        for (int outChannel = 0; outChannel < numOutChannels; ++outChannel)
+        {
+            float* d = outputChannelData[outChannel];
+            if (d == nullptr)
+            {
+                continue;
+            }
+            float* const dest = d + outFrame0;
+            const bool duplicateMono = (numSourceChannels == 1 && numOutChannels >= 2
+                                        && (outChannel == 0 || outChannel == 1));
+            if (duplicateMono)
+            {
+                addEnv(dest, buf.getReadPointer(0) + offInMaterial,
+                       trackGain * ((outChannel == 0) ? gL : gR));
+            }
+            else if (outChannel < numSourceChannels)
+            {
+                addEnv(dest, buf.getReadPointer(outChannel) + offInMaterial,
+                       trackGain * ((outChannel == 0) ? gL : gR));
+            }
+        }
+    }
 } // namespace
 
 void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
@@ -487,12 +600,26 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                                             * ((float)(out0 + run) / (float)audibleRun)
                                        : preGainTarget;
 
+                // Event gain × fade, once, before pre-gain. Unity keeps the previous call.
+                const float eventLin = p.getEventGainLinear();
+                const bool eventVaries = !event_amplitude::isConstantOverRun(
+                    rel, run, p.getEffectiveLengthSamples(), p.getFadeInSamples(), p.getFadeOutSamples());
+                const float dryFader = (eventLin == 1.0f) ? effectiveGain : effectiveGain * eventLin;
+
                 if (useInsert && effectiveGain > 0.0f)
                 {
                     pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
                     if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
                     {
                         copyClipRunToStereoScratch(c, off, run, scratch[0], scratch[1]);
+                        applyEventAmplitudeToStereo(scratch[0],
+                                                    scratch[1],
+                                                    run,
+                                                    rel,
+                                                    p.getEffectiveLengthSamples(),
+                                                    p.getEventGainDb(),
+                                                    p.getFadeInSamples(),
+                                                    p.getFadeOutSamples());
                         if (preGainRamping)
                         {
                             scaleStereoScratchRamped(scratch, run, pre0, pre1);
@@ -516,17 +643,26 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                                         1.0f);
                     }
                 }
+                else if (eventVaries)
+                {
+                    addClipRunToOutputsWithEventEnvelope(c, off, run, destFrame, numOutputChannels,
+                                                         outputChannelData, effectiveGain,
+                                                         tr.getStereoPan(), pre0, pre1, rel,
+                                                         p.getEffectiveLengthSamples(),
+                                                         p.getEventGainDb(), p.getFadeInSamples(),
+                                                         p.getFadeOutSamples());
+                }
                 else if (preGainRamping)
                 {
                     addClipRunToOutputsPreGainRamped(c, off, run, destFrame, numOutputChannels,
-                                                     outputChannelData, effectiveGain,
+                                                     outputChannelData, dryFader,
                                                      tr.getStereoPan(), pre0, pre1);
                 }
                 else
                 {
-                    // Dry path: pre-gain folds linearly with the fader (still exactly once).
+                    // Dry path: constant event gain folds with pre-gain and the fader (still once).
                     addClipRunToOutputs(c, off, run, destFrame, numOutputChannels,
-                                        outputChannelData, effectiveGain * preGainTarget,
+                                        outputChannelData, dryFader * preGainTarget,
                                         tr.getStereoPan());
                 }
             }
@@ -871,6 +1007,12 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                                                         * ((float)(out0 + run) / (float)audibleRun)
                                    : preGainTarget;
 
+            // Event gain × fade, once, before pre-gain. Same rule as the summing renderer.
+            const float eventLin = p.getEventGainLinear();
+            const bool eventVaries = !event_amplitude::isConstantOverRun(
+                rel, run, p.getEffectiveLengthSamples(), p.getFadeInSamples(), p.getFadeOutSamples());
+            const float dryFader = (eventLin == 1.0f) ? effectiveGain : effectiveGain * eventLin;
+
             if (useInsert && effectiveGain > 0.0f)
             {
                 if (access.buffersUsable())
@@ -878,6 +1020,14 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                     float* const* scratch = access.chainScratch;
                     clearStereoScratch(scratch[0], scratch[1], juce::jmin(run, access.chainScratchCapacity));
                     copyClipRunToStereoScratch(c, off, run, scratch[0], scratch[1]);
+                    applyEventAmplitudeToStereo(scratch[0],
+                                                scratch[1],
+                                                run,
+                                                rel,
+                                                p.getEffectiveLengthSamples(),
+                                                p.getEventGainDb(),
+                                                p.getFadeInSamples(),
+                                                p.getFadeOutSamples());
                     if (preGainRamping)
                     {
                         scaleStereoScratchRamped(scratch, run, pre0, pre1);
@@ -903,17 +1053,26 @@ void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapsh
                         stageL, stageR, scratch[0], scratch[1], destFrame, run);
                 }
             }
+            else if (eventVaries)
+            {
+                float* const stagePtrs[2] = { stageL, stageR };
+                addClipRunToOutputsWithEventEnvelope(c, off, run, destFrame, 2, stagePtrs,
+                                                     effectiveGain, tr.getStereoPan(), pre0, pre1, rel,
+                                                     p.getEffectiveLengthSamples(),
+                                                     p.getEventGainDb(), p.getFadeInSamples(),
+                                                     p.getFadeOutSamples());
+            }
             else if (preGainRamping)
             {
                 float* const stagePtrs[2] = { stageL, stageR };
                 addClipRunToOutputsPreGainRamped(c, off, run, destFrame, 2, stagePtrs,
-                                                 effectiveGain, tr.getStereoPan(), pre0, pre1);
+                                                 dryFader, tr.getStereoPan(), pre0, pre1);
             }
             else
             {
-                // Dry path: pre-gain folds linearly with the fader (still exactly once).
+                // Dry path: constant event gain folds with pre-gain and the fader (still once).
                 addClipRunToStereoScratch(c, off, run, destFrame, stageL, stageR,
-                                          effectiveGain * preGainTarget, tr.getStereoPan());
+                                          dryFader * preGainTarget, tr.getStereoPan());
             }
         }
         t += run;

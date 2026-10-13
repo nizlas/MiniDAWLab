@@ -316,6 +316,13 @@ public:
     void setOnUndoableClipTrimRequested(
         std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> fn) noexcept;
 
+    /// [Message thread] One undo step for an edit already published during the gesture
+    /// (event gain / fade drag). `before` is the snapshot from mouse-down.
+    void setOnAppliedClipEditRequested(
+        std::function<void(const juce::String& label,
+                           std::shared_ptr<const SessionSnapshot> before,
+                           std::shared_ptr<const SessionSnapshot> after)> fn) noexcept;
+
     /// [Message thread] Undoable clip display-name rename ("Rename clip"); metadata only.
     void setOnUndoableClipRenameRequested(
         std::function<bool(PlacedClipId, juce::String)> fn) noexcept;
@@ -854,6 +861,10 @@ private:
     SoloUiHooks soloUiHooks_{};
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;
     std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> onUndoableClipTrimRequested_;
+    std::function<void(const juce::String&,
+                       std::shared_ptr<const SessionSnapshot>,
+                       std::shared_ptr<const SessionSnapshot>)>
+        onAppliedClipEditRequested_;
     std::function<bool(PlacedClipId, juce::String)> onUndoableClipRenameRequested_;
     std::function<EditTool()> activeEditToolProvider_;
     std::function<void(PlacedClipId, std::int64_t, bool)> onUndoableClipSplitRequested_;

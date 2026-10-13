@@ -224,6 +224,9 @@ void ClipPasteboardController::invokeCopySelectedClipFromWindowShortcut()
         pb.visibleLengthSamples = p.getEffectiveLengthSamples();
         pb.materialWindowStartSamples = p.getMaterialWindowStartSamples();
         pb.materialWindowEndExclusiveSamples = p.getMaterialWindowEndExclusiveSamples();
+        pb.eventGainDb = p.getEventGainDb();
+        pb.fadeInSamples = p.getFadeInSamples();
+        pb.fadeOutSamples = p.getFadeOutSamples();
         audioPasteboard_ = std::move(pb);
         instrumentMidiPasteboard_.reset();
         payloadKind_ = PayloadKind::Audio;
@@ -352,6 +355,23 @@ void ClipPasteboardController::invokePasteClipFromWindowShortcut()
             if (!r.wasOk())
             {
                 return false;
+            }
+            // The new placement is the front clip on the target. Copy this paste's own
+            // gain and fades onto it; later edits of either clip stay independent.
+            if (pb.eventGainDb != 0.0f || pb.fadeInSamples != 0 || pb.fadeOutSamples != 0)
+            {
+                const std::shared_ptr<const SessionSnapshot> after
+                    = session_.loadSessionSnapshotForAudioThread();
+                const int pastedIdx = after != nullptr ? after->findTrackIndexById(target) : -1;
+                if (after != nullptr && pastedIdx >= 0
+                    && after->getTrack(pastedIdx).getNumPlacedClips() > 0)
+                {
+                    session_.setClipEventAmplitude(
+                        after->getTrack(pastedIdx).getPlacedClip(0).getId(),
+                        pb.eventGainDb,
+                        pb.fadeInSamples,
+                        pb.fadeOutSamples);
+                }
             }
             callbacks_.syncViewportFromSession();
             trackLanesView_.syncTracksFromSession();

@@ -1216,6 +1216,14 @@ void TrackLanesView::setOnUndoableClipTrimRequested(
     onUndoableClipTrimRequested_ = std::move(fn);
 }
 
+void TrackLanesView::setOnAppliedClipEditRequested(
+    std::function<void(const juce::String&,
+                       std::shared_ptr<const SessionSnapshot>,
+                       std::shared_ptr<const SessionSnapshot>)> fn) noexcept
+{
+    onAppliedClipEditRequested_ = std::move(fn);
+}
+
 void TrackLanesView::setOnUndoableClipRenameRequested(
     std::function<bool(PlacedClipId, juce::String)> fn) noexcept
 {
@@ -1569,7 +1577,8 @@ bool TrackLanesView::isClipEditGestureInProgress() const noexcept
         {
             continue;
         }
-        if (u->isClipMoveGestureInProgress() || u->isClipTrimGestureInProgress())
+        if (u->isClipMoveGestureInProgress() || u->isClipTrimGestureInProgress()
+            || u->isClipEnvelopeGestureInProgress())
         {
             return true;
         }
@@ -2075,6 +2084,15 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     session_.moveClip(id, start);
                 }
                 return true;
+            };
+        host.recordAppliedClipEdit =
+            [this](const juce::String& label,
+                   std::shared_ptr<const SessionSnapshot> before,
+                   std::shared_ptr<const SessionSnapshot> after) {
+                if (onAppliedClipEditRequested_ != nullptr)
+                {
+                    onAppliedClipEditRequested_(label, std::move(before), std::move(after));
+                }
             };
         host.commitClipTrimAsUndoable =
             [this](const PlacedClipId id, const ClipTrimEdge edge, const std::int64_t value) -> bool {

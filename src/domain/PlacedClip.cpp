@@ -5,6 +5,7 @@
 #include "domain/PlacedClip.h"
 
 #include "domain/AudioClip.h"
+#include "domain/EventAmplitude.h"
 
 #include <juce_core/juce_core.h>
 
@@ -150,6 +151,25 @@ PlacedClip PlacedClip::replicatedWith(const std::int64_t startSampleOnTimeline,
         materialWindowStartSamples_,
         materialWindowEndExclusiveSamples_);
     out.displayName_ = displayName_;
+    // Fades are anchored to the new edges and scaled only when they no longer fit.
+    const event_amplitude::Params fitted = event_amplitude::fitToLength(
+        eventGainDb_, fadeInSamples_, fadeOutSamples_, out.visibleLengthSamples_);
+    out.eventGainDb_ = fitted.gainDb;
+    out.fadeInSamples_ = fitted.fadeInSamples;
+    out.fadeOutSamples_ = fitted.fadeOutSamples;
+    return out;
+}
+
+PlacedClip PlacedClip::withEventAmplitude(const float gainDb,
+                                          const std::int64_t fadeInSamples,
+                                          const std::int64_t fadeOutSamples) const noexcept
+{
+    PlacedClip out = *this;
+    const event_amplitude::Params fitted = event_amplitude::fitToLength(
+        gainDb, fadeInSamples, fadeOutSamples, out.visibleLengthSamples_);
+    out.eventGainDb_ = fitted.gainDb;
+    out.fadeInSamples_ = fitted.fadeInSamples;
+    out.fadeOutSamples_ = fitted.fadeOutSamples;
     return out;
 }
 
@@ -163,7 +183,7 @@ PlacedClip PlacedClip::withDisplayName(juce::String newDisplayName) const noexce
 PlacedClip PlacedClip::withId(const PlacedClipId newId) const noexcept
 {
     jassert(newId != kInvalidPlacedClipId);
-    PlacedClip out = *this; // same material, placement, trims, window and display name
+    PlacedClip out = *this; // same material, placement, trims, window, display name and event amplitude
     out.id_ = newId;
     return out;
 }

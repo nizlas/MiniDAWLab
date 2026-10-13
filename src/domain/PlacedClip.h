@@ -30,6 +30,8 @@
 // See also: `SessionSnapshot`, `Session`, `AudioClip`, `docs/PHASE_PLAN.md` (Phase 2 semantics).
 // =============================================================================
 
+#include "domain/EventAmplitude.h"
+
 #include <cstdint>
 #include <memory>
 
@@ -121,9 +123,24 @@ public:
     [[nodiscard]] const juce::String& getDisplayName() const noexcept { return displayName_; }
     [[nodiscard]] PlacedClip withDisplayName(juce::String newDisplayName) const noexcept;
 
-    /// Same material (shared, never copied), placement, trims, window and display name under a
-    /// NEW placement id — the copy of a clip on a duplicated track (`Session::duplicateTrack`).
+    /// Same material (shared, never copied), placement, trims, window, display name and
+    /// event amplitude under a NEW placement id — the copy of a clip on a duplicated track
+    /// (`Session::duplicateTrack`).
     [[nodiscard]] PlacedClip withId(PlacedClipId newId) const noexcept;
+
+    /// Event gain in dB (default 0) and linear fade lengths in samples from the current edges.
+    /// Stored already fitted to this placement's audible length. Shared material is untouched.
+    [[nodiscard]] float getEventGainDb() const noexcept { return eventGainDb_; }
+    [[nodiscard]] std::int64_t getFadeInSamples() const noexcept { return fadeInSamples_; }
+    [[nodiscard]] std::int64_t getFadeOutSamples() const noexcept { return fadeOutSamples_; }
+    /// 0 dB is exactly 1. Same factor for every channel.
+    [[nodiscard]] float getEventGainLinear() const noexcept
+    {
+        return event_amplitude::linearGain(eventGainDb_);
+    }
+    [[nodiscard]] PlacedClip withEventAmplitude(float gainDb,
+                                                std::int64_t fadeInSamples,
+                                                std::int64_t fadeOutSamples) const noexcept;
 
 private:
     [[nodiscard]] PlacedClip replicatedWith(std::int64_t startSampleOnTimeline,
@@ -138,4 +155,7 @@ private:
     std::int64_t materialWindowStartSamples_ = 0;
     std::int64_t materialWindowEndExclusiveSamples_ = 0;
     juce::String displayName_;
+    float eventGainDb_ = event_amplitude::kGainDbDefault;
+    std::int64_t fadeInSamples_ = 0;
+    std::int64_t fadeOutSamples_ = 0;
 };

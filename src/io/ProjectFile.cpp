@@ -138,6 +138,18 @@ namespace
             {
                 co->setProperty("name", c.name.trim());
             }
+            if (c.eventGainDb != 0.0f)
+            {
+                co->setProperty("eventGainDb", c.eventGainDb);
+            }
+            if (c.fadeInSamples > 0)
+            {
+                co->setProperty("fadeInSamples", static_cast<juce::int64>(c.fadeInSamples));
+            }
+            if (c.fadeOutSamples > 0)
+            {
+                co->setProperty("fadeOutSamples", static_cast<juce::int64>(c.fadeOutSamples));
+            }
             clipVars.add(juce::var(co.get()));
         }
         juce::DynamicObject::Ptr to = new juce::DynamicObject();
@@ -634,6 +646,29 @@ namespace
         }
         // Optional in all versions: absent -> empty (UI falls back to the source file stem).
         out.name = v.getProperty("name", {}).toString().trim();
+        out.eventGainDb = 0.0f;
+        out.fadeInSamples = 0;
+        out.fadeOutSamples = 0;
+        const juce::var& eg = v.getProperty("eventGainDb", {});
+        if (eg.isDouble() || eg.isInt() || eg.isInt64())
+        {
+            const double d = static_cast<double>(eg);
+            out.eventGainDb = std::isfinite(d) ? static_cast<float>(d) : 0.0f;
+        }
+        const auto readFade = [](const juce::var& value) -> std::int64_t {
+            if (!(value.isDouble() || value.isInt() || value.isInt64()))
+            {
+                return 0;
+            }
+            const double d = static_cast<double>(value);
+            if (!std::isfinite(d) || d <= 0.0)
+            {
+                return 0;
+            }
+            return static_cast<std::int64_t>(d);
+        };
+        out.fadeInSamples = readFade(v.getProperty("fadeInSamples", {}));
+        out.fadeOutSamples = readFade(v.getProperty("fadeOutSamples", {}));
         return juce::Result::ok();
     }
 
@@ -1746,6 +1781,13 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
     const int ver = (int)static_cast<double>(root["version"]);
+    // 29 and 30 belong to the unmerged Volume/Pan automation branch. Reading them as a
+    // plain 31-or-older project would drop those curves on the next save.
+    if (ver == 29 || ver == 30)
+    {
+        return juce::Result::fail(
+            "Unsupported project version (29 and 30 are reserved for unmerged track automation).");
+    }
     if (ver < 1 || ver > ProjectFileV1::kCurrentVersion)
     {
         return juce::Result::fail(juce::String("Unsupported project version (supported: 1–")

@@ -2430,6 +2430,15 @@ public:
                     }
                 },
                 [this](const juce::String& label,
+                       std::shared_ptr<const SessionSnapshot> before,
+                       std::shared_ptr<const SessionSnapshot> after) {
+                    if (undoRedoCoordinator_ != nullptr)
+                    {
+                        undoRedoCoordinator_->recordAppliedSessionEdit(
+                            label, std::move(before), std::move(after));
+                    }
+                },
+                [this](const juce::String& label,
                        std::function<bool(std::optional<PluginUndoStepSides>&,
                                           std::optional<InstrumentTrackDeleteUndoSides>&)> mutator) {
                     if (undoRedoCoordinator_ != nullptr)

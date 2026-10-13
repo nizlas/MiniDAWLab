@@ -61,6 +61,9 @@ private:
         std::int64_t visibleLengthSamples = 0;
         std::int64_t materialWindowStartSamples = 0;
         std::int64_t materialWindowEndExclusiveSamples = 0;
+        float eventGainDb = 0.0f;
+        std::int64_t fadeInSamples = 0;
+        std::int64_t fadeOutSamples = 0;
     };
 
     struct InternalInstrumentMidiPasteboard

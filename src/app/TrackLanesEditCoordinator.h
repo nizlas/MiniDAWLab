@@ -37,6 +37,13 @@ public:
         std::function<void(const juce::String& label, std::function<bool()> mutator)>
             executeUndoableSessionEdit;
 
+        /// Routes through `UndoRedoCoordinator::recordAppliedSessionEdit` for a gesture that
+        /// already published its snapshots (event gain / fade).
+        std::function<void(const juce::String& label,
+                           std::shared_ptr<const SessionSnapshot> before,
+                           std::shared_ptr<const SessionSnapshot> after)>
+            recordAppliedSessionEdit;
+
         /// Routes through `UndoRedoCoordinator::executeUndoableTrackDelete`: the mutator hands back
         /// the pre-teardown insert chain and (for instrument tracks) the captured project row so
         /// Delete Track is undoable for every track kind.

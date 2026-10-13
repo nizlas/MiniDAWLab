@@ -109,6 +109,13 @@ public:
     void invokeRedoFromWindowShortcut();
 
     void executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator);
+
+    /// Record one history step for an edit that has already been published (a completed
+    /// event-gain or fade drag). Does not mutate the session. Same-instance before/after
+    /// is a no-op inside `SessionHistory::record`.
+    void recordAppliedSessionEdit(const juce::String& label,
+                                  std::shared_ptr<const SessionSnapshot> before,
+                                  std::shared_ptr<const SessionSnapshot> after);
     void executeUndoableInstrumentEdit(const juce::String& label, std::function<bool()> mutator);
 
     /// Solo (spec §7): ONE narrow undo step for a content change of Solo memory `memoryIndex`

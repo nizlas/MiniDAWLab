@@ -181,6 +181,15 @@ public:
         PlacedClipId id,
         std::int64_t newLeftTrimSamples) noexcept;
 
+    /// [Message thread] Replace one placed clip's event gain (dB) and fade lengths. Fades are
+    /// fitted to the clip's current audible length. Unknown id: debug jassert, same snapshot.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipEventAmplitude(
+        const SessionSnapshot& previous,
+        PlacedClipId id,
+        float gainDb,
+        std::int64_t fadeInSamples,
+        std::int64_t fadeOutSamples) noexcept;
+
     // [Message thread] Replace one `PlacedClip` with two adjacent clips (same material + window).
     // `splitSampleOnTimeline` must be strictly inside (start, start + visible); unknown `targetId`:
     // debug jassert, verbatim copy. `leftNewId` / `rightNewId` must be non-zero and distinct.

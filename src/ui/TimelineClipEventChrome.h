@@ -9,6 +9,8 @@
 
 #include <juce_graphics/juce_graphics.h>
 
+#include <cstdint>
+
 namespace mini_daw::timeline_clip_chrome
 {
 
@@ -24,6 +26,103 @@ inline constexpr float kTrimHandleMarginPx = 1.5f;
 /// Full-height hit zone width on left/right edge (ClipWaveformView hit-test geometry).
 inline constexpr float kTrimHitLeftEdgeBandPx = 6.0f;
 inline constexpr float kTrimHitRightEdgeBandPx = 6.0f;
+
+/// Top-edge fade handles and the centred event-gain bar. Hidden when the event is too
+/// short to keep them off the bottom trim corners.
+inline constexpr float kFadeHandlePx = 7.0f;
+inline constexpr float kGainHandleW = 18.0f;
+inline constexpr float kGainHandleH = 6.0f;
+inline constexpr float kGainHandleDropPx = 10.0f;
+inline constexpr float kMinEventHeightForEnvelopeHandlesPx = 30.0f;
+inline constexpr float kMinEventWidthForEnvelopeHandlesPx = 36.0f;
+
+[[nodiscard]] inline bool envelopeHandlesFit(juce::Rectangle<float> eventRect) noexcept
+{
+    return eventRect.getWidth() >= kMinEventWidthForEnvelopeHandlesPx
+        && eventRect.getHeight() >= kMinEventHeightForEnvelopeHandlesPx;
+}
+
+[[nodiscard]] inline float fadeInEndX(juce::Rectangle<float> eventRect,
+                                      std::int64_t fadeInSamples,
+                                      std::int64_t lengthSamples) noexcept
+{
+    if (lengthSamples <= 0 || fadeInSamples <= 0)
+    {
+        return eventRect.getX();
+    }
+    const double frac = juce::jlimit(0.0, 1.0, static_cast<double>(fadeInSamples) / static_cast<double>(lengthSamples));
+    return eventRect.getX() + static_cast<float>(frac) * eventRect.getWidth();
+}
+
+[[nodiscard]] inline float fadeOutStartX(juce::Rectangle<float> eventRect,
+                                         std::int64_t fadeOutSamples,
+                                         std::int64_t lengthSamples) noexcept
+{
+    if (lengthSamples <= 0 || fadeOutSamples <= 0)
+    {
+        return eventRect.getRight();
+    }
+    const double frac = juce::jlimit(0.0, 1.0, static_cast<double>(fadeOutSamples) / static_cast<double>(lengthSamples));
+    return eventRect.getRight() - static_cast<float>(frac) * eventRect.getWidth();
+}
+
+[[nodiscard]] inline juce::Rectangle<float> squareHandleAt(juce::Rectangle<float> eventRect, float centreX) noexcept
+{
+    juce::Rectangle<float> r {
+        centreX - kFadeHandlePx * 0.5f, eventRect.getY(), kFadeHandlePx, kFadeHandlePx
+    };
+    if (r.getX() < eventRect.getX())
+    {
+        r.setX(eventRect.getX());
+    }
+    if (r.getRight() > eventRect.getRight())
+    {
+        r.setX(eventRect.getRight() - r.getWidth());
+    }
+    return r;
+}
+
+[[nodiscard]] inline juce::Rectangle<float> fadeInHandleRect(juce::Rectangle<float> eventRect,
+                                                             std::int64_t fadeInSamples,
+                                                             std::int64_t lengthSamples) noexcept
+{
+    return squareHandleAt(eventRect, fadeInEndX(eventRect, fadeInSamples, lengthSamples));
+}
+
+[[nodiscard]] inline juce::Rectangle<float> fadeOutHandleRect(juce::Rectangle<float> eventRect,
+                                                              std::int64_t fadeOutSamples,
+                                                              std::int64_t lengthSamples) noexcept
+{
+    return squareHandleAt(eventRect, fadeOutStartX(eventRect, fadeOutSamples, lengthSamples));
+}
+
+/// Centred on the top edge. Drops inside the event when a fade handle would cover it,
+/// including when a fade reaches the middle. The fade length itself is not shortened.
+[[nodiscard]] inline juce::Rectangle<float> gainHandleRect(juce::Rectangle<float> eventRect,
+                                                           juce::Rectangle<float> fadeInHandle,
+                                                           juce::Rectangle<float> fadeOutHandle) noexcept
+{
+    juce::Rectangle<float> g {
+        eventRect.getCentreX() - kGainHandleW * 0.5f, eventRect.getY(), kGainHandleW, kGainHandleH
+    };
+    if (g.getX() < eventRect.getX())
+    {
+        g.setX(eventRect.getX());
+    }
+    if (g.getRight() > eventRect.getRight())
+    {
+        g.setX(juce::jmax(eventRect.getX(), eventRect.getRight() - g.getWidth()));
+    }
+    if (g.intersects(fadeInHandle) || g.intersects(fadeOutHandle))
+    {
+        g.setY(eventRect.getY() + kGainHandleDropPx);
+    }
+    if (g.getBottom() > eventRect.getBottom())
+    {
+        g.setY(juce::jmax(eventRect.getY(), eventRect.getBottom() - g.getHeight()));
+    }
+    return g;
+}
 
 [[nodiscard]] inline juce::Colour unifiedClipEventBodyFill()
 {
@@ -148,6 +247,69 @@ inline void paintEventTopLeftNameLabel(juce::Graphics& g,
     g.setColour(juce::Colours::white.withAlpha(0.85f));
     g.setFont(kEventNameLabelFontPx);
     g.drawFittedText(label, r.toNearestInt(), juce::Justification::centredLeft, 1);
+}
+
+/// Cheap overlay. The diagonal is the same linear envelope the audio path multiplies by.
+/// The tinted triangle is the attenuated part above that line. Handles are optional.
+inline void paintEventAmplitudeOverlay(juce::Graphics& g,
+                                       juce::Rectangle<float> eventRect,
+                                       std::int64_t fadeInSamples,
+                                       std::int64_t fadeOutSamples,
+                                       std::int64_t lengthSamples,
+                                       bool showHandles)
+{
+    if (eventRect.isEmpty() || lengthSamples <= 0)
+    {
+        return;
+    }
+    const float left = eventRect.getX();
+    const float right = eventRect.getRight();
+    const float top = eventRect.getY();
+    const float bottom = eventRect.getBottom();
+    const float inX = fadeInEndX(eventRect, fadeInSamples, lengthSamples);
+    const float outX = fadeOutStartX(eventRect, fadeOutSamples, lengthSamples);
+    const juce::Colour damp = juce::Colour(0xff0e1624).withAlpha(0.42f);
+    const juce::Colour line = juce::Colour(0xffd7e3f4).withAlpha(0.92f);
+
+    if (fadeInSamples > 0)
+    {
+        juce::Path tri;
+        tri.startNewSubPath(left, bottom);
+        tri.lineTo(left, top);
+        tri.lineTo(inX, top);
+        tri.closeSubPath();
+        g.setColour(damp);
+        g.fillPath(tri);
+        g.setColour(line);
+        g.drawLine(left, bottom, inX, top, 1.0f);
+    }
+    if (fadeOutSamples > 0)
+    {
+        juce::Path tri;
+        tri.startNewSubPath(outX, top);
+        tri.lineTo(right, top);
+        tri.lineTo(right, bottom);
+        tri.closeSubPath();
+        g.setColour(damp);
+        g.fillPath(tri);
+        g.setColour(line);
+        g.drawLine(outX, top, right, bottom, 1.0f);
+    }
+    if (!showHandles || !envelopeHandlesFit(eventRect))
+    {
+        return;
+    }
+    const auto paintHandle = [&g](juce::Rectangle<float> h) {
+        g.setColour(juce::Colour(0xff3d4a5a).brighter(0.35f).withAlpha(0.95f));
+        g.fillRoundedRectangle(h, 1.0f);
+        g.setColour(juce::Colour(0xffd7e3f4).withAlpha(0.95f));
+        g.drawRoundedRectangle(h, 1.0f, 0.75f);
+    };
+    paintHandle(fadeInHandleRect(eventRect, fadeInSamples, lengthSamples));
+    paintHandle(fadeOutHandleRect(eventRect, fadeOutSamples, lengthSamples));
+    paintHandle(gainHandleRect(eventRect,
+                               fadeInHandleRect(eventRect, fadeInSamples, lengthSamples),
+                               fadeOutHandleRect(eventRect, fadeOutSamples, lengthSamples)));
 }
 
 } // namespace mini_daw::timeline_clip_chrome

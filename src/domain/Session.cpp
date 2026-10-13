@@ -1119,6 +1119,26 @@ void Session::setClipLeftEdgeTrim(const PlacedClipId id, const std::int64_t newL
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::setClipEventAmplitude(const PlacedClipId id,
+                                    const float gainDb,
+                                    const std::int64_t fadeInSamples,
+                                    const std::int64_t fadeOutSamples) noexcept
+{
+    if (id == kInvalidPlacedClipId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->isEmpty())
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withClipEventAmplitude(
+        *current, id, gainDb, fadeInSamples, fadeOutSamples);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 std::optional<std::pair<PlacedClipId, PlacedClipId>> Session::splitClip(
     const PlacedClipId id,
     const std::int64_t splitSampleOnTimeline) noexcept
@@ -2456,6 +2476,9 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                 }
                 c.visibleLengthSamples = (matN > 0 && eff < fullTail) ? eff : 0;
                 c.name = p.getDisplayName();
+                c.eventGainDb = p.getEventGainDb();
+                c.fadeInSamples = p.getFadeInSamples();
+                c.fadeOutSamples = p.getFadeOutSamples();
                 tr.clips.push_back(std::move(c));
             }
         }
@@ -2764,6 +2787,8 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                 {
                     placed.back() = placed.back().withDisplayName(cDto.name);
                 }
+                placed.back() = placed.back().withEventAmplitude(
+                    cDto.eventGainDb, cDto.fadeInSamples, cDto.fadeOutSamples);
             }
         }
         else if (!trDto.clips.empty())
