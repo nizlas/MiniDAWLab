@@ -116,11 +116,11 @@ inline constexpr int kStripWidthFadersMetersPx = 114;
 inline constexpr int kStripWidthFadersPx = 88;
 /// Labeled stereo meter 46 plus the 4 px pads.
 inline constexpr int kStripWidthMetersPx = 54;
-/// Three-digit number column plus a short ellipsized name. Long names do not grow this.
+/// Compact identifiable channel when every section is off. Long names do not grow this.
 inline constexpr int kStripWidthIdentityPx = 84;
 /// Pinned under every channel, including Stereo Out. Not part of the scrolling stack.
+/// The number is painted only as wide as its digits; there is no reserved number column.
 inline constexpr int kIdentityRowHeightPx = 22;
-inline constexpr int kIdentityNumberColumnPx = 28;
 inline constexpr int kStripGapPx = 3;
 inline constexpr int kStripPadPx = 4;
 inline constexpr int kSectionGapPx = 4;

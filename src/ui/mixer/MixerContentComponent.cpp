@@ -77,15 +77,21 @@ public:
         using namespace track_strip_glyphs;
         drawHeaderPlate(g, getLocalBounds(), active_);
         auto row = getLocalBounds().reduced(0, 1);
-        row.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
-        auto numberArea = row.removeFromLeft(mixer_layout::kIdentityNumberColumnPx);
+        // 4 px from the channel edge (the active stripe is the same 4 px, so the digits
+        // start just after it). The number is only as wide as its own glyphs.
+        constexpr int kLeftMarginPx = 4;
+        constexpr int kNumberNameGapPx = 4;
+        row.removeFromLeft(kLeftMarginPx);
         g.setColour(headerNameColour());
-        g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
-        if (number_ > 0)
+        const juce::Font numberFont(juce::FontOptions(12.0f, juce::Font::bold));
+        g.setFont(numberFont);
+        if (number_ > 0 && row.getWidth() > 0)
         {
-            g.drawText(juce::String(number_), numberArea, juce::Justification::centredRight, false);
+            const juce::String digits(number_);
+            const int numberW = juce::jmin(row.getWidth(), juce::GlyphArrangement::getStringWidthInt(numberFont, digits) + 1);
+            g.drawText(digits, row.removeFromLeft(numberW), juce::Justification::centredLeft, false);
+            row.removeFromLeft(juce::jmin(kNumberNameGapPx, row.getWidth()));
         }
-        row.removeFromLeft(4);
         g.setFont(juce::FontOptions(12.0f));
         g.drawText(name_, row, juce::Justification::centredLeft, true);
     }
