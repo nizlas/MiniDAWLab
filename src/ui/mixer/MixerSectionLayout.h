@@ -5,9 +5,9 @@
 // =============================================================================
 //
 // ROLE
-//   The mixer's sections (Routing, Pre-gain, Pre inserts, Post inserts, Sends, Faders, Meters)
-//   can each be shown or minimised, GLOBALLY for all strips, and the upper sections have one
-//   shared, user-draggable height each (`SectionHeights`). This header turns the visibility
+//   The mixer's sections (Headers, Routing, Pre-gain, Pre inserts, Post inserts, Sends, Faders,
+//   Meters) can each be shown or minimised, GLOBALLY for all strips, and the upper sections have
+//   one shared, user-draggable height each (`SectionHeights`). This header turns the visibility
 //   flags, the heights and the available strip height into one list of section bands (y
 //   ranges) that every strip — the scrolling ones and the fixed Stereo Out — applies verbatim,
 //   so a row's own content (fewer routing rows, no inserts, no sends) can never move its fader
@@ -15,12 +15,16 @@
 //   and how a drag on one of them redistributes height. Pure geometry; no components, no session.
 //
 // SIZES (logical px)
-//   Strip width 150 (inside the requested 140–160 window). Upper sections have a minimum that
-//   keeps their controls reachable (Routing: all four selector rows; Pre-gain: its row; Sends:
-//   the four slots; inserts: caption + one row + the add button — the list scrolls) and a stored
-//   desired height (defaults below). The lower band (pan + fader at the left, output meter at the
-//   right) takes whatever height remains, never less than `kLowerBandMinHeightPx` — the common
-//   vertical scroll bar appears when the window is lower than the stack.
+//   Normal strip width 174, used whenever Headers or any wide section (Routing, Pre-gain, inserts,
+//   Sends) is shown. Compact widths (`channelWidthPx`) apply only when those are all hidden:
+//   fader+meter, fader alone, meter alone, or the identity row alone. The width is derived from
+//   the section flags; it is not stored. Upper sections have a minimum that keeps their controls
+//   reachable (Routing: all four selector rows; Pre-gain: its row; Sends: the four slots; inserts:
+//   caption + one row + the add button — the list scrolls) and a stored desired height (defaults
+//   below). The lower band (pan + fader at the left, output meter at the right) takes whatever
+//   height remains, never less than `kLowerBandMinHeightPx` — the common vertical scroll bar
+//   appears when the window is lower than the stack. The identity row is not part of this stack;
+//   the mixer pins it under the viewports so a vertical scroll cannot move it.
 // =============================================================================
 
 #include <array>
@@ -39,6 +43,9 @@ enum class Section : int
     Sends,
     Faders,
     Meters,
+    /// The existing channel header (name, kind, Power / Mute / Solo / Monitor / Record). Not an
+    /// upper band: fixed height, no divider. Absent in a saved layout means shown.
+    Headers,
     Count
 };
 
@@ -55,6 +62,7 @@ inline constexpr int kSectionCount = static_cast<int>(Section::Count);
     case Section::Sends: return "Sends";
     case Section::Faders: return "Faders";
     case Section::Meters: return "Meters";
+    case Section::Headers: return "Headers";
     case Section::Count: break;
     }
     return "";
@@ -72,6 +80,7 @@ inline constexpr int kSectionCount = static_cast<int>(Section::Count);
     case Section::Sends: return "sends";
     case Section::Faders: return "faders";
     case Section::Meters: return "meters";
+    case Section::Headers: return "headers";
     case Section::Count: break;
     }
     return "";
@@ -85,7 +94,7 @@ inline constexpr int kSectionCount = static_cast<int>(Section::Count);
 
 struct SectionVisibility
 {
-    std::array<bool, kSectionCount> shown{ { true, true, true, true, true, true, true } };
+    std::array<bool, kSectionCount> shown{ { true, true, true, true, true, true, true, true } };
 
     [[nodiscard]] bool get(const Section s) const noexcept { return shown[static_cast<size_t>(s)]; }
     void set(const Section s, const bool v) noexcept { shown[static_cast<size_t>(s)] = v; }
@@ -96,14 +105,28 @@ struct SectionVisibility
 // --- fixed geometry -----------------------------------------------------------------------------
 /// Widened 150 → 174 by the Solo slice: the instrument strip's base-button row grew to seven
 /// cells ([Instrument][Power][M][S][Monitor][R][Alternatives] = 7×20 + 6×3 px) which, plus the
-/// 4 px pads and the 6 px stripe inset, needs ≥172 px. Every band derives from this constant.
+/// 4 px pads and the 6 px stripe inset, needs ≥172 px. This is the normal width, used whenever
+/// Headers or a wide section is shown.
 inline constexpr int kStripWidthPx = 174;
+/// Fader preferred width is 52 (travel 22 + scale 26 + 4). A labeled stereo meter is 46
+/// (pads + two bars + tick + scale labels). Column gap 8. Pads 4 + 4.
+/// 4 + 52 + 8 + 46 + 4 = 114: the fader column and the meter column, no empty reserved column.
+inline constexpr int kStripWidthFadersMetersPx = 114;
+/// Fader 52 centred, pan field across an 80 px inner width (readout and stick travel).
+inline constexpr int kStripWidthFadersPx = 88;
+/// Labeled stereo meter 46 plus the 4 px pads.
+inline constexpr int kStripWidthMetersPx = 54;
+/// Three-digit number column plus a short ellipsized name. Long names do not grow this.
+inline constexpr int kStripWidthIdentityPx = 84;
+/// Pinned under every channel, including Stereo Out. Not part of the scrolling stack.
+inline constexpr int kIdentityRowHeightPx = 22;
+inline constexpr int kIdentityNumberColumnPx = 28;
 inline constexpr int kStripGapPx = 3;
 inline constexpr int kStripPadPx = 4;
 inline constexpr int kSectionGapPx = 4;
 inline constexpr int kSectionCaptionHeightPx = 13;
 
-/// Header (always shown): name row, kind row, base-button row.
+/// Header, when the Headers section is on: name row, kind row, base-button row.
 inline constexpr int kHeaderNameRowHeightPx = 20;
 inline constexpr int kHeaderKindRowHeightPx = 12;
 inline constexpr int kHeaderButtonsRowHeightPx = 22;
@@ -157,6 +180,7 @@ inline constexpr int kSectionHeightMaxPx = 2000;
     case Section::Sends: return kSendsSectionHeightPx;
     case Section::Faders:
     case Section::Meters:
+    case Section::Headers:
     case Section::Count: break;
     }
     return 0;
@@ -210,11 +234,43 @@ struct ComputedLayout
     [[nodiscard]] juce::Rectangle<int> band(const Section s) const noexcept { return bands[static_cast<size_t>(s)]; }
 };
 
-/// Height the fixed part of the stack needs (header + visible upper sections) for the given
-/// visibility and heights, without the lower band.
+/// True when any section that needs the wide strip is shown. Headers counts: its button row
+/// does not fit a compact column.
+[[nodiscard]] inline bool wantsNormalChannelWidth(const SectionVisibility& v) noexcept
+{
+    return v.get(Section::Headers) || v.get(Section::Routing) || v.get(Section::PreGain)
+           || v.get(Section::PreInserts) || v.get(Section::PostInserts) || v.get(Section::Sends);
+}
+
+/// One width for every channel, including Stereo Out, from the shared section flags.
+[[nodiscard]] inline int channelWidthPx(const SectionVisibility& v) noexcept
+{
+    if (wantsNormalChannelWidth(v))
+    {
+        return kStripWidthPx;
+    }
+    const bool faders = v.get(Section::Faders);
+    const bool meters = v.get(Section::Meters);
+    if (faders && meters)
+    {
+        return kStripWidthFadersMetersPx;
+    }
+    if (faders)
+    {
+        return kStripWidthFadersPx;
+    }
+    if (meters)
+    {
+        return kStripWidthMetersPx;
+    }
+    return kStripWidthIdentityPx;
+}
+
+/// Height the fixed part of the stack needs (header, when shown, + visible upper sections) for
+/// the given visibility and heights, without the lower band.
 [[nodiscard]] inline int fixedStackHeight(const SectionVisibility& v, const SectionHeights& h) noexcept
 {
-    int total = kStripPadPx + kHeaderHeightPx;
+    int total = kStripPadPx + (v.get(Section::Headers) ? kHeaderHeightPx : 0);
     for (int i = 0; i < kSectionCount; ++i)
     {
         const Section s = static_cast<Section>(i);
@@ -242,8 +298,11 @@ struct ComputedLayout
     const int x = kStripPadPx;
     const int w = juce::jmax(0, stripWidth - 2 * kStripPadPx);
     int y = kStripPadPx;
-    out.header = juce::Rectangle<int>(x, y, w, kHeaderHeightPx);
-    y += kHeaderHeightPx;
+    if (v.get(Section::Headers))
+    {
+        out.header = juce::Rectangle<int>(x, y, w, kHeaderHeightPx);
+        y += kHeaderHeightPx;
+    }
     for (int i = 0; i < kSectionCount; ++i)
     {
         const Section s = static_cast<Section>(i);
@@ -273,7 +332,12 @@ struct ComputedLayout
         const int gap = 8;
         if (showFaders && showMeters)
         {
-            const int meterW = juce::jmin(52, juce::jmax(30, w / 3));
+            // Normal width keeps today's split (meter about a third, capped at 52). A compact
+            // strip gives the meter its labeled width (46) and the fader its own 52, with the
+            // gap between them and no reserved column for a hidden control.
+            const int meterW = (stripWidth < kStripWidthPx && w >= 52 + gap + 46)
+                                   ? 46
+                                   : juce::jmin(52, juce::jmax(30, w / 3));
             out.bands[static_cast<size_t>(Section::Faders)] = out.lowerBand.withWidth(w - meterW - gap);
             out.bands[static_cast<size_t>(Section::Meters)] = out.lowerBand.withX(out.lowerBand.getRight() - meterW).withWidth(meterW);
         }

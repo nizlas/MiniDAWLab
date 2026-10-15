@@ -295,26 +295,48 @@ void MixerChannelStrip::resized()
 {
     const ComputedLayout& L = layout_;
 
-    // Header
+    // Header. Hidden: no bounds, no visibility, no tooltip, so nothing remains clickable.
     {
-        auto h = L.header;
-        h.removeFromTop(2);
-        auto nameRow = h.removeFromTop(kHeaderNameRowHeightPx);
-        nameRow.removeFromLeft(kHeaderActiveStripeWidthPx + 2); // keep the name clear of the active stripe
-        nameLabel_.setBounds(nameRow);
-        auto kindRow = h.removeFromTop(kHeaderKindRowHeightPx);
-        kindRow.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
-        kindLabel_.setBounds(kindRow);
-        auto cells = h.removeFromTop(kHeaderButtonsRowHeightPx);
-        cells.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
-        for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+        const bool showHeader = !L.header.isEmpty();
+        nameLabel_.setVisible(showHeader);
+        kindLabel_.setVisible(showHeader);
+        if (!showHeader)
         {
-            if (!c->isVisible())
+            nameLabel_.setBounds({});
+            nameLabel_.setTooltip({});
+            kindLabel_.setBounds({});
+            kindLabel_.setTooltip({});
+            for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
             {
-                continue;
+                c->setVisible(false);
+                c->setBounds({});
+                c->setTooltip({});
             }
-            c->setBounds(cells.removeFromLeft(kCellSizePx).withHeight(kCellSizePx).withY(cells.getY() + (kHeaderButtonsRowHeightPx - kCellSizePx) / 2));
-            cells.removeFromLeft(kCellGapPx);
+        }
+        else
+        {
+            auto h = L.header;
+            h.removeFromTop(2);
+            auto nameRow = h.removeFromTop(kHeaderNameRowHeightPx);
+            nameRow.removeFromLeft(kHeaderActiveStripeWidthPx + 2); // keep the name clear of the active stripe
+            nameLabel_.setBounds(nameRow);
+            nameLabel_.setTooltip(nameLabel_.getText());
+            auto kindRow = h.removeFromTop(kHeaderKindRowHeightPx);
+            kindRow.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
+            kindLabel_.setBounds(kindRow);
+            auto cells = h.removeFromTop(kHeaderButtonsRowHeightPx);
+            cells.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
+            restoreHeaderButtonVisibility();
+            for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+            {
+                if (!c->isVisible())
+                {
+                    c->setBounds({});
+                    continue;
+                }
+                c->setBounds(cells.removeFromLeft(kCellSizePx).withHeight(kCellSizePx).withY(cells.getY() + (kHeaderButtonsRowHeightPx - kCellSizePx) / 2));
+                cells.removeFromLeft(kCellGapPx);
+            }
         }
     }
 
@@ -426,6 +448,17 @@ void MixerChannelStrip::resized()
         fader_.setVisible(showFader);
         meterCaption_.setVisible(showMeter);
         meter_.setVisible(showMeter);
+        if (!showFader)
+        {
+            panCaption_.setBounds({});
+            pan_.setBounds({});
+            fader_.setBounds({});
+        }
+        if (!showMeter)
+        {
+            meterCaption_.setBounds({});
+            meter_.setBounds({});
+        }
         if (showFader || showMeter)
         {
             auto band = L.lowerBand;
@@ -469,8 +502,11 @@ void MixerChannelStrip::paint(juce::Graphics& g)
         g.setColour(juce::Colour(kLowerBandBgArgb));
         g.fillRect(juce::Rectangle<int>(0, layout_.lowerBand.getY() - kSectionGapPx / 2, getWidth(), getHeight() - (layout_.lowerBand.getY() - kSectionGapPx / 2)));
     }
-    // Header plate: identical colours / stripe to the arrangement header.
-    drawHeaderPlate(g, juce::Rectangle<int>(0, 0, getWidth(), layout_.header.getBottom() + 2), isActive_);
+    // Header plate: identical colours / stripe to the arrangement header. Absent when Headers is off.
+    if (!layout_.header.isEmpty())
+    {
+        drawHeaderPlate(g, juce::Rectangle<int>(0, 0, getWidth(), layout_.header.getBottom() + 2), isActive_);
+    }
     // Right edge.
     g.setColour(juce::Colour(kSeparatorArgb));
     g.fillRect(getWidth() - 1, 0, 1, getHeight());
@@ -541,6 +577,26 @@ void MixerChannelStrip::configureRoutingRow(const int row, const RoutingRole rol
     r.caption.setText(caption, juce::dontSendNotification);
 }
 
+void MixerChannelStrip::restoreHeaderButtonVisibility()
+{
+    if (layout_.header.isEmpty())
+    {
+        return;
+    }
+    const bool audioRow = kind_ == TrackKind::Audio;
+    const bool instrumentRow = kind_ == TrackKind::Instrument;
+    const bool midiRow = kind_ == TrackKind::Midi;
+    instrumentEditorCell_.setVisible(instrumentRow);
+    alternativesCell_.setVisible(instrumentRow);
+    powerCell_.setVisible(audioRow || instrumentRow || midiRow);
+    muteCell_.setVisible(true);
+    // S on every strip kind except Stereo Out; hidden until the solo seam is wired.
+    soloCell_.setVisible(!isMaster_ && bindings_.solo.toggleSolo != nullptr
+                         && bindings_.solo.displayState != nullptr);
+    monitorCell_.setVisible(audioRow || instrumentRow || midiRow);
+    armCell_.setVisible(audioRow || instrumentRow || midiRow);
+}
+
 void MixerChannelStrip::applyKindLayout(const TrackKind kind)
 {
     kind_ = kind;
@@ -579,18 +635,7 @@ void MixerChannelStrip::applyKindLayout(const TrackKind kind)
     // Base buttons per kind (header strip rules): Group / Master = Mute only; Audio = Power,
     // Mute, Monitor, R; Instrument adds the editor and alternatives cells; Midi = Power, Mute,
     // Monitor, R (MIDI monitor / arm).
-    const bool audioRow = kind == TrackKind::Audio;
-    const bool instrumentRow = kind == TrackKind::Instrument;
-    const bool midiRow = kind == TrackKind::Midi;
-    instrumentEditorCell_.setVisible(instrumentRow);
-    alternativesCell_.setVisible(instrumentRow);
-    powerCell_.setVisible(audioRow || instrumentRow || midiRow);
-    muteCell_.setVisible(true);
-    // S on every strip kind except Stereo Out (spec §4); hidden until the solo seam is wired.
-    soloCell_.setVisible(!isMaster_ && bindings_.solo.toggleSolo != nullptr
-                         && bindings_.solo.displayState != nullptr);
-    monitorCell_.setVisible(audioRow || instrumentRow || midiRow);
-    armCell_.setVisible(audioRow || instrumentRow || midiRow);
+    restoreHeaderButtonVisibility();
     meterCaption_.setText(isMaster_ ? "Stereo Out" : "Out", juce::dontSendNotification);
     meter_.clear();
     for (InsertStageUi* ui : { &preInserts_, &postInserts_ })
@@ -626,7 +671,7 @@ void MixerChannelStrip::refreshFromSession(const SessionSnapshot& snap, const bo
     if (nameLabel_.getText() != name)
     {
         nameLabel_.setText(name, juce::dontSendNotification);
-        nameLabel_.setTooltip(name);
+        nameLabel_.setTooltip(layout_.header.isEmpty() ? juce::String() : name);
     }
 
     refreshBaseButtons(tr);
@@ -723,6 +768,13 @@ void MixerChannelStrip::refreshBaseButtons(const Track& tr)
         const bool altAvail = bindings_.instrumentAlternativesAvailable ? bindings_.instrumentAlternativesAvailable(trackId_) : false;
         setState(alternativesCell_, altAvail, false);
         alternativesCell_.setTooltip("Instrument alternatives (Primary / Secondary / proxy)");
+    }
+    if (layout_.header.isEmpty())
+    {
+        for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+        {
+            c->setTooltip({});
+        }
     }
 }
 

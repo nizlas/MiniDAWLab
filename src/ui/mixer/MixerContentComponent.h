@@ -5,12 +5,14 @@
 // =============================================================================
 //
 // ROLE
-//   The mixer window's content. A fixed toolbar holds one toggle per section (Routing, Pre-gain,
-//   Pre inserts, Post inserts, Sends, Faders, Meters) — global for every strip. Below it the
-//   channel strips of every non-Master row in ARRANGEMENT ORDER scroll horizontally (and
+//   The mixer window's content. A fixed toolbar holds one toggle per section (Headers, Routing,
+//   Pre-gain, Pre inserts, Post inserts, Sends, Faders, Meters) — global for every strip. Below it
+//   the channel strips of every non-Master row in ARRANGEMENT ORDER scroll horizontally (and
 //   vertically when the window is lower than the strip stack) inside one viewport; the Stereo Out
 //   strip sits in its own viewport at the right edge, never scrolls horizontally, and mirrors the
-//   vertical scroll position so its bands stay aligned with the others.
+//   vertical scroll position so its bands stay aligned with the others. An identity row (arrangement
+//   number + name) is pinned under both viewports, so a vertical scroll cannot move it. Channel
+//   width follows the section flags (`mixer_layout::channelWidthPx`) and is not stored.
 //
 // SECTION HEIGHTS AND DIVIDERS
 //   The upper sections share one height each (`mixer_layout::SectionHeights`, persisted by the
@@ -46,6 +48,8 @@
 #include <functional>
 #include <memory>
 #include <vector>
+
+class MixerIdentityCell;
 
 class MixerContentComponent final : public juce::Component,
                                     private juce::Timer
@@ -85,6 +89,25 @@ public:
     [[nodiscard]] std::vector<mixer_layout::Divider> currentDividers() const;
     bool dragDividerForTest(int dividerIndex, int deltaY);
     [[nodiscard]] int currentStripHeight() const noexcept { return lastStripHeight_; }
+    [[nodiscard]] int currentChannelWidthPx() const noexcept { return lastStripWidth_; }
+    [[nodiscard]] int stripsContentWidthForTest() const noexcept { return stripsRow_.getWidth(); }
+    [[nodiscard]] int viewPositionXForTest() const noexcept { return stripsViewport_.getViewPositionX(); }
+    [[nodiscard]] int identityNumberForTest(TrackId trackId) const noexcept;
+    [[nodiscard]] juce::String identityTooltipForTest(TrackId trackId) const;
+    [[nodiscard]] int identityCellWidthForTest(TrackId trackId) const noexcept;
+    /// Clicks the identity row the way a user does (activates that TrackId).
+    bool clickIdentityForTest(TrackId trackId);
+    [[nodiscard]] bool headerControlsVisibleForTest(TrackId trackId) const noexcept;
+    /// Y of the pinned identity band (the same for the scrolling channels and Stereo Out).
+    [[nodiscard]] int identityBandYForTest() const noexcept { return identityViewport_.getY(); }
+    [[nodiscard]] bool identityBandsAlignedForTest() const noexcept
+    {
+        return identityViewport_.getY() == masterIdentityHolder_.getY()
+               && identityViewport_.getHeight() == mixer_layout::kIdentityRowHeightPx
+               && masterIdentityHolder_.getHeight() == mixer_layout::kIdentityRowHeightPx
+               && masterIdentityHolder_.getX() == masterViewport_.getX()
+               && masterIdentityHolder_.getWidth() == channelWidthPx(visibility_);
+    }
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -96,6 +119,9 @@ private:
     void syncMasterScroll();
     [[nodiscard]] int availableStripHeight() const noexcept;
     [[nodiscard]] mixer_layout::ComputedLayout currentLayout() const noexcept;
+    void layoutIdentityBand();
+    void syncIdentityScroll();
+    MixerIdentityCell* identityFor(TrackId trackId) const noexcept;
     void beginDividerDrag(int dividerIndex);
     void continueDividerDrag(int dividerIndex, int deltaY);
     void endDividerDrag();
@@ -164,12 +190,18 @@ private:
     StripsRow stripsRow_;
     SyncedViewport masterViewport_;
     juce::Component masterHolder_;
+    SyncedViewport identityViewport_;
+    StripsRow identityRow_;
+    juce::Component masterIdentityHolder_;
     DividerOverlay dividerOverlay_{ *this };
     std::vector<std::unique_ptr<MixerChannelStrip>> strips_;
     std::unique_ptr<MixerChannelStrip> masterStrip_;
+    std::vector<std::unique_ptr<MixerIdentityCell>> identityCells_;
+    std::unique_ptr<MixerIdentityCell> masterIdentity_;
     TrackId masterTrackId_ = kInvalidTrackId;
     bool syncingScroll_ = false;
     int lastStripHeight_ = 0;
+    int lastStripWidth_ = mixer_layout::kStripWidthPx;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixerContentComponent)
 };

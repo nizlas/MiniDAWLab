@@ -8,6 +8,12 @@ namespace
 {
     using namespace mixer_layout;
 
+    constexpr mixer_layout::Section kToolbarOrder[] = {
+        Section::Headers, Section::Routing, Section::PreGain, Section::PreInserts,
+        Section::PostInserts, Section::Sends, Section::Faders, Section::Meters
+    };
+    static_assert(sizeof(kToolbarOrder) / sizeof(kToolbarOrder[0]) == kSectionCount, "toolbar lists every section");
+
     constexpr int kToolbarHeightPx = 30;
     constexpr int kToolbarPadPx = 4;
     constexpr int kToggleWidthPx = 84;
@@ -32,6 +38,80 @@ namespace
         b.setToggleState(on, juce::dontSendNotification);
     }
 } // namespace
+
+// --- MixerIdentityCell ------------------------------------------------------------------------------
+// Pinned under a channel. Number is the arrangement index + 1 (the same number the track header
+// draws). A collapsed visual group does not change snapshot order, so it does not renumber.
+
+class MixerIdentityCell final : public juce::Component,
+                                public juce::SettableTooltipClient
+{
+public:
+    explicit MixerIdentityCell(const TrackId id) : trackId_(id)
+    {
+        setWantsKeyboardFocus(false);
+        setMouseClickGrabsKeyboardFocus(false);
+    }
+
+    [[nodiscard]] TrackId trackId() const noexcept { return trackId_; }
+    [[nodiscard]] int number() const noexcept { return number_; }
+    [[nodiscard]] juce::String tooltipText() const { return name_; }
+
+    void setIdentity(const int number, const juce::String& name, const bool active)
+    {
+        const bool changed = number_ != number || name_ != name || active_ != active;
+        number_ = number;
+        name_ = name;
+        active_ = active;
+        setTooltip(name);
+        if (changed)
+        {
+            repaint();
+        }
+    }
+
+    std::function<void(TrackId)> onActivate;
+
+    void paint(juce::Graphics& g) override
+    {
+        using namespace track_strip_glyphs;
+        drawHeaderPlate(g, getLocalBounds(), active_);
+        auto row = getLocalBounds().reduced(0, 1);
+        row.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
+        auto numberArea = row.removeFromLeft(mixer_layout::kIdentityNumberColumnPx);
+        g.setColour(headerNameColour());
+        g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+        if (number_ > 0)
+        {
+            g.drawText(juce::String(number_), numberArea, juce::Justification::centredRight, false);
+        }
+        row.removeFromLeft(4);
+        g.setFont(juce::FontOptions(12.0f));
+        g.drawText(name_, row, juce::Justification::centredLeft, true);
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (getLocalBounds().contains(e.getPosition()))
+        {
+            userClick();
+        }
+    }
+
+    void userClick()
+    {
+        if (onActivate != nullptr)
+        {
+            onActivate(trackId_);
+        }
+    }
+
+private:
+    TrackId trackId_ = kInvalidTrackId;
+    int number_ = 0;
+    juce::String name_;
+    bool active_ = false;
+};
 
 void MixerContentComponent::StripsRow::paint(juce::Graphics& g)
 {
@@ -151,13 +231,14 @@ MixerContentComponent::MixerContentComponent(const MixerStripBindings& bindings,
     titleLabel_.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(titleLabel_);
 
-    for (int i = 0; i < kSectionCount; ++i)
+    for (const Section s : kToolbarOrder)
     {
-        const Section s = static_cast<Section>(i);
-        juce::TextButton& b = sectionToggles_[static_cast<size_t>(i)];
+        juce::TextButton& b = sectionToggles_[static_cast<size_t>(s)];
         b.setButtonText(sectionName(s));
         b.setClickingTogglesState(false);
-        b.setTooltip(juce::String("Show / hide the ") + sectionName(s) + " section on every channel");
+        b.setTooltip(s == Section::Headers
+                         ? juce::String("Show / hide the channel header (name, type and Power / Mute / Solo / Monitor / Record)")
+                         : juce::String("Show / hide the ") + sectionName(s) + " section on every channel");
         styleToggle(b, visibility_.get(s));
         b.onClick = [this, s] {
             SectionVisibility next = visibility_;
@@ -176,6 +257,7 @@ MixerContentComponent::MixerContentComponent(const MixerStripBindings& bindings,
     stripsViewport_.setScrollBarThickness(12);
     stripsViewport_.onVisibleAreaChanged = [this] {
         syncMasterScroll();
+        syncIdentityScroll();
         dividerOverlay_.repaint();
     };
     addAndMakeVisible(stripsViewport_);
@@ -194,6 +276,12 @@ MixerContentComponent::MixerContentComponent(const MixerStripBindings& bindings,
     };
     addAndMakeVisible(masterViewport_);
 
+    identityViewport_.setViewedComponent(&identityRow_, false);
+    identityViewport_.setScrollBarsShown(false, false);
+    identityViewport_.setScrollOnDragMode(juce::Viewport::ScrollOnDragMode::never);
+    addAndMakeVisible(identityViewport_);
+    addAndMakeVisible(masterIdentityHolder_);
+
     // The divider layer sits above both viewports (added last = in front).
     addAndMakeVisible(dividerOverlay_);
 
@@ -207,6 +295,8 @@ MixerContentComponent::~MixerContentComponent()
     // Strips unregister from the hub in their destructors; destroy them before the viewports go.
     strips_.clear();
     masterStrip_.reset();
+    identityCells_.clear();
+    masterIdentity_.reset();
 }
 
 int MixerContentComponent::toolbarHeight() const noexcept
@@ -224,7 +314,7 @@ void MixerContentComponent::paint(juce::Graphics& g)
     // Divider in front of the fixed Stereo Out column.
     const int dividerX = masterViewport_.getX() - kMasterColumnGapPx / 2;
     g.setColour(juce::Colour(kMasterDividerArgb));
-    g.fillRect(dividerX, kToolbarHeightPx, 2, getHeight() - kToolbarHeightPx);
+    g.fillRect(dividerX, kToolbarHeightPx, 2, juce::jmax(0, getHeight() - kToolbarHeightPx - kIdentityRowHeightPx));
 }
 
 void MixerContentComponent::resized()
@@ -232,14 +322,17 @@ void MixerContentComponent::resized()
     auto area = getLocalBounds();
     auto toolbar = area.removeFromTop(kToolbarHeightPx).reduced(kToolbarPadPx, kToolbarPadPx);
     titleLabel_.setBounds(toolbar.removeFromLeft(56));
-    for (int i = 0; i < kSectionCount; ++i)
+    int remaining = kSectionCount;
+    for (const Section s : kToolbarOrder)
     {
-        const int w = juce::jmin(kToggleWidthPx, juce::jmax(40, toolbar.getWidth() / (kSectionCount - i)));
-        sectionToggles_[static_cast<size_t>(i)].setBounds(toolbar.removeFromLeft(w).reduced(2, 0));
+        const int w = juce::jmin(kToggleWidthPx, juce::jmax(40, toolbar.getWidth() / juce::jmax(1, remaining)));
+        sectionToggles_[static_cast<size_t>(s)].setBounds(toolbar.removeFromLeft(w).reduced(2, 0));
+        --remaining;
     }
+    area.removeFromBottom(kIdentityRowHeightPx);
     dividerOverlay_.setBounds(area);
-    // Stereo Out column: fixed at the right; the rest scrolls.
-    const int masterW = kStripWidthPx;
+    // Stereo Out column: fixed at the right; the rest scrolls. Width follows the section flags.
+    const int masterW = channelWidthPx(visibility_);
     auto masterArea = area.removeFromRight(masterW);
     area.removeFromRight(kMasterColumnGapPx);
     masterViewport_.setBounds(masterArea);
@@ -252,7 +345,8 @@ int MixerContentComponent::availableStripHeight() const noexcept
     const int viewportW = stripsViewport_.getWidth();
     const int viewportH = stripsViewport_.getHeight();
     const int n = static_cast<int>(strips_.size());
-    const int rowW = juce::jmax(0, n * (kStripWidthPx + kStripGapPx));
+    const int stripW = channelWidthPx(visibility_);
+    const int rowW = juce::jmax(0, n * (stripW + kStripGapPx));
     const bool horizontalBar = rowW > viewportW;
     const int barH = horizontalBar ? stripsViewport_.getScrollBarThickness() : 0;
     return juce::jmax(0, viewportH - barH);
@@ -260,34 +354,86 @@ int MixerContentComponent::availableStripHeight() const noexcept
 
 ComputedLayout MixerContentComponent::currentLayout() const noexcept
 {
-    return computeLayout(visibility_, heights_, kStripWidthPx, lastStripHeight_);
+    return computeLayout(visibility_, heights_, lastStripWidth_, lastStripHeight_);
+}
+
+void MixerContentComponent::layoutIdentityBand()
+{
+    const int stripW = channelWidthPx(visibility_);
+    const int y = getHeight() - kIdentityRowHeightPx;
+    const int barW = stripsViewport_.isVerticalScrollBarShown() ? stripsViewport_.getScrollBarThickness() : 0;
+    identityViewport_.setBounds(stripsViewport_.getX(), y, juce::jmax(0, stripsViewport_.getWidth() - barW), kIdentityRowHeightPx);
+    masterIdentityHolder_.setBounds(masterViewport_.getX(), y, stripW, kIdentityRowHeightPx);
+}
+
+void MixerContentComponent::syncIdentityScroll()
+{
+    if (syncingScroll_)
+    {
+        return;
+    }
+    syncingScroll_ = true;
+    identityViewport_.setViewPosition(stripsViewport_.getViewPositionX(), 0);
+    syncingScroll_ = false;
+}
+
+MixerIdentityCell* MixerContentComponent::identityFor(const TrackId trackId) const noexcept
+{
+    for (const auto& c : identityCells_)
+    {
+        if (c != nullptr && c->trackId() == trackId)
+        {
+            return c.get();
+        }
+    }
+    if (masterIdentity_ != nullptr && masterIdentity_->trackId() == trackId)
+    {
+        return masterIdentity_.get();
+    }
+    return nullptr;
 }
 
 void MixerContentComponent::layoutStrips()
 {
-    const int n = static_cast<int>(strips_.size());
-    const int rowW = juce::jmax(0, n * (kStripWidthPx + kStripGapPx));
+    const int stripW = channelWidthPx(visibility_);
+    const int oldStride = lastStripWidth_ + kStripGapPx;
+    const int leftIndex = oldStride > 0 ? stripsViewport_.getViewPositionX() / oldStride : 0;
+    const int rowW = juce::jmax(0, static_cast<int>(strips_.size()) * (stripW + kStripGapPx));
     const int availableH = availableStripHeight();
     const int minH = minimumStripHeight(visibility_, heights_);
     const int stripH = juce::jmax(minH, availableH);
-    const ComputedLayout layout = computeLayout(visibility_, heights_, kStripWidthPx, stripH);
+    const ComputedLayout layout = computeLayout(visibility_, heights_, stripW, stripH);
     lastStripHeight_ = stripH;
+    lastStripWidth_ = stripW;
 
     stripsRow_.setSize(juce::jmax(rowW, 1), stripH);
+    identityRow_.setSize(juce::jmax(rowW, 1), kIdentityRowHeightPx);
     int x = 0;
-    for (auto& s : strips_)
+    for (size_t i = 0; i < strips_.size(); ++i)
     {
-        s->setBounds(x, 0, kStripWidthPx, stripH);
-        s->applyLayout(layout);
-        x += kStripWidthPx + kStripGapPx;
+        strips_[i]->setBounds(x, 0, stripW, stripH);
+        strips_[i]->applyLayout(layout);
+        if (i < identityCells_.size() && identityCells_[i] != nullptr)
+        {
+            identityCells_[i]->setBounds(x, 0, stripW, kIdentityRowHeightPx);
+        }
+        x += stripW + kStripGapPx;
     }
-    masterHolder_.setSize(kStripWidthPx, stripH);
+    masterHolder_.setSize(stripW, stripH);
     if (masterStrip_ != nullptr)
     {
-        masterStrip_->setBounds(0, 0, kStripWidthPx, stripH);
+        masterStrip_->setBounds(0, 0, stripW, stripH);
         masterStrip_->applyLayout(layout);
     }
+    if (masterIdentity_ != nullptr)
+    {
+        masterIdentity_->setBounds(0, 0, stripW, kIdentityRowHeightPx);
+    }
+    layoutIdentityBand();
+    const int newStride = stripW + kStripGapPx;
+    stripsViewport_.setViewPosition(leftIndex * newStride, stripsViewport_.getViewPositionY());
     syncMasterScroll();
+    syncIdentityScroll();
     dividerOverlay_.repaint();
 }
 
@@ -304,16 +450,20 @@ void MixerContentComponent::syncMasterScroll()
 
 void MixerContentComponent::setSectionVisibility(const SectionVisibility& v)
 {
-    if (v == visibility_ && sectionToggles_[0].getToggleState() == v.get(Section::Routing))
-    {
-        return;
-    }
+    const bool changed = v != visibility_;
     visibility_ = v;
     for (int i = 0; i < kSectionCount; ++i)
     {
         styleToggle(sectionToggles_[static_cast<size_t>(i)], visibility_.get(static_cast<Section>(i)));
     }
-    layoutStrips();
+    if (!changed)
+    {
+        return;
+    }
+    // The master column and the scrolling viewport share the derived width, so a toggle
+    // relayouts the whole content, not only the strips inside the old viewport.
+    resized();
+    refreshFromSession();
     if (meterHub_ != nullptr)
     {
         meterHub_->refreshInterestNow();
@@ -470,6 +620,41 @@ void MixerContentComponent::syncStripSet(const SessionSnapshot& snap)
         changed = true;
     }
 
+    {
+        std::vector<std::unique_ptr<MixerIdentityCell>> orderedIds;
+        orderedIds.reserve(strips_.size());
+        for (const auto& s : strips_)
+        {
+            std::unique_ptr<MixerIdentityCell> cell;
+            for (auto& c : identityCells_)
+            {
+                if (c != nullptr && c->trackId() == s->trackId())
+                {
+                    cell = std::move(c);
+                    break;
+                }
+            }
+            if (cell == nullptr)
+            {
+                cell = std::make_unique<MixerIdentityCell>(s->trackId());
+                cell->onActivate = [this](const TrackId id) {
+                    if (bindings_.activateTrack)
+                    {
+                        bindings_.activateTrack(id);
+                    }
+                };
+                identityRow_.addAndMakeVisible(*cell);
+                changed = true;
+            }
+            orderedIds.push_back(std::move(cell));
+        }
+        if (identityCells_.size() != orderedIds.size())
+        {
+            changed = true;
+        }
+        identityCells_ = std::move(orderedIds);
+    }
+
     if (master != masterTrackId_ || (master != kInvalidTrackId && masterStrip_ == nullptr))
     {
         masterTrackId_ = master;
@@ -478,6 +663,18 @@ void MixerContentComponent::syncStripSet(const SessionSnapshot& snap)
         {
             masterStrip_ = std::make_unique<MixerChannelStrip>(master, bindings_, meterHub_);
             masterHolder_.addAndMakeVisible(*masterStrip_);
+            masterIdentity_ = std::make_unique<MixerIdentityCell>(master);
+            masterIdentity_->onActivate = [this](const TrackId id) {
+                if (bindings_.activateTrack)
+                {
+                    bindings_.activateTrack(id);
+                }
+            };
+            masterIdentityHolder_.addAndMakeVisible(*masterIdentity_);
+        }
+        else
+        {
+            masterIdentity_.reset();
         }
         changed = true;
     }
@@ -498,19 +695,37 @@ void MixerContentComponent::refreshFromSession()
     {
         strips_.clear();
         masterStrip_.reset();
+        identityCells_.clear();
+        masterIdentity_.reset();
         masterTrackId_ = kInvalidTrackId;
         layoutStrips();
         return;
     }
     syncStripSet(*snap);
     const TrackId active = bindings_.activeTrackId ? bindings_.activeTrackId() : kInvalidTrackId;
+    const auto publishIdentity = [&](MixerIdentityCell* cell, const TrackId id) {
+        if (cell == nullptr)
+        {
+            return;
+        }
+        const int idx = snap->findTrackIndexById(id);
+        if (idx < 0)
+        {
+            return;
+        }
+        const Track& tr = snap->getTrack(idx);
+        const juce::String name = tr.getKind() == TrackKind::Master ? juce::String(kMasterTrackDisplayName) : tr.getName();
+        cell->setIdentity(idx + 1, name, id == active);
+    };
     for (auto& s : strips_)
     {
         s->refreshFromSession(*snap, s->trackId() == active);
+        publishIdentity(identityFor(s->trackId()), s->trackId());
     }
     if (masterStrip_ != nullptr)
     {
         masterStrip_->refreshFromSession(*snap, masterStrip_->trackId() == active);
+        publishIdentity(masterIdentity_.get(), masterStrip_->trackId());
     }
 }
 
@@ -604,7 +819,7 @@ bool MixerContentComponent::verifyLayout(juce::String& report, juce::String& fai
                    << " vs " << refHeader.toString() << ", lower " << s->lowerBandBounds().toString() << " vs " << refLower.toString() << ")\n";
             ok = fail("strip bands are not aligned");
         }
-        if (s->getHeight() != lastStripHeight_ || s->getWidth() != kStripWidthPx)
+        if (s->getHeight() != lastStripHeight_ || s->getWidth() != channelWidthPx(visibility_))
         {
             ok = fail("strip size differs");
         }
@@ -618,7 +833,7 @@ bool MixerContentComponent::verifyLayout(juce::String& report, juce::String& fai
         ok = fail("a control leaves its band in Stereo Out");
     }
     // The fixed strip must be fully visible regardless of the horizontal scroll position.
-    if (masterStrip_ != nullptr && masterViewport_.getWidth() < kStripWidthPx)
+    if (masterStrip_ != nullptr && masterViewport_.getWidth() < channelWidthPx(visibility_))
     {
         ok = fail("Stereo Out column narrower than a strip");
     }
@@ -644,4 +859,39 @@ bool MixerContentComponent::verifyLayout(juce::String& report, juce::String& fai
         }
     }
     return ok;
+}
+
+int MixerContentComponent::identityNumberForTest(const TrackId trackId) const noexcept
+{
+    const MixerIdentityCell* const cell = identityFor(trackId);
+    return cell != nullptr ? cell->number() : 0;
+}
+
+juce::String MixerContentComponent::identityTooltipForTest(const TrackId trackId) const
+{
+    const MixerIdentityCell* const cell = identityFor(trackId);
+    return cell != nullptr ? cell->tooltipText() : juce::String();
+}
+
+int MixerContentComponent::identityCellWidthForTest(const TrackId trackId) const noexcept
+{
+    const MixerIdentityCell* const cell = identityFor(trackId);
+    return cell != nullptr ? cell->getWidth() : 0;
+}
+
+bool MixerContentComponent::clickIdentityForTest(const TrackId trackId)
+{
+    MixerIdentityCell* const cell = identityFor(trackId);
+    if (cell == nullptr)
+    {
+        return false;
+    }
+    cell->userClick();
+    return true;
+}
+
+bool MixerContentComponent::headerControlsVisibleForTest(const TrackId trackId) const noexcept
+{
+    const MixerChannelStrip* const strip = stripForTrack(trackId);
+    return strip != nullptr && strip->headerChromeVisible();
 }

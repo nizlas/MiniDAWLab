@@ -194,7 +194,29 @@ namespace
         SectionVisibility none;
         for (int i = 0; i < kSectionCount; ++i) { none.set(static_cast<Section>(i), false); }
         const ComputedLayout e = computeLayout(none, kStripWidthPx, 500);
-        check(e.lowerBand.isEmpty() && e.totalHeight == kStripPadPx + kHeaderHeightPx + kStripPadPx, "layout: everything hidden leaves the header only");
+        check(e.lowerBand.isEmpty() && e.header.isEmpty() && e.totalHeight == kStripPadPx + kStripPadPx,
+              "layout: everything hidden, including Headers, leaves only the pads");
+        check(channelWidthPx(all) == kStripWidthPx, "width: Headers or a wide section keeps the normal strip");
+        check(channelWidthPx(fadersOnly) == kStripWidthFadersPx, "width: faders alone use the fader width");
+        SectionVisibility metersOnly;
+        for (int i = 0; i < kSectionCount; ++i) { metersOnly.set(static_cast<Section>(i), false); }
+        metersOnly.set(Section::Meters, true);
+        check(channelWidthPx(metersOnly) == kStripWidthMetersPx, "width: meters alone use the meter width");
+        SectionVisibility fadersAndMeters = fadersOnly;
+        fadersAndMeters.set(Section::Meters, true);
+        check(channelWidthPx(fadersAndMeters) == kStripWidthFadersMetersPx, "width: faders and meters share the compact width");
+        check(channelWidthPx(none) == kStripWidthIdentityPx, "width: no sections leaves the identity width");
+        SectionVisibility headersOff = all;
+        headersOff.set(Section::Headers, false);
+        const ComputedLayout noHeader = computeLayout(headersOff, kStripWidthPx, 900);
+        check(noHeader.header.isEmpty() && noHeader.band(Section::Routing).getY() == kStripPadPx + kSectionGapPx,
+              "layout: Headers off frees the header height and the next band moves up");
+        const ComputedLayout compact = computeLayout(fadersAndMeters, kStripWidthFadersMetersPx, 500);
+        check(!compact.band(Section::Faders).isEmpty() && !compact.band(Section::Meters).isEmpty()
+                  && compact.band(Section::Faders).getWidth() >= 52
+                  && compact.band(Section::Meters).getWidth() >= 46
+                  && compact.band(Section::Faders).getRight() <= compact.band(Section::Meters).getX(),
+              "layout: compact faders and meters sit side by side at their own widths");
         // Two strips with different content get identical bands: the layout depends on flags + height only.
         const ComputedLayout f = computeLayout(all, kStripWidthPx, 900);
         check(f.bands == a.bands && f.header == a.header, "layout: identical inputs -> identical bands (alignment across strips)");
@@ -568,8 +590,18 @@ namespace
             check(store.getTrackHeaderColumnWidthPx().value_or(0) == 149, "store: header width survives beside the mixer values");
             check(store.getMixerWindowBounds().has_value() && *store.getMixerWindowBounds() == juce::Rectangle<int>(40, 50, 1000, 640), "store: mixer bounds round trip");
             check(store.getMixerSectionShown("sends") == std::optional<bool>(false) && store.getMixerSectionShown("meters") == std::optional<bool>(true)
-                      && !store.getMixerSectionShown("routing").has_value(),
-                  "store: section flags round trip; unset keys stay absent");
+                      && !store.getMixerSectionShown("routing").has_value()
+                      && !store.getMixerSectionShown("headers").has_value(),
+                  "store: section flags round trip; unset keys, including headers, stay absent");
+            store.setMixerSectionShown("headers", false);
+            store.save();
+        }
+        {
+            UiLayoutSettingsStore store(file);
+            store.loadFromFile();
+            check(store.getMixerSectionShown("headers") == std::optional<bool>(false)
+                      && store.getMixerSectionShown("sends") == std::optional<bool>(false),
+                  "store: Headers off round-trips beside the other section flags");
         }
         // Malformed bounds are ignored, the rest still loads.
         (void)file.replaceWithText("<UI_LAYOUT version=\"1\"><TRACK_HEADER_COLUMN widthPx=\"150\"/><MIXER_WINDOW x=\"abc\" y=\"1\" width=\"0\" height=\"5\"/><MIXER_SECTIONS sends=\"maybe\" faders=\"0\"/></UI_LAYOUT>");
@@ -577,7 +609,9 @@ namespace
             UiLayoutSettingsStore store(file);
             store.loadFromFile();
             check(!store.getMixerWindowBounds().has_value() && store.getTrackHeaderColumnWidthPx().value_or(0) == 150, "store: malformed mixer bounds ignored, header width kept");
-            check(!store.getMixerSectionShown("sends").has_value() && store.getMixerSectionShown("faders") == std::optional<bool>(false), "store: non 0/1 flags ignored, valid ones kept");
+            check(!store.getMixerSectionShown("sends").has_value() && store.getMixerSectionShown("faders") == std::optional<bool>(false)
+                      && !store.getMixerSectionShown("headers").has_value(),
+                  "store: non 0/1 flags ignored, valid ones kept, and a file without headers leaves the key absent");
         }
         (void)file.deleteFile();
     }
@@ -650,6 +684,33 @@ namespace
                   && sectionHeight(openRead.mixerWindow, "postInserts", post) && post == 111
                   && sectionHeight(openRead.mixerWindow, "preInserts", pre) && pre == 87,
               "project: section flags and heights round trip");
+        {
+            mixer_layout::SectionVisibility vis;
+            for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+            {
+                const auto s = static_cast<mixer_layout::Section>(i);
+                bool shown = false;
+                if (sectionShown(openRead.mixerWindow, mixer_layout::sectionKey(s), shown))
+                {
+                    vis.set(s, shown);
+                }
+            }
+            check(vis.get(mixer_layout::Section::Headers) && !vis.get(mixer_layout::Section::Sends),
+                  "project: a saved layout without headers keeps Headers on and still applies stored flags");
+        }
+        ProjectFileMixerWindowV1 headersOff = openState;
+        headersOff.sections.push_back({ "headers", false });
+        const juce::File headersFile = dir.getChildFile("mixer-headers-off.dalproj");
+        check(session.saveProjectToFile(transport, headersFile, 48000.0, nullptr, {}, false, "1_4",
+                                         std::nullopt, std::nullopt, std::nullopt, std::nullopt, headersOff)
+                  .wasOk(),
+              "project: save with Headers off");
+        ProjectFileV1 headersRead;
+        bool headersShown = true;
+        check(readProjectFile(headersFile, headersRead).wasOk()
+                  && sectionShown(headersRead.mixerWindow, "headers", headersShown) && !headersShown
+                  && !headersFile.loadFileAsString().contains("channelWidth"),
+              "project: Headers off round-trips and channel width is not stored");
 
         ProjectFileMixerWindowV1 closedState;
         closedState.open = false;
@@ -718,6 +779,229 @@ namespace
         window.restoreForProject(true, {}, hiddenSends, heights);
         check(window.isVisible() && window.getWidth() == 800, "window: an open restore without bounds keeps the current size");
     }
+
+    mixer_layout::SectionVisibility sectionsOn(std::initializer_list<mixer_layout::Section> on)
+    {
+        mixer_layout::SectionVisibility v;
+        for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+        {
+            v.set(static_cast<mixer_layout::Section>(i), false);
+        }
+        for (const mixer_layout::Section s : on)
+        {
+            v.set(s, true);
+        }
+        return v;
+    }
+
+    void writeMixerShot(MixerContentComponent& content, const juce::File& file)
+    {
+        const int stride = content.currentChannelWidthPx() + mixer_layout::kStripGapPx;
+        const int stripW = content.currentChannelWidthPx();
+        const int n = content.stripCount();
+        const int viewW = content.stripsViewport().getWidth();
+        const int maxX = juce::jmax(0, content.stripsContentWidthForTest() - viewW);
+        // The last channel, fully visible against the right edge, carries the long name and number 100.
+        const int lastLeft = juce::jmax(0, (n - 1) * stride);
+        const int want = lastLeft + stripW - viewW;
+        content.stripsViewport().setViewPosition(juce::jlimit(0, maxX, want), 0);
+        const juce::Image shot = content.createComponentSnapshot(content.getLocalBounds(), true);
+        file.getParentDirectory().createDirectory();
+        juce::FileOutputStream stream(file);
+        juce::PNGImageFormat png;
+        const bool wrote = stream.openedOk() && png.writeImageToStream(shot, stream);
+        check(wrote && shot.getWidth() == content.getWidth() && shot.getHeight() == content.getHeight(),
+              ("shot: " + file.getFileName()).toRawUTF8());
+    }
+
+    /// Width follows the section flags. The identity row keeps the arrangement number, activates
+    /// a non-active row, and stays pinned. Hidden header / fader / meter controls keep no hit target.
+    void testChannelWidthAndIdentity()
+    {
+        StripHarness h;
+        while (h.session.getNumTracks() < 101)
+        {
+            h.session.addTrack();
+        }
+        const TrackId hundred = h.session.getTrackIdAtIndex(99);
+        const juce::String longName("Very long channel name that must stay inside the column");
+        h.session.setTrackName(hundred, longName);
+        h.session.setActiveTrack(h.a);
+        const auto groupId = h.session.createVisualTrackGroup("Fold", { h.a, h.b });
+        check(groupId.has_value() && h.session.setVisualTrackGroupCollapsed(*groupId, true),
+              "identity: a visual group can be collapsed without touching the snapshot order");
+
+        LevelMeterHub hub;
+        MixerContentComponent content(h.bindings, &hub);
+        content.setSize(1100, 720);
+        content.refreshFromSession();
+        mixer_layout::SectionHeights heights;
+        heights.set(mixer_layout::Section::PostInserts, 140);
+        content.setSectionHeights(heights);
+
+        const auto snap = h.snap();
+        check(content.identityNumberForTest(h.a) == snap->findTrackIndexById(h.a) + 1
+                  && content.identityNumberForTest(h.b) == snap->findTrackIndexById(h.b) + 1
+                  && content.identityNumberForTest(hundred) == 100
+                  && content.identityNumberForTest(h.m) == snap->findTrackIndexById(h.m) + 1,
+              "identity: numbers are the arrangement index + 1, including 100 and Stereo Out");
+        check(content.identityNumberForTest(h.b) == 2, "identity: a collapsed group does not renumber the rows inside it");
+        check(content.identityTooltipForTest(hundred) == longName
+                  && content.identityCellWidthForTest(hundred) == content.identityCellWidthForTest(h.a)
+                  && content.identityCellWidthForTest(hundred) == mixer_layout::kStripWidthPx,
+              "identity: a long name keeps the shared width and the tooltip is the full name");
+        check(content.identityTooltipForTest(h.m) == juce::String(kMasterTrackDisplayName),
+              "identity: Stereo Out uses the arrangement's master name");
+        check(content.headerControlsVisibleForTest(h.b), "headers: the channel header is shown by default");
+        check(content.identityBandYForTest() == content.getHeight() - mixer_layout::kIdentityRowHeightPx
+                  && content.identityBandsAlignedForTest(),
+              "identity: the row is pinned to the bottom of the scrolling channels and Stereo Out");
+
+        h.calls.clear();
+        check(content.clickIdentityForTest(hundred) && h.session.getActiveTrackId() == hundred
+                  && h.calls.back() == "activate:" + juce::String((juce::int64)hundred),
+              "identity: clicking a non-active row activates that TrackId");
+        h.session.setActiveTrack(h.a);
+        content.refreshFromSession();
+
+        const juce::File shotDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-mixer-layout-shots");
+        (void)shotDir.deleteRecursively();
+        std::printf("shots: %s\n", shotDir.getFullPathName().toRawUTF8());
+        h.session.setActiveTrack(hundred);
+        content.refreshFromSession();
+        writeMixerShot(content, shotDir.getChildFile("1-normal.png"));
+        h.session.setActiveTrack(h.a);
+        content.refreshFromSession();
+
+        auto headersOff = content.sectionVisibility();
+        headersOff.set(mixer_layout::Section::Headers, false);
+        content.setSectionVisibility(headersOff);
+        check(content.currentChannelWidthPx() == mixer_layout::kStripWidthPx
+                  && !content.headerControlsVisibleForTest(h.b)
+                  && content.stripForTrack(h.b)->headerChromeClearedForTest()
+                  && content.identityNumberForTest(hundred) == 100,
+              "headers: off hides the header hit targets and keeps the normal width while a wide section is shown");
+
+        content.setSectionVisibility(sectionsOn({ mixer_layout::Section::Faders, mixer_layout::Section::Meters }));
+        check(content.currentChannelWidthPx() == mixer_layout::kStripWidthFadersMetersPx, "width: faders + meters");
+        {
+            MixerChannelStrip* strip = content.stripForTrack(h.b);
+            MixerChannelStrip* midi = content.stripForTrack(h.midi);
+            check(strip->fader().isVisible() && strip->meter().isVisible()
+                      && strip->fader().getBounds().getRight() <= strip->meter().getBounds().getX()
+                      && !midi->fader().isVisible() && midi->fader().getBounds().isEmpty()
+                      && !midi->meter().isVisible() && midi->meter().getBounds().isEmpty(),
+                  "width: compact fader and meter sit side by side; a MIDI row gains no audio controls");
+        }
+        check(content.sectionHeights().get(mixer_layout::Section::PostInserts) == 140,
+              "layout: a width change keeps the stored section heights");
+        h.session.setActiveTrack(hundred);
+        content.refreshFromSession();
+        writeMixerShot(content, shotDir.getChildFile("2-faders-meters.png"));
+        h.session.setActiveTrack(h.a);
+        content.refreshFromSession();
+        const int wideStride = mixer_layout::kStripWidthFadersMetersPx + mixer_layout::kStripGapPx;
+        content.stripsViewport().setViewPosition(5 * wideStride, 0);
+
+        content.setSectionVisibility(sectionsOn({ mixer_layout::Section::Faders }));
+        const int faderStride = mixer_layout::kStripWidthFadersPx + mixer_layout::kStripGapPx;
+        check(content.currentChannelWidthPx() == mixer_layout::kStripWidthFadersPx
+                  && content.viewPositionXForTest() == 5 * faderStride
+                  && content.stripsContentWidthForTest() == content.stripCount() * faderStride,
+              "width: faders alone, and the leftmost channel index is kept");
+        {
+            MixerChannelStrip* strip = content.stripForTrack(h.b);
+            const auto masterBounds = content.masterStrip()->getScreenBounds();
+            check(strip->fader().isVisible() && !strip->meter().isVisible() && strip->meter().getBounds().isEmpty()
+                      && strip->pan().isVisible() && strip->pan().getHeight() == mixer_layout::kPanFieldHeightPx
+                      && content.masterStrip()->getWidth() == mixer_layout::kStripWidthFadersPx
+                      && masterBounds.getRight() == content.getWidth()
+                      && content.identityBandsAlignedForTest(),
+                  "width: faders alone keep pan, drop the meter, and Stereo Out stays fixed at the right");
+            ChannelFaderComponent& fader = strip->fader();
+            const auto src = juce::Desktop::getInstance().getMainMouseSource();
+            const auto now = juce::Time::getCurrentTime();
+            const juce::Point<float> down = fader.getKnobBounds().getCentre().toFloat();
+            const auto eventAt = [&](juce::Point<float> pos, juce::ModifierKeys mods, bool dragged) {
+                return juce::MouseEvent(src, pos, mods, 0.f, 0.f, 0.f, 0.f, 0.f, &fader, &fader, now, down, now, 1, dragged);
+            };
+            fader.mouseDown(eventAt(down, juce::ModifierKeys::leftButtonModifier, false));
+            fader.mouseDrag(eventAt(down.translated(0.0f, -70.0f), juce::ModifierKeys::leftButtonModifier, true));
+            fader.mouseUp(eventAt(down.translated(0.0f, -70.0f), juce::ModifierKeys(), false));
+            const float dragged = h.track(h.b).getChannelFaderGain();
+            check(dragged > 1.05f && std::abs(h.track(h.a).getChannelFaderGain() - 1.0f) < 1e-4f
+                      && h.session.getActiveTrackId() == h.a,
+                  "fader: a compact drag on track B raises B and leaves the active track A");
+            fader.mouseDown(eventAt(down, juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::ctrlModifier, false));
+            fader.mouseUp(eventAt(down, juce::ModifierKeys(), false));
+            check(std::abs(h.track(h.b).getChannelFaderGain() - 1.0f) < 1e-4f, "fader: Ctrl-click still resets to unity");
+            fader.mouseDown(eventAt(down, juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier, false));
+            fader.mouseDrag(eventAt(down.translated(0.0f, -70.0f), juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier, true));
+            fader.mouseUp(eventAt(down.translated(0.0f, -70.0f), juce::ModifierKeys(), false));
+            const float fine = h.track(h.b).getChannelFaderGain();
+            check(fine > 1.0f && fine < dragged, "fader: Shift-drag still fine-adjusts");
+            fader.commitTypedValue("-6");
+            check(std::abs(h.track(h.b).getChannelFaderGain() - 0.501f) < 0.01f, "fader: typed entry still reaches the row in the compact width");
+        }
+        h.session.setActiveTrack(hundred);
+        content.refreshFromSession();
+        writeMixerShot(content, shotDir.getChildFile("3-faders.png"));
+        h.session.setActiveTrack(h.a);
+        content.refreshFromSession();
+
+        content.setSectionVisibility(sectionsOn({ mixer_layout::Section::Meters }));
+        check(content.currentChannelWidthPx() == mixer_layout::kStripWidthMetersPx, "width: meters alone");
+        {
+            MixerChannelStrip* strip = content.stripForTrack(h.b);
+            check(strip->meter().isVisible() && !strip->fader().isVisible() && strip->fader().getBounds().isEmpty()
+                      && !strip->pan().isVisible() && strip->pan().getBounds().isEmpty()
+                      && content.masterStrip()->getWidth() == mixer_layout::kStripWidthMetersPx
+                      && content.stripsContentWidthForTest() == content.stripCount() * (mixer_layout::kStripWidthMetersPx + mixer_layout::kStripGapPx),
+                  "width: meters alone keep the meter and drop the fader column");
+        }
+        h.session.setActiveTrack(hundred);
+        content.refreshFromSession();
+        writeMixerShot(content, shotDir.getChildFile("4-meters.png"));
+        h.session.setActiveTrack(h.a);
+        content.refreshFromSession();
+
+        content.setSectionVisibility(sectionsOn({}));
+        check(content.currentChannelWidthPx() == mixer_layout::kStripWidthIdentityPx
+                  && content.identityNumberForTest(hundred) == 100
+                  && content.identityCellWidthForTest(hundred) == mixer_layout::kStripWidthIdentityPx
+                  && content.stripForTrack(h.b)->fader().getBounds().isEmpty()
+                  && content.stripForTrack(h.b)->meter().getBounds().isEmpty(),
+              "width: every section off leaves the identity row and no fader or meter hit target");
+
+        content.setSectionVisibility(sectionsOn({ mixer_layout::Section::Routing }));
+        check(content.currentChannelWidthPx() == mixer_layout::kStripWidthPx
+                  && content.masterStrip()->getWidth() == mixer_layout::kStripWidthPx
+                  && content.sectionHeights().get(mixer_layout::Section::PostInserts) == 140,
+              "width: showing a wide section restores the normal width immediately");
+
+        const TrackId moved = h.session.getTrackIdAtIndex(5);
+        const int numberBeforeMove = content.identityNumberForTest(moved);
+        h.session.moveTrack(moved, 12);
+        content.refreshFromSession();
+        check(content.identityNumberForTest(moved) == h.snap()->findTrackIndexById(moved) + 1
+                  && content.identityNumberForTest(moved) != numberBeforeMove,
+              "identity: reordering updates the arrangement number");
+        const int masterBeforeInsert = content.identityNumberForTest(h.m);
+        h.session.addTrack();
+        content.refreshFromSession();
+        check(content.identityNumberForTest(h.m) == masterBeforeInsert + 1, "identity: inserting a row renumbers the rows after it");
+        const int beforeDelete = content.identityNumberForTest(h.b);
+        h.session.removeTrack(h.a);
+        content.refreshFromSession();
+        check(content.identityNumberForTest(h.b) == beforeDelete - 1
+                  && content.identityNumberForTest(h.b) == h.snap()->findTrackIndexById(h.b) + 1,
+              "identity: deleting a row renumbers the rows after it");
+
+        juce::String report;
+        juce::String fail;
+        content.setSize(1100, 720);
+        check(content.verifyLayout(report, fail), ("mixer: layout holds after the width changes\n" + fail + "\n" + report).toRawUTF8());
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -761,6 +1045,7 @@ int main(int argc, char** argv)
     testSectionLayout();
     testDividers();
     testStripBinding();
+    testChannelWidthAndIdentity();
     testLayoutStore();
     testMixerProjectFile();
     testMixerWindowRestore();

@@ -116,6 +116,27 @@ public:
     [[nodiscard]] bool baseButtonVisible(track_strip_glyphs::StripButtonKind kind) const;
     [[nodiscard]] bool baseButtonActive(track_strip_glyphs::StripButtonKind kind) const;
     [[nodiscard]] juce::Rectangle<int> headerBounds() const noexcept { return layout_.header; }
+    /// False when Headers is off: the name and the base buttons have no bounds and are not visible.
+    [[nodiscard]] bool headerChromeVisible() const noexcept
+    {
+        return nameLabel_.isVisible() && nameLabel_.getWidth() > 0;
+    }
+    /// Headers off: name, kind and every base button have empty bounds, no tooltip and no focus.
+    [[nodiscard]] bool headerChromeClearedForTest() const noexcept
+    {
+        const juce::Component* cells[] = { &nameLabel_, &kindLabel_, &instrumentEditorCell_, &powerCell_, &muteCell_,
+                                            &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ };
+        for (const juce::Component* c : cells)
+        {
+            auto* tip = dynamic_cast<juce::TooltipClient*>(const_cast<juce::Component*>(c));
+            if (c->isVisible() || !c->getBounds().isEmpty() || c->hasKeyboardFocus(false)
+                || (tip != nullptr && tip->getTooltip().isNotEmpty()))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
     [[nodiscard]] juce::Rectangle<int> lowerBandBounds() const noexcept { return layout_.lowerBand; }
     /// Geometry check: every visible child lies inside the strip and inside its band; appends
     /// human-readable lines, returns false on the first violation.
@@ -205,6 +226,8 @@ private:
     void populateRoutingRow(int row, const Track& track, const SessionSnapshot& snap);
     void routingRowChanged(int row);
     void applyKindLayout(TrackKind kind);
+    /// Which header cells this kind shows. A hidden Headers section leaves them all invisible.
+    void restoreHeaderButtonVisibility();
     void refreshBaseButtons(const Track& track);
     void refreshInserts(InsertStage stage, const std::vector<InspectorInsertRow>& rows);
     void layoutInsertList(InsertStageUi& ui);
