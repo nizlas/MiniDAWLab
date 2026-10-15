@@ -11,6 +11,7 @@
 #include "plugins/ExperimentalInstrumentHost.h"
 
 #include "diagnostics/AudioThreadProfiler.h"
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "domain/TrackStereoPan.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -2335,7 +2336,17 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
         return juce::Result::fail("VST3 file or bundle does not exist.");
     }
 
+    const auto phaseMs = [](const double t0) {
+        return (int) (juce::Time::getMillisecondCounterHiRes() - t0 + 0.5);
+    };
+    int unloadMs = 0;
+    int createMs = 0;
+    int prepareMs = 0;
+    int setStateMs = 0;
+    int prepareAfterMs = 0;
+    const double unloadT0 = juce::Time::getMillisecondCounterHiRes();
     unloadInstrument();
+    unloadMs = phaseMs(unloadT0);
 
     juce::PluginDescription desc = descIn;
     if (desc.fileOrIdentifier.isEmpty())
@@ -2396,6 +2407,7 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
 
     juce::String err;
     std::unique_ptr<juce::AudioPluginInstance> inst;
+    const double createT0 = juce::Time::getMillisecondCounterHiRes();
     try
     {
         inst = formatManager_.createPluginInstance(desc, srU, bsU, err);
@@ -2423,6 +2435,7 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
         }
         return juce::Result::fail("Unknown exception during createPluginInstance.");
     }
+    createMs = phaseMs(createT0);
 
     if (inst == nullptr)
     {
@@ -2439,7 +2452,9 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     writeExperimentalInstrumentLogLine(
         "createPluginInstance: OK instanceName=\"" + inst->getName() + "\"");
 
+    const double prepareT0 = juce::Time::getMillisecondCounterHiRes();
     bool finalLayoutOk = tryPrepareInstrumentLayout(*inst, sampleRate_, blockSize_);
+    prepareMs = phaseMs(prepareT0);
     if (!finalLayoutOk)
     {
         writeExperimentalInstrumentLogLine("load: FAILED bus layout after prepare (see bus negotiation lines above).");
@@ -2462,10 +2477,14 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
         bool restoreOk = false;
         try
         {
+            const double stateT0 = juce::Time::getMillisecondCounterHiRes();
             inst->setStateInformation(pluginStateToRestore->getData(), (int)pluginStateToRestore->getSize());
+            setStateMs = phaseMs(stateT0);
             if (inst->getMainBusNumOutputChannels() < kStereoChannels)
             {
+                const double afterT0 = juce::Time::getMillisecondCounterHiRes();
                 inst->prepareToPlay(srU, bsU);
+                prepareAfterMs += phaseMs(afterT0);
             }
             restoreOk = inst->getMainBusNumOutputChannels() >= kStereoChannels;
             if (restoreOk)
@@ -2511,7 +2530,9 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
         {
             writeExperimentalInstrumentLogLine("plugin-state: reset to default patch after failed restore");
             inst->releaseResources();
+            const double resetT0 = juce::Time::getMillisecondCounterHiRes();
             finalLayoutOk = tryPrepareInstrumentLayout(*inst, sampleRate_, blockSize_);
+            prepareAfterMs += phaseMs(resetT0);
             if (!finalLayoutOk)
             {
                 writeExperimentalInstrumentLogLine(
@@ -2589,6 +2610,11 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     lastLoadedVst3OriginalPath_ = originalPath.getFullPathName();
     lastLoadedPluginDescription_ = desc;
     lastLoadedPluginDescriptionValid_ = true;
+    appendProjectLoadDiagnosticLine(
+        "load: instrument split name=\"" + desc.name + "\" unloadMs=" + juce::String(unloadMs) + " createMs="
+        + juce::String(createMs) + " prepareMs=" + juce::String(prepareMs) + " setStateMs=" + juce::String(setStateMs)
+        + " prepareAfterMs=" + juce::String(prepareAfterMs) + " stateBytes="
+        + juce::String(pluginStateToRestore != nullptr ? (juce::int64)pluginStateToRestore->getSize() : (juce::int64)0));
     return juce::Result::ok();
 }
 

@@ -440,11 +440,14 @@ GenericVst3ProjectLoadResolution tryResolveGenericVst3ForProjectLoad(
     };
 
     std::vector<InstrumentCatalogEntry> catalog;
+    const double catalogT0 = juce::Time::getMillisecondCounterHiRes();
     const bool catalogLoaded = loadInstrumentCatalogFromCache(catalog);
+    const int catalogMs = (int) (juce::Time::getMillisecondCounterHiRes() - catalogT0 + 0.5);
     appendProjectLoadDiagnosticLine("load: GenericVst3 resolve begin hasDescriptor="
                                     + juce::String(hasSavedDescriptor ? "yes" : "no") + " bundlePath=\""
                                     + savedBundlePath + "\" catalogLoaded="
-                                    + juce::String(catalogLoaded ? "yes" : "no"));
+                                    + juce::String(catalogLoaded ? "yes" : "no") + " catalogMs="
+                                    + juce::String(catalogMs));
 
     if (savedBundlePath.isNotEmpty() && catalogLoaded)
     {

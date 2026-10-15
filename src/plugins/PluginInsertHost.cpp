@@ -5,6 +5,7 @@
 #include "plugins/PluginInsertHost.h"
 
 #include "diagnostics/AudioThreadProfiler.h"
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "plugins/PluginEditorWindows.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <vector>
 
 namespace
@@ -122,6 +124,16 @@ juce::PluginDescription PluginInsertHost::pickDescriptionForSavedIdentity(const 
 {
     err.clear();
     const juce::String pathOrId = vst3File.getFullPathName();
+    // JUCE caches the loaded module, but findAllTypesForFile still walks the factory every call.
+    // AmpliTube's walk is about a second per insert; reuse a matched description until the file changes.
+    const juce::String cacheKey = pathOrId + "\n" + savedIdentifier + "\n"
+                                  + juce::String(vst3File.getLastModificationTime().toMilliseconds());
+    static std::map<juce::String, juce::PluginDescription> matchedDescriptionByFileAndIdentity;
+    if (const auto cached = matchedDescriptionByFileAndIdentity.find(cacheKey);
+        cached != matchedDescriptionByFileAndIdentity.end())
+    {
+        return cached->second;
+    }
     juce::OwnedArray<juce::PluginDescription> list;
     for (int i = 0; i < fm.getNumFormats(); ++i)
     {
@@ -138,12 +150,14 @@ juce::PluginDescription PluginInsertHost::pickDescriptionForSavedIdentity(const 
     }
     if (savedIdentifier.isEmpty())
     {
+        matchedDescriptionByFileAndIdentity.emplace(cacheKey, *list.getFirst());
         return *list.getFirst();
     }
     for (const juce::PluginDescription* pd : list)
     {
         if (pd != nullptr && descriptionMatchesSavedIdentity(*pd, savedIdentifier))
         {
+            matchedDescriptionByFileAndIdentity.emplace(cacheKey, *pd);
             return *pd;
         }
     }
@@ -892,7 +906,12 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
     closeEditorsForTrack(trackId);
     // Publish-before-destroy (F5): same retire discipline as evict — the old live slots must not be
     // destroyed while a callback can still hold the previously published map.
+    const auto phaseMs = [](const double t0) {
+        return (int) (juce::Time::getMillisecondCounterHiRes() - t0 + 0.5);
+    };
+    const double retireT0 = juce::Time::getMillisecondCounterHiRes();
     retireChainPublishDrainAndDestroy(trackId);
+    const int retireMs = phaseMs(retireT0);
 
     std::vector<LiveInsertSlot> built;
     built.reserve(chain.slots.size());
@@ -943,30 +962,50 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
         }
 
         juce::String err;
+        const double describeT0 = juce::Time::getMillisecondCounterHiRes();
         const juce::PluginDescription pd
             = pickDescriptionForSavedIdentity(f, formatManager_, desc.pluginIdentifier, err);
+        const int describeMs = phaseMs(describeT0);
         if (pd.name.isEmpty())
         {
+            appendProjectLoadDiagnosticLine(
+                "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\""
+                + juce::File(desc.vst3AbsolutePath).getFileNameWithoutExtension()
+                + "\" outcome=unavailable describeMs=" + juce::String(describeMs) + " createMs=0 prepareMs=0 setStateMs=0 prepareAfterMs=0");
             keepAsUnavailablePlaceholder(desc, err);
             continue;
         }
 
         const double srU = effectiveSr(sampleRate_);
         const int bsU = effectiveBs(blockSize_);
+        const double createT0 = juce::Time::getMillisecondCounterHiRes();
         std::unique_ptr<juce::AudioPluginInstance> inst(
             formatManager_.createPluginInstance(pd, srU, bsU, err));
+        const int createMs = phaseMs(createT0);
         if (inst == nullptr)
         {
+            appendProjectLoadDiagnosticLine(
+                "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\"" + pd.name
+                + "\" outcome=create-failed describeMs=" + juce::String(describeMs) + " createMs="
+                + juce::String(createMs) + " prepareMs=0 setStateMs=0 prepareAfterMs=0");
             keepAsUnavailablePlaceholder(desc, "createPluginInstance failed: " + err);
             continue;
         }
+        const double prepareT0 = juce::Time::getMillisecondCounterHiRes();
         bool layoutOk = tryPrepareStereoInsert(*inst, srU, bsU);
+        const int prepareMs = phaseMs(prepareT0);
+        int setStateMs = 0;
+        int prepareAfterMs = 0;
         if (desc.opaqueState.getSize() > 0)
         {
+            const double stateT0 = juce::Time::getMillisecondCounterHiRes();
             inst->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+            setStateMs = phaseMs(stateT0);
             if (inst->getMainBusNumInputChannels() != 2 || inst->getMainBusNumOutputChannels() != 2)
             {
+                const double afterT0 = juce::Time::getMillisecondCounterHiRes();
                 inst->prepareToPlay(srU, bsU);
+                prepareAfterMs = phaseMs(afterT0);
             }
             layoutOk = inst->getMainBusNumInputChannels() == 2 && inst->getMainBusNumOutputChannels() == 2;
         }
@@ -975,6 +1014,12 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
             logStereoLayoutFailure(trackId);
         }
         logPluginInstanceLayout("import", *inst);
+        appendProjectLoadDiagnosticLine(
+            "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\"" + inst->getName()
+            + "\" outcome=loaded describeMs=" + juce::String(describeMs) + " createMs=" + juce::String(createMs)
+            + " prepareMs=" + juce::String(prepareMs) + " setStateMs=" + juce::String(setStateMs)
+            + " prepareAfterMs=" + juce::String(prepareAfterMs) + " stateBytes="
+            + juce::String((juce::int64)desc.opaqueState.getSize()));
 
         LiveInsertSlot live;
         live.slotId = desc.slotId != kInvalidInsertSlotId ? desc.slotId : allocateSlotId();
@@ -984,11 +1029,16 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
         built.push_back(std::move(live));
     }
 
+    const int instanceCount = (int) built.size();
     if (!built.empty())
     {
         chains_[trackId] = std::move(built);
     }
+    const double publishT0 = juce::Time::getMillisecondCounterHiRes();
     rebuildAudioThreadMapAndPublish();
+    appendProjectLoadDiagnosticLine(
+        "load: importChain dal trackId=" + juce::String((juce::int64)trackId) + " retireMs=" + juce::String(retireMs)
+        + " publishMs=" + juce::String(phaseMs(publishT0)) + " instances=" + juce::String(instanceCount));
 }
 
 void PluginInsertHost::importChain(const TrackId trackId, const PluginTrackChain& chain)
