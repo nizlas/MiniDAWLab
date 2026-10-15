@@ -320,6 +320,7 @@ private:
     [[nodiscard]] SnapProjectRootFields arrangementSnapPersistenceSnapshotForSave() const;
     void restoreArrangementSnapFromProjectRootFields(const SnapProjectRootFields& fields);
 
+    void prepareProjectCloseUi() noexcept;
     void clearExperimentalInstrumentRuntimesPreserveBridgeOnly() noexcept;
 
     void configureTimelineRulerFormatControls();
@@ -902,8 +903,9 @@ public:
         trackLanesView.setSoloUiHooks(makeSoloUiHooks());
 
         recordingCoordinator_->setRecordStartBlockedPredicate([this]() -> juce::String {
-            return isProjectLoadInProgress() ? juce::String("A project is still opening. Wait until it has finished loading.")
-                                             : juce::String();
+            return isProjectLoadInProgress()
+                       ? juce::String("A project is still opening or closing. Wait until it has finished.")
+                       : juce::String();
         });
         recordingCoordinator_->setLiveMidiTakeCallbacks(
             [this] { return liveMidiInputCoordinator_->armedTracksReadyToRecord(); },
@@ -1941,6 +1943,12 @@ public:
                     projectIoCoordinator_->loadProject();
                 }
             },
+            [this] {
+                if (projectIoCoordinator_ != nullptr)
+                {
+                    projectIoCoordinator_->newProject();
+                }
+            },
             [this] { showAudioMixdownDialog(); },
             [this] { startPreparePortableProjectFlow(); },
             [this] { showAudioSettingsDialog(); },
@@ -2225,6 +2233,29 @@ public:
                         w->activateForUserAttention();
                     }
                 },
+                [this] { prepareProjectCloseUi(); },
+                [this] {
+                    return instrumentRuntimeCoordinator_ != nullptr
+                               ? instrumentRuntimeCoordinator_->countLoadedInstrumentHostsForProjectClose()
+                               : 0;
+                },
+                [this] {
+                    return instrumentRuntimeCoordinator_ != nullptr
+                               ? instrumentRuntimeCoordinator_->nextLoadedInstrumentNameForProjectClose()
+                               : juce::String();
+                },
+                [this](juce::String& nameOut) {
+                    return instrumentRuntimeCoordinator_ != nullptr
+                               ? instrumentRuntimeCoordinator_->unloadNextInstrumentHostForProjectClose(nameOut)
+                               : project_close::InstrumentCloseUnloadStep::NoneLeft;
+                },
+                [this] {
+                    if (instrumentRuntimeCoordinator_ != nullptr)
+                    {
+                        instrumentRuntimeCoordinator_->discardInstrumentControllersAfterProjectClose();
+                    }
+                },
+                [this] { continueStartupFollowUpAfterSessionReady(); },
             });
 
         // Stability C5: app-level states that must block a periodic autosave tick. Everything
@@ -2771,6 +2802,81 @@ public:
         if (projectIoCoordinator_ != nullptr)
         {
             projectIoCoordinator_->loadProjectFromFile(projectFile);
+        }
+    }
+
+    void setStartupLoadFollowUp(const StartupLoadFollowUp& followUp) override
+    {
+        startupFollowUp_ = followUp;
+        startupFollowUp_.thenLoadStarted = false;
+        startupFollowUp_.thenNewStarted = false;
+        startupFollowUp_.playStarted = false;
+        if (projectIoCoordinator_ == nullptr)
+        {
+            return;
+        }
+        projectIoCoordinator_->setOnProjectLoadFinished([this](const bool ok) {
+            if (!ok)
+            {
+                appendProjectLoadDiagnosticLine("measure: load failed");
+                if (startupFollowUp_.quitAfter)
+                {
+                    (void) invokeQuitUnsavedGuardFromWindow();
+                }
+                return;
+            }
+            if (startupFollowUp_.thenLoad.existsAsFile() && !startupFollowUp_.thenLoadStarted)
+            {
+                startupFollowUp_.thenLoadStarted = true;
+                appendProjectLoadDiagnosticLine("measure: then-load " + startupFollowUp_.thenLoad.getFullPathName());
+                projectIoCoordinator_->loadProjectFromFile(startupFollowUp_.thenLoad);
+                return;
+            }
+            if (startupFollowUp_.thenNew && !startupFollowUp_.thenNewStarted)
+            {
+                startupFollowUp_.thenNewStarted = true;
+                appendProjectLoadDiagnosticLine("measure: then-new");
+                projectIoCoordinator_->newProject();
+                return;
+            }
+            continueStartupFollowUpAfterSessionReady();
+        });
+    }
+
+    void continueStartupFollowUpAfterSessionReady()
+    {
+        if (!startupFollowUp_.quitAfter && startupFollowUp_.playMs <= 0)
+        {
+            return;
+        }
+        if (startupFollowUp_.playMs > 0 && !startupFollowUp_.playStarted)
+        {
+            startupFollowUp_.playStarted = true;
+            appendProjectLoadDiagnosticLine("measure: play begin ms=" + juce::String(startupFollowUp_.playMs));
+            transport.requestPlaybackIntent(PlaybackIntent::Playing);
+            const int playMs = startupFollowUp_.playMs;
+            juce::Component::SafePointer<TransportControlsContent> safe(this);
+            juce::Timer::callAfterDelay(playMs, [safe] {
+                if (safe == nullptr)
+                {
+                    return;
+                }
+                auto& self = *safe;
+                const auto playhead = self.transport.readPlayheadSamplesForUi();
+                appendProjectLoadDiagnosticLine("measure: playheadSamples=" + juce::String((juce::int64) playhead)
+                                                + " intent="
+                                                + juce::String(static_cast<int>(self.transport.readPlaybackIntentForUi())));
+                self.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+                if (self.startupFollowUp_.quitAfter)
+                {
+                    (void) self.invokeQuitUnsavedGuardFromWindow();
+                }
+            });
+            return;
+        }
+        if (startupFollowUp_.quitAfter)
+        {
+            (void) invokeQuitUnsavedGuardFromWindow();
         }
     }
 
@@ -8350,6 +8456,7 @@ private:
     /// order destruction). See `~TrackLanesView`.
     std::unique_ptr<InstrumentTimelineRowCoordinator> instrumentTimelineRowCoordinator_;
     std::unique_ptr<ProjectIoCoordinator> projectIoCoordinator_;
+    StartupLoadFollowUp startupFollowUp_;
     /// SPIKE-01 (P0/P1A validation spike; removable): hidden `--spike01-state-capture` panel.
     /// Declared after `instrumentRuntimeCoordinator_` so it is destroyed first (its detach
     /// logic resolves hosts through the coordinator).
@@ -9129,7 +9236,7 @@ void mini_daw_app_transport::TransportControlsContent::invokePasteClipFromWindow
     }
 }
 
-void mini_daw_app_transport::TransportControlsContent::clearExperimentalInstrumentRuntimesPreserveBridgeOnly() noexcept
+void mini_daw_app_transport::TransportControlsContent::prepareProjectCloseUi() noexcept
 {
     transport.requestPlaybackIntent(PlaybackIntent::Stopped);
     if (transportPlayPauseStopController_ != nullptr)
@@ -9142,12 +9249,23 @@ void mini_daw_app_transport::TransportControlsContent::clearExperimentalInstrume
     }
     trackLanesView.syncInstrumentTimelineAttachments({});
     instrumentTimelineRowCoordinator_->clearInstrumentTimelineLanesAndHeaders();
-    if (instrumentRuntimeCoordinator_ != nullptr)
+}
+
+void mini_daw_app_transport::TransportControlsContent::clearExperimentalInstrumentRuntimesPreserveBridgeOnly() noexcept
+{
+    prepareProjectCloseUi();
+    if (instrumentRuntimeCoordinator_ == nullptr)
     {
-        instrumentRuntimeCoordinator_->releaseExperimentalInstrumentHostsDeviceResources();
-        juce::Thread::sleep(120);
-        instrumentRuntimeCoordinator_->clearRuntimesPreserveBridgeOnly();
+        return;
     }
+    if (instrumentRuntimeCoordinator_->countLoadedInstrumentHostsForProjectClose() == 0)
+    {
+        instrumentRuntimeCoordinator_->discardInstrumentControllersAfterProjectClose();
+        return;
+    }
+    instrumentRuntimeCoordinator_->releaseExperimentalInstrumentHostsDeviceResources();
+    juce::Thread::sleep(120);
+    instrumentRuntimeCoordinator_->clearRuntimesPreserveBridgeOnly();
 }
 
 CreatedTransportUiForMainWindow createTransportUiForMainWindow(

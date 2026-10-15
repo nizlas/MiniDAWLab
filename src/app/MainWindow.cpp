@@ -122,6 +122,14 @@ void MainWindow::openProjectFileFromCommandLine(const juce::File& projectFile)
     }
 }
 
+void MainWindow::setStartupLoadFollowUp(const StartupLoadFollowUp& followUp)
+{
+    if (shortcutTargetFromContent_ != nullptr)
+    {
+        shortcutTargetFromContent_->setStartupLoadFollowUp(followUp);
+    }
+}
+
 void MainWindow::startStabilityScenario(const StabilityScenarioRequest& request)
 {
     if (shortcutTargetFromContent_ != nullptr)

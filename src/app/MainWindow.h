@@ -14,6 +14,7 @@ class PlaybackEngine;
 
 class TransportControlsShortcutTarget;
 struct StabilityScenarioRequest;
+struct StartupLoadFollowUp;
 
 namespace proxy_render
 {
@@ -42,6 +43,9 @@ public:
 
     /// [Message thread] Load a ".dalproj" passed on the command line through the normal load pipeline.
     void openProjectFileFromCommandLine(const juce::File& projectFile);
+
+    /// Diagnostic command-line follow-up. No effect when every field is empty.
+    void setStartupLoadFollowUp(const StartupLoadFollowUp& followUp);
 
     /// [Message thread] One normal activation: restore if minimized, come forward, take keyboard
     /// focus. Does not set always-on-top. Logs when the OS refuses the foreground change.

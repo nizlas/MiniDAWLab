@@ -170,6 +170,18 @@ public:
     /// Clears every instance and closes editors (used before loading a new project).
     void removeAllPlugins() noexcept;
 
+    /// [Message thread] Project close, step 1: close editors, move every live instance into a
+    /// pending list, publish an empty realtime map. Does not drain and does not releaseResources.
+    /// Returns how many instances were parked. A second call while instances are pending parks nothing.
+    int detachAllInstancesForProjectClose() noexcept;
+
+    /// [Message thread] Display name of the next parked instance (empty when none remain).
+    [[nodiscard]] juce::String nextDetachedInsertNameForProjectClose() const;
+
+    /// [Message thread] releaseResources and destroy exactly one parked instance.
+    /// False when none remain. The caller must already have drained the callback and read-ahead.
+    bool releaseNextDetachedInsertForProjectClose() noexcept;
+
     /// Remove instances without undo (e.g. track deleted from session).
     void evictPluginForTrackNoUndo(TrackId trackId) noexcept;
 
@@ -429,6 +441,9 @@ private:
     juce::AudioPluginFormatManager formatManager_;
     std::unordered_map<TrackId, std::vector<LiveInsertSlot>> chains_;
     std::function<void()> realtimeDrainAfterPublish_;
+    /// Parked by `detachAllInstancesForProjectClose` until released one at a time.
+    std::vector<std::unique_ptr<juce::AudioPluginInstance>> projectClosePending_;
+    std::vector<juce::String> projectClosePendingNames_;
     InsertSlotId nextInsertSlotId_ = 1;
 
     double sampleRate_ = 0.0;

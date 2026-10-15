@@ -168,6 +168,15 @@ PluginInsertHost::PluginInsertHost()
 PluginInsertHost::~PluginInsertHost()
 {
     releaseResources();
+    for (auto& inst : projectClosePending_)
+    {
+        if (inst != nullptr)
+        {
+            inst->releaseResources();
+        }
+    }
+    projectClosePending_.clear();
+    projectClosePendingNames_.clear();
     editorWindows_.clear();
     paramsWindows_.clear();
     chains_.clear();
@@ -1050,6 +1059,83 @@ void PluginInsertHost::retireChainPublishDrainAndDestroy(const TrackId trackId)
         }
     }
     retired.clear();
+}
+
+int PluginInsertHost::detachAllInstancesForProjectClose() noexcept
+{
+    if (!projectClosePending_.empty())
+    {
+        return (int) projectClosePending_.size();
+    }
+
+    for (const auto& kv : editorWindows_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->setVisible(false);
+        }
+    }
+    editorWindows_.clear();
+    for (const auto& kv : paramsWindows_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->setVisible(false);
+        }
+    }
+    paramsWindows_.clear();
+    editorOpenState_.clear();
+    lastHostAppliedState_.clear();
+
+    for (auto& kv : chains_)
+    {
+        for (auto& live : kv.second)
+        {
+            if (live.instance == nullptr)
+            {
+                continue;
+            }
+            juce::String name = live.instance->getName();
+            if (name.isEmpty())
+            {
+                name = "Effect";
+            }
+            projectClosePendingNames_.push_back(std::move(name));
+            projectClosePending_.push_back(std::move(live.instance));
+        }
+    }
+    chains_.clear();
+    nextInsertSlotId_ = 1;
+    // Publish-before-destroy: the empty map is what later callbacks and read-ahead segments acquire.
+    // Release happens one instance per message-loop turn, after the drain has actually completed.
+    rebuildAudioThreadMapAndPublish();
+    return (int) projectClosePending_.size();
+}
+
+juce::String PluginInsertHost::nextDetachedInsertNameForProjectClose() const
+{
+    return projectClosePendingNames_.empty() ? juce::String() : projectClosePendingNames_.front();
+}
+
+bool PluginInsertHost::releaseNextDetachedInsertForProjectClose() noexcept
+{
+    if (projectClosePending_.empty())
+    {
+        projectClosePendingNames_.clear();
+        return false;
+    }
+    std::unique_ptr<juce::AudioPluginInstance> inst = std::move(projectClosePending_.front());
+    projectClosePending_.erase(projectClosePending_.begin());
+    if (!projectClosePendingNames_.empty())
+    {
+        projectClosePendingNames_.erase(projectClosePendingNames_.begin());
+    }
+    if (inst != nullptr)
+    {
+        inst->releaseResources();
+    }
+    inst.reset();
+    return true;
 }
 
 void PluginInsertHost::removeAllPlugins() noexcept

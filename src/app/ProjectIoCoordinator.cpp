@@ -522,9 +522,9 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             onDone(saved);
         }
     };
-    if (loadJob_ != nullptr)
+    if (isLoadInProgress())
     {
-        appendProjectSaveDiagnosticLine("save refused: project load in progress");
+        appendProjectSaveDiagnosticLine("save refused: project load or close in progress");
         reportDone(false);
         return;
     }
@@ -791,9 +791,9 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
 
 void ProjectIoCoordinator::loadProject()
 {
-    if (loadJob_ != nullptr)
+    if (isLoadInProgress())
     {
-        appendProjectLoadDiagnosticLine("load: chooser refused (a load is already in progress)");
+        appendProjectLoadDiagnosticLine("load: chooser refused (a load or close is already in progress)");
         return;
     }
     confirmUnsavedChangesThen(UnsavedGuardKind::LoadProject,
@@ -842,8 +842,8 @@ void ProjectIoCoordinator::launchLoadProjectChooser()
 class ProjectIoCoordinator::LoadProgressWindow final : public juce::DialogWindow
 {
 public:
-    LoadProgressWindow()
-        : juce::DialogWindow("Opening project", juce::Colour(0xff2b2d31), /*escapeKeyTriggersCloseButton*/ false,
+    explicit LoadProgressWindow(const juce::String& title)
+        : juce::DialogWindow(title, juce::Colour(0xff2b2d31), /*escapeKeyTriggersCloseButton*/ false,
                              /*addToDesktop*/ true)
     {
         auto content = std::make_unique<Content>(progressValue_);
@@ -918,7 +918,7 @@ struct ProjectIoCoordinator::LoadJob
     enum class Unit
     {
         ParseAndDecode,       ///< background thread (Interactive) or inline (Synchronous)
-        ClosePrevious,        ///< stop, gate, retire the previous project's instrument runtimes
+        ClosePrevious,        ///< staged teardown: drain, then one plugin per turn
         ApplyModel,           ///< session model replace + inventory
         RestoreInstrument,    ///< one `experimentalInstrumentTracks` row per unit
         OrphansAndUi,         ///< orphan lanes, MIDI content controllers, editor sync, UI refresh
@@ -968,12 +968,54 @@ struct ProjectIoCoordinator::LoadJob
     }
 };
 
+struct ProjectIoCoordinator::ProjectCloseRun
+{
+    enum class Afterwards
+    {
+        ResumeLoad,
+        EmptySession,
+        Quit,
+    };
+    enum class Phase
+    {
+        Stop,
+        WaitSection,
+        DetachInserts,
+        WaitCallback,
+        PauseReadAhead,
+        Instruments,
+        Inserts,
+        Discard,
+        Finalize,
+        Done,
+    };
+
+    Afterwards afterwards = Afterwards::ResumeLoad;
+    Phase phase = Phase::Stop;
+    bool announced = false;
+    bool sectionIdle = false;
+    bool callbackExited = false;
+    bool readAheadAcked = false;
+    int instrumentsTotal = -1;
+    int instrumentsDone = 0;
+    int insertsTotal = -1;
+    int insertsDone = 0;
+    int sectionPolls = 0;
+    int callbackPolls = 0;
+    double startMs = 0.0;
+    double longestBlockMs = 0.0;
+    juce::String longestBlockLabel;
+    std::unique_ptr<ScopedInstrumentProcessingLoadGate> gate;
+};
+
 ProjectIoCoordinator::~ProjectIoCoordinator()
 {
     stopTimer();
     // A load still in flight at shutdown: the gate is released by the job's destructor order
     // (gate before worker join); async units check the lifetime guard and never run after this.
     loadJob_.reset();
+    projectCloseRun_.reset();
+    projectCloseActive_ = false;
     loadProgressWindow_.reset();
 }
 
@@ -998,9 +1040,9 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
 
 void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile, const LoadDrive drive)
 {
-    if (loadJob_ != nullptr)
+    if (isLoadInProgress())
     {
-        appendProjectLoadDiagnosticLine("load: refused (a load is already in progress) file=\""
+        appendProjectLoadDiagnosticLine("load: refused (a load or close is already in progress) file=\""
                                         + projectFile.getFullPathName() + "\"");
         return;
     }
@@ -1033,7 +1075,7 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile, co
 void ProjectIoCoordinator::loadProjectFromFileThen(const juce::File& projectFile,
                                                    std::function<void(bool ok)> completion)
 {
-    if (loadJob_ != nullptr || !projectFile.existsAsFile() || deviceManager_.getCurrentAudioDevice() == nullptr)
+    if (isLoadInProgress() || !projectFile.existsAsFile() || deviceManager_.getCurrentAudioDevice() == nullptr)
     {
         loadProjectFromFile(projectFile); // reports the refusal / alert exactly like the plain entry
         if (completion)
@@ -1081,7 +1123,7 @@ void ProjectIoCoordinator::loadJob_start(const juce::File& projectFile, const Lo
 
     if (drive == LoadDrive::Interactive)
     {
-        loadProgressWindow_ = std::make_unique<LoadProgressWindow>();
+        loadProgressWindow_ = std::make_unique<LoadProgressWindow>("Opening project");
         juce::Component* anchor = callbacks_.getProgressWindowAnchor ? callbacks_.getProgressWindowAnchor() : nullptr;
         if (anchor != nullptr)
         {
@@ -1189,6 +1231,9 @@ void ProjectIoCoordinator::loadJob_start(const juce::File& projectFile, const Lo
             {
                 return;
             }
+            appendProjectLoadDiagnosticLine("load: decode done elapsedMs="
+                                            + juce::String((int) (juce::Time::getMillisecondCounterHiRes() - loadJob_->startMs + 0.5))
+                                            + " audioFiles=" + juce::String(loadJob_->audioFilesTotal));
             loadJob_->unit = LoadJob::Unit::ClosePrevious;
             loadJob_runNextUnit();
         });
@@ -1213,6 +1258,512 @@ void ProjectIoCoordinator::loadJob_scheduleNextUnit()
         }
         loadJob_runNextUnit();
     });
+}
+
+bool ProjectIoCoordinator::projectClose_isInteractive() const noexcept
+{
+    if (isStabilityTestModeActive())
+    {
+        return false;
+    }
+    return loadJob_ == nullptr || loadJob_->drive != LoadDrive::Synchronous;
+}
+
+void ProjectIoCoordinator::projectClose_setProgress(const juce::String& phase, const juce::String& detail,
+                                                   const double fraction)
+{
+    if (loadJob_ != nullptr)
+    {
+        loadJob_->lastPhase = phase;
+        loadJob_->lastDetail = detail;
+        loadJob_->lastFraction = fraction;
+    }
+    if (loadProgressWindow_ != nullptr)
+    {
+        loadProgressWindow_->setProgress(phase, detail, fraction);
+    }
+}
+
+void ProjectIoCoordinator::projectClose_noteBlock(const juce::String& label, const double elapsedMs)
+{
+    if (projectCloseRun_ == nullptr)
+    {
+        return;
+    }
+    appendProjectLoadDiagnosticLine("close: block \"" + label + "\" ms=" + juce::String((int) (elapsedMs + 0.5)));
+    if (elapsedMs > projectCloseRun_->longestBlockMs)
+    {
+        projectCloseRun_->longestBlockMs = elapsedMs;
+        projectCloseRun_->longestBlockLabel = label;
+    }
+}
+
+void ProjectIoCoordinator::projectClose_showWindow(const juce::String& title)
+{
+    if (loadProgressWindow_ != nullptr)
+    {
+        return;
+    }
+    loadProgressWindow_ = std::make_unique<LoadProgressWindow>(title);
+    juce::Component* anchor = callbacks_.getProgressWindowAnchor ? callbacks_.getProgressWindowAnchor() : nullptr;
+    if (anchor != nullptr)
+    {
+        loadProgressWindow_->centreAroundComponent(anchor, loadProgressWindow_->getWidth(),
+                                                   loadProgressWindow_->getHeight());
+    }
+    else
+    {
+        loadProgressWindow_->centreWithSize(loadProgressWindow_->getWidth(), loadProgressWindow_->getHeight());
+    }
+    loadProgressWindow_->setVisible(true);
+    loadProgressWindow_->enterModalState(true, nullptr, false);
+    loadProgressWindow_->toFront(true);
+}
+
+void ProjectIoCoordinator::projectClose_schedule()
+{
+    if (!projectClose_isInteractive())
+    {
+        return;
+    }
+    if (loadJob_ != nullptr)
+    {
+        loadJob_scheduleNextUnit();
+        return;
+    }
+    ProjectCloseRun* const run = projectCloseRun_.get();
+    juce::Timer::callAfterDelay(4, [this, run, guard = asyncLifetime_.guard()] {
+        if (!guard.isAlive() || projectCloseRun_.get() != run)
+        {
+            return;
+        }
+        (void) projectClose_runStep();
+    });
+}
+
+bool ProjectIoCoordinator::projectClose_announce(const juce::String& phase, const juce::String& detail,
+                                                const double fraction)
+{
+    projectClose_setProgress(phase, detail, fraction);
+    if (!projectClose_isInteractive() || projectCloseRun_ == nullptr)
+    {
+        return true;
+    }
+    if (projectCloseRun_->announced)
+    {
+        projectCloseRun_->announced = false;
+        return true;
+    }
+    projectCloseRun_->announced = true;
+    projectClose_schedule();
+    return false;
+}
+
+void ProjectIoCoordinator::projectClose_startStandalone(const int afterwards)
+{
+    if (isLoadInProgress())
+    {
+        appendProjectLoadDiagnosticLine("close: refused (a load or close is already in progress)");
+        return;
+    }
+    auto run = std::make_unique<ProjectCloseRun>();
+    run->afterwards = static_cast<ProjectCloseRun::Afterwards>(afterwards);
+    run->startMs = juce::Time::getMillisecondCounterHiRes();
+    projectCloseRun_ = std::move(run);
+    projectCloseActive_ = true;
+    const bool quitting = projectCloseRun_->afterwards == ProjectCloseRun::Afterwards::Quit;
+    projectClose_showWindow(quitting ? "Quitting" : "Closing project");
+    projectClose_setProgress(withEllipsisUtf8("Stopping playback"), juce::String(), -1.0);
+    appendProjectLoadDiagnosticLine(juce::String("close: staged close begin after=")
+                                    + (quitting ? "quit" : "empty-session"));
+    if (!projectClose_isInteractive())
+    {
+        while (projectCloseRun_ != nullptr && projectCloseRun_->phase != ProjectCloseRun::Phase::Done)
+        {
+            if (projectClose_runStep())
+            {
+                break;
+            }
+        }
+        return;
+    }
+    projectClose_schedule();
+}
+
+void ProjectIoCoordinator::projectClose_finishStandalone()
+{
+    if (projectCloseRun_ == nullptr)
+    {
+        return;
+    }
+    const ProjectCloseRun::Afterwards afterwards = projectCloseRun_->afterwards;
+    appendProjectLoadDiagnosticLine(
+        "close: done elapsedMs="
+        + juce::String((int) (juce::Time::getMillisecondCounterHiRes() - projectCloseRun_->startMs + 0.5))
+        + " maxMessageThreadBlockMs=" + juce::String((int) (projectCloseRun_->longestBlockMs + 0.5))
+        + " longest=\"" + projectCloseRun_->longestBlockLabel + "\""
+        + " sectionPolls=" + juce::String(projectCloseRun_->sectionPolls)
+        + " callbackPolls=" + juce::String(projectCloseRun_->callbackPolls));
+
+    if (afterwards == ProjectCloseRun::Afterwards::EmptySession)
+    {
+        session_.replaceWithFreshStartupSession(transport_);
+        playbackEngine_.rebuildRoutingPlanFromSession();
+        if (callbacks_.restoreSnapProjectRootFieldsToUi != nullptr)
+        {
+            callbacks_.restoreSnapProjectRootFieldsToUi({});
+        }
+        if (callbacks_.clearSessionHistory != nullptr)
+        {
+            callbacks_.clearSessionHistory();
+        }
+        if (callbacks_.refreshAllUiAfterLoadedProject != nullptr)
+        {
+            callbacks_.refreshAllUiAfterLoadedProject();
+        }
+        const ProjectFileV1 emptyProject;
+        if (callbacks_.applyTrackRowHeightsFromLoadedProject != nullptr)
+        {
+            callbacks_.applyTrackRowHeightsFromLoadedProject(emptyProject);
+        }
+        if (callbacks_.restoreMixerWindowFromLoadedProject != nullptr)
+        {
+            callbacks_.restoreMixerWindowFromLoadedProject(emptyProject);
+        }
+        if (callbacks_.restoreMidiEditorWorkspaceFromLoadedProject != nullptr)
+        {
+            callbacks_.restoreMidiEditorWorkspaceFromLoadedProject(emptyProject);
+        }
+        markProjectCleanNow();
+        refreshKnownProjectDiskIdentity();
+        writeLastOperationBreadcrumb("project close end: empty session");
+    }
+
+    if (loadProgressWindow_ != nullptr)
+    {
+        loadProgressWindow_->exitModalState(0);
+        loadProgressWindow_->setVisible(false);
+        loadProgressWindow_.reset();
+    }
+    projectCloseActive_ = false;
+    projectCloseRun_.reset();
+
+    if (afterwards == ProjectCloseRun::Afterwards::EmptySession)
+    {
+        if (callbacks_.onStandaloneProjectCloseFinished != nullptr)
+        {
+            callbacks_.onStandaloneProjectCloseFinished();
+        }
+        return;
+    }
+
+    writeLastOperationBreadcrumb("project close end: quit");
+    if (auto* app = juce::JUCEApplication::getInstance())
+    {
+        app->quit();
+    }
+}
+
+bool ProjectIoCoordinator::projectClose_runStep()
+{
+    if (projectCloseRun_ == nullptr)
+    {
+        return true;
+    }
+    ProjectCloseRun& run = *projectCloseRun_;
+    const bool interactive = projectClose_isInteractive();
+    const auto reschedulePoll = [&] {
+        if (interactive)
+        {
+            run.announced = true;
+            projectClose_schedule();
+        }
+        else
+        {
+            juce::Thread::sleep(1);
+        }
+    };
+
+    switch (run.phase)
+    {
+        case ProjectCloseRun::Phase::Stop:
+        {
+            if (!projectClose_announce(withEllipsisUtf8("Stopping playback"), juce::String(), -1.0))
+            {
+                return false;
+            }
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
+            playbackEngine_.clearAllInputMonitoring();
+            if (callbacks_.onProjectAboutToBeReplaced != nullptr)
+            {
+                callbacks_.onProjectAboutToBeReplaced();
+            }
+            if (callbacks_.prepareProjectCloseUi != nullptr)
+            {
+                callbacks_.prepareProjectCloseUi();
+            }
+            if (loadJob_ != nullptr)
+            {
+                loadJob_->gate = std::make_unique<ScopedInstrumentProcessingLoadGate>(playbackEngine_, session_);
+                loadJob_->generation = loadJob_->gate->loadGeneration();
+            }
+            else
+            {
+                run.gate = std::make_unique<ScopedInstrumentProcessingLoadGate>(playbackEngine_, session_);
+            }
+            playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);
+            projectClose_noteBlock("stop and unpublish", juce::Time::getMillisecondCounterHiRes() - t0);
+            run.phase = ProjectCloseRun::Phase::WaitSection;
+            if (interactive)
+            {
+                projectClose_schedule();
+            }
+            return false;
+        }
+
+        case ProjectCloseRun::Phase::WaitSection:
+        {
+            if (!projectClose_announce(withEllipsisUtf8("Waiting for audio processing"), "Audio thread", -1.0))
+            {
+                return false;
+            }
+            if (playbackEngine_.isAudioInsideInstrumentSection())
+            {
+                ++run.sectionPolls;
+                reschedulePoll();
+                return false;
+            }
+            run.sectionIdle = true;
+            appendProjectLoadDiagnosticLine("close: instrument section idle polls=" + juce::String(run.sectionPolls));
+            run.phase = ProjectCloseRun::Phase::DetachInserts;
+            if (interactive)
+            {
+                projectClose_schedule();
+            }
+            return false;
+        }
+
+        case ProjectCloseRun::Phase::DetachInserts:
+        {
+            if (!projectClose_announce(withEllipsisUtf8("Detaching effects"), juce::String(), -1.0))
+            {
+                return false;
+            }
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            run.insertsTotal = pluginHost_.detachAllInstancesForProjectClose();
+            run.insertsDone = 0;
+            projectClose_noteBlock("detach effects", juce::Time::getMillisecondCounterHiRes() - t0);
+            appendProjectLoadDiagnosticLine("close: effects detached count=" + juce::String(run.insertsTotal));
+            run.phase = ProjectCloseRun::Phase::WaitCallback;
+            if (interactive)
+            {
+                projectClose_schedule();
+            }
+            return false;
+        }
+
+        case ProjectCloseRun::Phase::WaitCallback:
+        {
+            if (!projectClose_announce(withEllipsisUtf8("Waiting for audio processing"), "Audio callback", -1.0))
+            {
+                return false;
+            }
+            double waitedMs = 0.0;
+            if (!playbackEngine_.waitForAudioCallbackExit(interactive ? 0.0 : 5.0, &waitedMs))
+            {
+                ++run.callbackPolls;
+                reschedulePoll();
+                return false;
+            }
+            run.callbackExited = true;
+            appendProjectLoadDiagnosticLine("close: audio callback exited polls=" + juce::String(run.callbackPolls));
+            run.phase = ProjectCloseRun::Phase::PauseReadAhead;
+            if (interactive)
+            {
+                projectClose_schedule();
+            }
+            return false;
+        }
+
+        case ProjectCloseRun::Phase::PauseReadAhead:
+        {
+            if (!projectClose_announce(withEllipsisUtf8("Waiting for audio processing"), "Read-ahead", -1.0))
+            {
+                return false;
+            }
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            // Acknowledged pause only. A worker stuck inside a plugin render stalls here with the
+            // instances retained; this call does not return on a timeout.
+            playbackEngine_.pauseReadAheadWorkerAfterChainPublish();
+            const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+            projectClose_noteBlock("read-ahead pause", ms);
+            run.readAheadAcked = true;
+            appendProjectLoadDiagnosticLine("close: read-ahead pause acknowledged ms=" + juce::String((int) (ms + 0.5)));
+            run.phase = ProjectCloseRun::Phase::Instruments;
+            if (interactive)
+            {
+                projectClose_schedule();
+            }
+            return false;
+        }
+
+        case ProjectCloseRun::Phase::Instruments:
+        case ProjectCloseRun::Phase::Inserts:
+        {
+            if (!project_close::mayReleaseInstances(run.sectionIdle, run.callbackExited, run.readAheadAcked))
+            {
+                appendProjectLoadDiagnosticLine("close: release refused (drain not acknowledged)");
+                run.phase = ProjectCloseRun::Phase::WaitSection;
+                if (interactive)
+                {
+                    projectClose_schedule();
+                }
+                return false;
+            }
+            if (run.phase == ProjectCloseRun::Phase::Instruments)
+            {
+                if (run.instrumentsTotal < 0)
+                {
+                    run.instrumentsTotal = callbacks_.countLoadedInstrumentHostsForClose
+                                               ? callbacks_.countLoadedInstrumentHostsForClose()
+                                               : 0;
+                }
+                if (run.instrumentsTotal <= 0
+                    || (callbacks_.countLoadedInstrumentHostsForClose
+                        && callbacks_.countLoadedInstrumentHostsForClose() == 0))
+                {
+                    run.phase = ProjectCloseRun::Phase::Inserts;
+                    if (interactive)
+                    {
+                        projectClose_schedule();
+                    }
+                    return false;
+                }
+                const int total = juce::jmax(1, run.instrumentsTotal);
+                const juce::String peeked = callbacks_.nextLoadedInstrumentNameForClose
+                                                ? callbacks_.nextLoadedInstrumentNameForClose()
+                                                : juce::String("Instrument");
+                if (!projectClose_announce(withEllipsisUtf8("Closing instruments"),
+                                           juce::String(run.instrumentsDone + 1) + " of " + juce::String(total) + ": "
+                                               + peeked,
+                                           (double) run.instrumentsDone / (double) total))
+                {
+                    return false;
+                }
+                juce::String name;
+                const double t0 = juce::Time::getMillisecondCounterHiRes();
+                const auto step = callbacks_.unloadNextInstrumentHostForClose
+                                      ? callbacks_.unloadNextInstrumentHostForClose(name)
+                                      : project_close::InstrumentCloseUnloadStep::NoneLeft;
+                const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+                if (step == project_close::InstrumentCloseUnloadStep::StillHeld)
+                {
+                    projectClose_noteBlock("instrument still held: " + name, ms);
+                    projectClose_setProgress(withEllipsisUtf8("Waiting for audio processing"), name, -1.0);
+                    reschedulePoll();
+                    return false;
+                }
+                if (step == project_close::InstrumentCloseUnloadStep::Unloaded)
+                {
+                    projectClose_noteBlock("instrument " + name, ms);
+                    ++run.instrumentsDone;
+                    if (interactive)
+                    {
+                        projectClose_schedule();
+                    }
+                    return false;
+                }
+                run.phase = ProjectCloseRun::Phase::Inserts;
+                if (interactive)
+                {
+                    projectClose_schedule();
+                }
+                return false;
+            }
+
+            if (run.insertsTotal < 0)
+            {
+                run.insertsTotal = 0;
+            }
+            if (run.insertsDone >= run.insertsTotal || pluginHost_.nextDetachedInsertNameForProjectClose().isEmpty())
+            {
+                run.phase = ProjectCloseRun::Phase::Discard;
+                if (interactive)
+                {
+                    projectClose_schedule();
+                }
+                return false;
+            }
+            const int total = juce::jmax(1, run.insertsTotal);
+            const juce::String peeked = pluginHost_.nextDetachedInsertNameForProjectClose();
+            if (!projectClose_announce(withEllipsisUtf8("Closing effects"),
+                                       juce::String(run.insertsDone + 1) + " of " + juce::String(total) + ": " + peeked,
+                                       (double) run.insertsDone / (double) total))
+            {
+                return false;
+            }
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            const bool released = pluginHost_.releaseNextDetachedInsertForProjectClose();
+            const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+            if (released)
+            {
+                projectClose_noteBlock("effect " + peeked, ms);
+                ++run.insertsDone;
+            }
+            if (interactive)
+            {
+                projectClose_schedule();
+            }
+            return false;
+        }
+
+        case ProjectCloseRun::Phase::Discard:
+        {
+            if (!projectClose_announce(withEllipsisUtf8("Releasing project resources"), juce::String(), -1.0))
+            {
+                return false;
+            }
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            if (callbacks_.discardInstrumentControllersAfterClose != nullptr)
+            {
+                callbacks_.discardInstrumentControllersAfterClose();
+            }
+            projectClose_noteBlock("discard instrument hosts", juce::Time::getMillisecondCounterHiRes() - t0);
+            run.phase = ProjectCloseRun::Phase::Finalize;
+            if (interactive)
+            {
+                projectClose_schedule();
+            }
+            return false;
+        }
+
+        case ProjectCloseRun::Phase::Finalize:
+        {
+            if (!projectClose_announce(withEllipsisUtf8("Finalizing"), juce::String(), -1.0))
+            {
+                return false;
+            }
+            if (run.afterwards == ProjectCloseRun::Afterwards::ResumeLoad)
+            {
+                appendProjectLoadDiagnosticLine(
+                    "close: done elapsedMs="
+                    + juce::String((int) (juce::Time::getMillisecondCounterHiRes() - run.startMs + 0.5))
+                    + " maxMessageThreadBlockMs=" + juce::String((int) (run.longestBlockMs + 0.5))
+                    + " longest=\"" + run.longestBlockLabel + "\""
+                    + " sectionPolls=" + juce::String(run.sectionPolls)
+                    + " callbackPolls=" + juce::String(run.callbackPolls));
+                run.phase = ProjectCloseRun::Phase::Done;
+                return true;
+            }
+            projectClose_finishStandalone();
+            return true;
+        }
+
+        case ProjectCloseRun::Phase::Done:
+            return true;
+    }
+    return true;
 }
 
 void ProjectIoCoordinator::loadJob_runNextUnit()
@@ -1258,43 +1809,25 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
                 loadJob_finish(false, j.parseResult.getErrorMessage());
                 return;
             }
-            // Retiring a large previous project (64 instrument hosts, 18 AmpliTube inserts) is
-            // seconds of synchronous plug-in teardown; it gets its own announced phase so the
-            // window says what is happening instead of "Preparing project".
-            if (!announce(withEllipsisUtf8("Closing previous project"), juce::String(), -1.0))
+            if (projectCloseRun_ == nullptr)
+            {
+                appendProjectLoadDiagnosticLine("load: parsed file=\"" + f.getFullPathName() + "\" experimentalInstrumentTracks="
+                                                + juce::String((int)j.parsed.experimentalInstrumentTracks.size())
+                                                + " predecodedAudioFiles=" + juce::String((int)j.material.size()) + "/"
+                                                + juce::String(j.audioFilesTotal));
+                auto run = std::make_unique<ProjectCloseRun>();
+                run->afterwards = ProjectCloseRun::Afterwards::ResumeLoad;
+                run->startMs = juce::Time::getMillisecondCounterHiRes();
+                projectCloseRun_ = std::move(run);
+            }
+            if (!projectClose_runStep())
             {
                 return;
             }
-            appendProjectLoadDiagnosticLine("load: parsed file=\"" + f.getFullPathName() + "\" experimentalInstrumentTracks="
-                                            + juce::String((int)j.parsed.experimentalInstrumentTracks.size())
-                                            + " predecodedAudioFiles=" + juce::String((int)j.material.size()) + "/"
-                                            + juce::String(j.audioFilesTotal));
-            transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
-            appendProjectLoadDiagnosticLine("load: transport stopped");
-
-            // Monitor is a runtime-only control and defaults OFF on project opening/restoration -
-            // never carry live input monitoring across a project replacement.
-            playbackEngine_.clearAllInputMonitoring();
-
-            // P1H project replacement (--13.3): obsolete/cancel every proxy job of the OLD project
-            // and drop the runtime-only policy timers BEFORE the runtimes they reference are
-            // cleared. Queued work is re-derivable from fingerprints on reopen; nothing waits.
-            if (callbacks_.onProjectAboutToBeReplaced != nullptr)
-            {
-                callbacks_.onProjectAboutToBeReplaced();
-            }
-
-            // The gate (instrument processing suspended + idle ack) is held for the WHOLE staged
-            // load: plug-in instantiation / state restore never overlaps the realtime instrument
-            // section or its render workers (jobs run inside the callback, which skips the section).
-            j.gate = std::make_unique<ScopedInstrumentProcessingLoadGate>(playbackEngine_, session_);
-            j.generation = j.gate->loadGeneration();
-
-            appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes begin");
-            callbacks_.clearExperimentalInstrumentRuntimesPreserveBridgeOnly();
-            appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes end");
+            projectCloseRun_.reset();
+            j.announced = false;
             j.unit = LoadJob::Unit::ApplyModel;
-            loadJob_scheduleNextUnit(); // Synchronous drive: no-op, the start loop runs it
+            loadJob_scheduleNextUnit();
             return;
         }
 
@@ -1306,9 +1839,12 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
             }
             appendProjectLoadDiagnosticLine("load: before applyLoadedProjectModel (session model replace)");
             appendProjectLoadDiagnosticLine("load: applyLoadedProjectModel begin");
+            const double applyT0 = juce::Time::getMillisecondCounterHiRes();
             const juce::Result r = session_.applyLoadedProjectModel(
                 transport_, f, j.parsed, sampleRate, j.skipped, j.infoNote, &pluginHost_, j.generation,
-                &j.material, &j.insertRows);
+                &j.material, &j.insertRows, true);
+            appendProjectLoadDiagnosticLine("load: applyLoadedProjectModel ms="
+                                            + juce::String((int) (juce::Time::getMillisecondCounterHiRes() - applyT0 + 0.5)));
             if (!r.wasOk())
             {
                 writeLastOperationBreadcrumb("project load failed (apply model)");
@@ -1469,9 +2005,11 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
             if (isGeneric)
             {
                 appendProjectLoadDiagnosticLine("load: before GenericVst3 restore trackId=" + juce::String((juce::int64)bindTid));
+                const double genericT0 = juce::Time::getMillisecondCounterHiRes();
                 restoreGenericVst3InstrumentTrack(session_, callbacks_, bindTid, sampleRate, &etRow, &j.parsed.tracks,
                                                   j.instrumentAutoloadNoteAcc);
-                appendProjectLoadDiagnosticLine("load: after GenericVst3 restore trackId=" + juce::String((juce::int64)bindTid));
+                appendProjectLoadDiagnosticLine("load: after GenericVst3 restore trackId=" + juce::String((juce::int64)bindTid)
+                                                + " ms=" + juce::String((int) (juce::Time::getMillisecondCounterHiRes() - genericT0 + 0.5)));
                 loadJob_scheduleNextUnit();
                 return;
             }
@@ -1490,6 +2028,7 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
             ctl->setTimelineSampleRate(sampleRate);
             ctl->restoreExperimentalInstrumentSingleProjectRow(etRow, &j.parsed.tracks);
             juce::String noteOne;
+            const double instT0 = juce::Time::getMillisecondCounterHiRes();
             if (isGroove)
             {
                 ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
@@ -1498,6 +2037,9 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
             {
                 ctl->runPendingHalionSonicProjectAutoload(*mh, noteOne);
             }
+            appendProjectLoadDiagnosticLine("load: instrument instantiate+state ms="
+                                            + juce::String((int) (juce::Time::getMillisecondCounterHiRes() - instT0 + 0.5))
+                                            + " kind=" + etRow.instrumentKind);
             appendProjectLoadDiagnosticLine("load: after GrooveAgent/HALion restore trackId=" + juce::String((juce::int64)bindTid)
                                             + " kind=" + etRow.instrumentKind);
             if (noteOne.isNotEmpty())
@@ -1603,8 +2145,10 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
             ++j.insertIndex;
             appendProjectLoadDiagnosticLine("load: deferred before importChain trackId=" + juce::String((juce::int64)row.trackId)
                                             + " slots=" + juce::String((int)row.chain.slots.size()));
+            const double chainT0 = juce::Time::getMillisecondCounterHiRes();
             pluginHost_.importChain(row.trackId, row.chain);
-            appendProjectLoadDiagnosticLine("load: deferred after importChain trackId=" + juce::String((juce::int64)row.trackId));
+            appendProjectLoadDiagnosticLine("load: deferred after importChain trackId=" + juce::String((juce::int64)row.trackId)
+                                            + " ms=" + juce::String((int) (juce::Time::getMillisecondCounterHiRes() - chainT0 + 0.5)));
             loadJob_scheduleNextUnit();
             return;
         }
@@ -1796,10 +2340,10 @@ bool ProjectIoCoordinator::captureLoadProgressWindowPng(const juce::File& png) c
 
 bool ProjectIoCoordinator::isProjectDirty() const noexcept
 {
-    if (loadJob_ != nullptr)
+    if (isLoadInProgress())
     {
-        // A load in progress holds a partially applied model; the on-disk file is authoritative
-        // and nothing user-made exists yet - never prompt to save (or autosave) this state.
+        // A load or close in progress holds a partially applied model; never prompt to save
+        // (or autosave) this state. The unsaved question already ran before teardown started.
         return false;
     }
     if (instrumentOrPluginEditsSinceClean_)
@@ -1967,6 +2511,13 @@ void ProjectIoCoordinator::confirmUnsavedChangesThen(const UnsavedGuardKind kind
             withoutButton = "Export Without Saving";
             kindName = "export";
             break;
+        case UnsavedGuardKind::NewProject:
+            title = "New project";
+            message = "Project has unsaved changes. Save before closing this project?";
+            saveButton = "Save and Close";
+            withoutButton = "Close Without Saving";
+            kindName = "new";
+            break;
     }
 
     // Stability C2: never block a scenario run on a modal prompt. Deterministic auto-answer:
@@ -2041,18 +2592,42 @@ void ProjectIoCoordinator::confirmUnsavedChangesThen(const UnsavedGuardKind kind
             }));
 }
 
+void ProjectIoCoordinator::newProject()
+{
+    if (isLoadInProgress())
+    {
+        appendProjectLoadDiagnosticLine("close: new project refused (a load or close is already in progress)");
+        return;
+    }
+    confirmUnsavedChangesThen(UnsavedGuardKind::NewProject, [this, guard = asyncLifetime_.guard()] {
+        if (!guard.isAlive())
+        {
+            return;
+        }
+        projectClose_startStandalone(static_cast<int>(ProjectCloseRun::Afterwards::EmptySession));
+    });
+}
+
 bool ProjectIoCoordinator::interceptQuitForUnsavedChanges()
 {
+    if (isLoadInProgress())
+    {
+        appendProjectLoadDiagnosticLine("close: quit ignored (a load or close is already in progress)");
+        return true;
+    }
+    const auto startClose = [this, guard = asyncLifetime_.guard()] {
+        if (!guard.isAlive())
+        {
+            return;
+        }
+        projectClose_startStandalone(static_cast<int>(ProjectCloseRun::Afterwards::Quit));
+    };
     if (!isProjectDirty())
     {
-        return false;
+        startClose();
+        return true;
     }
-    confirmUnsavedChangesThen(UnsavedGuardKind::QuitApp, [] {
-        if (auto* app = juce::JUCEApplication::getInstance())
-        {
-            app->quit();
-        }
-    });
+    confirmUnsavedChangesThen(UnsavedGuardKind::QuitApp, startClose);
     return true;
 }
 
@@ -2222,9 +2797,9 @@ juce::String ProjectIoCoordinator::periodicAutosaveBlockReason() const
     }
     // A staged project load spans many message-loop turns: the model is only partially applied
     // until finalize, so an autosave written now would capture a half-built project.
-    if (loadJob_ != nullptr)
+    if (isLoadInProgress())
     {
-        return "project load in progress";
+        return "project load or close in progress";
     }
     // Covers the recovery prompt, unsaved-changes prompts, alerts, and modal pickers. Save/
     // export/mixdown/undo/redo/track-delete all run synchronously on the message thread, so this

@@ -101,6 +101,7 @@
 #include <vector>
 
 #include "app/MainWindow.h"
+#include "app/TransportControlsShortcutTarget.h"
 #include "instruments/ProxyRenderScheduler.h"
 
 void MiniDAWLabApplication::initialise(const juce::String& commandLine)
@@ -285,6 +286,35 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // paths with spaces as one argument and handles Unicode. Missing files surface as a non-fatal
     // alert inside `loadProjectFromFile`.
     const juce::StringArray cliArgs = getCommandLineParameterArray();
+    StartupLoadFollowUp startupFollowUp;
+    for (const auto& arg : cliArgs)
+    {
+        if (arg.startsWith("--then-load="))
+        {
+            const juce::String path = arg.fromFirstOccurrenceOf("=", false, false).trim().unquoted();
+            startupFollowUp.thenLoad = juce::File::isAbsolutePath(path)
+                                           ? juce::File(path)
+                                           : juce::File::getCurrentWorkingDirectory().getChildFile(path);
+        }
+        else if (arg == "--then-new")
+        {
+            startupFollowUp.thenNew = true;
+        }
+        else if (arg == "--quit-after")
+        {
+            startupFollowUp.quitAfter = true;
+        }
+        else if (arg.startsWith("--play-ms="))
+        {
+            startupFollowUp.playMs = arg.fromFirstOccurrenceOf("=", false, false).getIntValue();
+        }
+    }
+    if (mainWindow != nullptr
+        && (startupFollowUp.thenLoad.getFullPathName().isNotEmpty() || startupFollowUp.thenNew
+            || startupFollowUp.quitAfter || startupFollowUp.playMs > 0))
+    {
+        mainWindow->setStartupLoadFollowUp(startupFollowUp);
+    }
     bool commandLineProjectOpenQueued = false;
     for (const auto& arg : cliArgs)
     {
@@ -368,11 +398,13 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
 
 void MiniDAWLabApplication::systemRequestedQuit()
 {
-    // Stability Slice 5: a dirty project shows the save-before-quit prompt; quitting then resumes
-    // from the prompt via JUCEApplication::quit() (which does not re-enter this hook).
+    // Dirty: the save question runs first. Clean or "continue": a staged close keeps this
+    // window and the message loop alive until every plugin has been released, then calls
+    // quit() (which stops the dispatch loop and does not re-enter this hook). A second
+    // request while that close or a load is running is ignored.
     if (mainWindow != nullptr && mainWindow->tryInterceptQuitForUnsavedChanges())
     {
-        writeLastOperationBreadcrumb("quit intercepted: unsaved changes prompt shown");
+        writeLastOperationBreadcrumb("quit intercepted: close job or unsaved-changes prompt");
         return;
     }
     quit();

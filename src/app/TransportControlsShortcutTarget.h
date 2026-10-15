@@ -4,6 +4,18 @@
 
 struct StabilityScenarioRequest;
 
+/// Command-line measurement follow-up. Empty fields leave a normal open unchanged.
+struct StartupLoadFollowUp
+{
+    juce::File thenLoad;
+    bool thenNew = false;
+    bool quitAfter = false;
+    int playMs = 0;
+    bool thenLoadStarted = false;
+    bool thenNewStarted = false;
+    bool playStarted = false;
+};
+
 /// Narrow surface used by MainWindow shortcut routing (`routeShortcut`).
 class TransportControlsShortcutTarget
 {
@@ -38,6 +50,9 @@ public:
 
     /// Command-line ".dalproj" open: load `projectFile` through the normal project-load pipeline.
     virtual void invokeLoadProjectFileFromStartup(const juce::File& projectFile) = 0;
+
+    /// Diagnostic command-line follow-up (`--then-load`, `--then-new`, `--quit-after`, `--play-ms`).
+    virtual void setStartupLoadFollowUp(const StartupLoadFollowUp& followUp) = 0;
 
     /// Stability Slice 5: quit interception. Returns false when the app may quit immediately
     /// (no unsaved changes); returns true when a save prompt was shown and quit resumes (or is

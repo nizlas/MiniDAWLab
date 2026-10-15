@@ -788,6 +788,131 @@ bool InstrumentRuntimeCoordinator::moveInstrumentMidiClipsBetweenTracks(
     return true;
 }
 
+void InstrumentRuntimeCoordinator::publishNoInstrumentPlaybackForProjectClose() noexcept
+{
+    playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);
+}
+
+int InstrumentRuntimeCoordinator::countLoadedInstrumentHostsForProjectClose() const noexcept
+{
+    int n = 0;
+    const auto countHost = [&n](const ExperimentalInstrumentHost* host) noexcept {
+        if (host != nullptr && host->hasInstrument())
+        {
+            ++n;
+        }
+    };
+    for (const auto& kv : instrumentHostsByTrackId_)
+    {
+        countHost(kv.second.get());
+    }
+    for (const auto& kv : secondaryInstrumentHostsByTrackId_)
+    {
+        countHost(kv.second.get());
+    }
+    countHost(instrumentStagingHost_.get());
+    return n;
+}
+
+juce::String InstrumentRuntimeCoordinator::nextLoadedInstrumentNameForProjectClose() const
+{
+    const auto nameOf = [](const ExperimentalInstrumentHost* host) -> juce::String {
+        if (host == nullptr || !host->hasInstrument())
+        {
+            return {};
+        }
+        juce::String name = host->getInstrumentNameForUi();
+        return name.isEmpty() ? juce::String("Instrument") : name;
+    };
+    for (const auto& kv : instrumentHostsByTrackId_)
+    {
+        if (const juce::String name = nameOf(kv.second.get()); name.isNotEmpty())
+        {
+            return name;
+        }
+    }
+    for (const auto& kv : secondaryInstrumentHostsByTrackId_)
+    {
+        if (const juce::String name = nameOf(kv.second.get()); name.isNotEmpty())
+        {
+            return name;
+        }
+    }
+    return nameOf(instrumentStagingHost_.get());
+}
+
+project_close::InstrumentCloseUnloadStep
+InstrumentRuntimeCoordinator::unloadNextInstrumentHostForProjectClose(juce::String& nameOut) noexcept
+{
+    const auto tryHost = [&nameOut](ExperimentalInstrumentHost* host) -> int {
+        if (host == nullptr || !host->hasInstrument())
+        {
+            return 0;
+        }
+        nameOut = host->getInstrumentNameForUi();
+        if (nameOut.isEmpty())
+        {
+            nameOut = "Instrument";
+        }
+        host->clearControllerWireCallbacks();
+        if (!host->unloadInstrumentAfterAcknowledgedDrain())
+        {
+            return -1;
+        }
+        return 1;
+    };
+    for (auto& kv : instrumentHostsByTrackId_)
+    {
+        const int step = tryHost(kv.second.get());
+        if (step < 0)
+        {
+            return project_close::InstrumentCloseUnloadStep::StillHeld;
+        }
+        if (step > 0)
+        {
+            return project_close::InstrumentCloseUnloadStep::Unloaded;
+        }
+    }
+    for (auto& kv : secondaryInstrumentHostsByTrackId_)
+    {
+        const int step = tryHost(kv.second.get());
+        if (step < 0)
+        {
+            return project_close::InstrumentCloseUnloadStep::StillHeld;
+        }
+        if (step > 0)
+        {
+            return project_close::InstrumentCloseUnloadStep::Unloaded;
+        }
+    }
+    const int staging = tryHost(instrumentStagingHost_.get());
+    if (staging < 0)
+    {
+        return project_close::InstrumentCloseUnloadStep::StillHeld;
+    }
+    if (staging > 0)
+    {
+        return project_close::InstrumentCloseUnloadStep::Unloaded;
+    }
+    nameOut.clear();
+    return project_close::InstrumentCloseUnloadStep::NoneLeft;
+}
+
+void InstrumentRuntimeCoordinator::discardInstrumentControllersAfterProjectClose() noexcept
+{
+    playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);
+    instrumentStagingController_.reset();
+    instrumentStagingHost_.reset();
+    instrumentControllersByTrackId_.clear();
+    instrumentHostsByTrackId_.clear();
+    secondaryInstrumentHostsByTrackId_.clear();
+    secondaryLoadedIdentityByTrackId_.clear();
+    secondaryLoadFailureLatchByTrackId_.clear();
+    secondaryLoadFailureReasonByTrackId_.clear();
+    secondaryTransportActive_.clear();
+    midiContentControllersByTrackId_.clear();
+}
+
 void InstrumentRuntimeCoordinator::clearRuntimesPreserveBridgeOnly() noexcept
 {
     playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);

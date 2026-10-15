@@ -564,7 +564,13 @@ public:
         PluginInsertHost* pluginHost = nullptr,
         std::uint64_t loadGenerationForDeferredRestore = 0,
         const PreDecodedMaterialByPath* preDecodedMaterial = nullptr,
-        std::vector<PendingPluginInsertRestore>* outDeferredInsertRestores = nullptr);
+        std::vector<PendingPluginInsertRestore>* outDeferredInsertRestores = nullptr,
+        bool pluginInstancesAlreadyReleased = false);
+
+    /// [Message thread] Replace the live session with one empty audio track plus Stereo Out.
+    /// Allocates fresh TrackIds. Clears the project file, solo, visual groups, colours, mixdown
+    /// and snap, seeks the transport to 0 and turns cycle off. Does not touch plugin hosts.
+    void replaceWithFreshStartupSession(Transport& transport) noexcept;
 
     /// [Message thread] Increments and returns the current project-load generation (used to stale-guard
     /// deferred restore callbacks when a newer load begins).

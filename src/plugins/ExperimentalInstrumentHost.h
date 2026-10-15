@@ -139,9 +139,16 @@ public:
     /// [Message thread] Clears callbacks wired to external controllers/UI (safe before unload/teardown).
     void clearControllerWireCallbacks() noexcept;
 
-    /// [Message thread] Closes editor, releases instance. Brief wait lets the audio callback
-    /// finish any in-flight block (feasibility slice — not a production RT unload protocol).
+    /// [Message thread] Closes editor, releases instance. When an owner was published, waits 100 ms
+    /// so a single-instance removal can finish an in-flight block. An already-unloaded host does
+    /// not wait.
     void unloadInstrument();
+
+    /// [Message thread] Project-close teardown. The caller has already observed that the instrument
+    /// section is idle, the audio callback has exited, and the read-ahead worker has acknowledged
+    /// its pause. Does not sleep. Returns false and leaves the instance loaded when the owner is
+    /// still held (a worker has not dropped it). A failed return never releases the plugin.
+    bool unloadInstrumentAfterAcknowledgedDrain();
 
     [[nodiscard]] bool hasInstrument() const noexcept;
     [[nodiscard]] juce::String getInstrumentNameForUi() const;
@@ -472,6 +479,10 @@ public:
     }
 
 private:
+    /// Shared unload body. `sleepIfOwnerWasLive`: the single-instance path. When false (project
+    /// close), a still-held owner is restored and the function returns false without releasing.
+    bool unloadInstrumentImpl(bool sleepIfOwnerWasLive);
+
     mini_daw::AsyncLifetimeOwnerToken asyncLifetime_;
 
     struct InstrumentOwner

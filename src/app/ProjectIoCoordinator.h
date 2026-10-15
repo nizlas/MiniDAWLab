@@ -7,6 +7,7 @@
 #include <optional>
 #include <utility>
 
+#include "app/ProjectCloseContract.h"
 #include "domain/Track.h"
 #include "io/ProjectFile.h"
 #include "ui/SnapSettings.h"
@@ -86,6 +87,20 @@ public:
         /// Fired once when a user-initiated open finishes (after the progress window is gone and
         /// after mixer / MIDI editor restore). Not used by autosave, playback, or stability loads.
         std::function<void()> activateMainWindowForUserAttention;
+
+        /// [Message thread] Stop transport UI, close the MIDI editor and clear instrument lanes.
+        /// Does not unload plugins. Called once at the start of a staged project close.
+        std::function<void()> prepareProjectCloseUi;
+        /// [Message thread] How many instrument hosts still have a loaded plugin.
+        std::function<int()> countLoadedInstrumentHostsForClose;
+        /// [Message thread] Name of the next instrument plugin to close (empty when none).
+        std::function<juce::String()> nextLoadedInstrumentNameForClose;
+        /// [Message thread] Unload one instrument plugin. `StillHeld` means it was not released.
+        std::function<project_close::InstrumentCloseUnloadStep(juce::String& nameOut)> unloadNextInstrumentHostForClose;
+        /// [Message thread] Destroy host shells and controllers after every plugin is unloaded.
+        std::function<void()> discardInstrumentControllersAfterClose;
+        /// [Message thread] Fired after a standalone close installed an empty session (File > New).
+        std::function<void()> onStandaloneProjectCloseFinished;
     };
 
     ProjectIoCoordinator(Transport& transport,
@@ -99,13 +114,17 @@ public:
 
     void saveProject();
     void loadProject();
+    /// [Message thread] File > New. The unsaved-changes question runs first. The staged close then
+    /// leaves one empty audio track and Stereo Out.
+    void newProject();
 
     // ---------------------------------------------------------------------
     // Staged project load (progress + responsiveness)
     // ---------------------------------------------------------------------
     // One load is a fixed sequence of UNITS: parse + decode the audio material (background
-    // thread), replace the session model, restore one instrument runtime per unit, orphan lanes /
-    // MIDI content controllers + UI refresh, import one insert chain per unit, finalize. The
+    // thread), close the previous project one plugin at a time, replace the session model,
+    // restore one instrument runtime per unit, orphan lanes / MIDI content controllers + UI
+    // refresh, import one insert chain per unit, finalize. The
     // Interactive drive runs one unit per message-loop turn behind a modal progress window (the
     // window and the main window paint between units; plug-in instantiation itself still blocks
     // for its own duration); the Synchronous drive runs the same units in one call (stability
@@ -130,8 +149,12 @@ public:
     /// (load in progress, missing file, no device) fires `completion(false)` immediately.
     void loadProjectFromFileThen(const juce::File& projectFile, std::function<void(bool ok)> completion);
 
-    /// [Message thread] True from the first unit until finalize / failure released the UI gates.
-    [[nodiscard]] bool isLoadInProgress() const noexcept { return loadJob_ != nullptr; }
+    /// [Message thread] True from the first load or standalone-close unit until the gates release.
+    /// Save, Open, autosave, edits, Record and transport start stay refused for the whole job.
+    [[nodiscard]] bool isLoadInProgress() const noexcept
+    {
+        return loadJob_ != nullptr || projectCloseActive_;
+    }
     /// [Message thread] "phase | detail | fraction" of the running load (empty when idle). Diagnostics.
     [[nodiscard]] juce::String loadProgressTextForDiagnostics() const;
     /// [Message thread] PNG of the progress dialog as rendered (false when it is not showing).
@@ -181,6 +204,7 @@ public:
         LoadProject,
         QuitApp,
         Export,
+        NewProject,
     };
 
     /// [Message thread] If the project is clean, runs `proceed` immediately. Otherwise shows the
@@ -188,9 +212,10 @@ public:
     /// only after a successful save; "X Without Saving" writes an autosave first, then continues.
     void confirmUnsavedChangesThen(UnsavedGuardKind kind, std::function<void()> proceed);
 
-    /// [Message thread] Quit interception: returns false when the app may quit right away (clean
-    /// project). When dirty, shows the quit prompt (quit resumes via `JUCEApplication::quit`) and
-    /// returns true.
+    /// [Message thread] Quit interception. Returns true when quit must wait: the unsaved-changes
+    /// prompt is up, or the staged close job is running (it calls `JUCEApplication::quit` when the
+    /// plugins are gone). Returns false only when no window work can start and the caller may quit
+    /// immediately. A second call while a close or load is running does not start another job.
     [[nodiscard]] bool interceptQuitForUnsavedChanges();
 
     /// [Message thread] Write an autosave snapshot if the project is dirty. Never changes the
@@ -231,7 +256,19 @@ private:
 
     // Staged load (see the public section). `LoadJob` and the progress window live in the .cpp.
     struct LoadJob;
+    struct ProjectCloseRun;
     class LoadProgressWindow;
+    void projectClose_startStandalone(int afterwards);
+    /// One close step. True when the close has finished (the load job may advance, or the
+    /// standalone job has already torn the window down).
+    bool projectClose_runStep();
+    void projectClose_schedule();
+    void projectClose_setProgress(const juce::String& phase, const juce::String& detail, double fraction);
+    bool projectClose_announce(const juce::String& phase, const juce::String& detail, double fraction);
+    void projectClose_noteBlock(const juce::String& label, double elapsedMs);
+    void projectClose_showWindow(const juce::String& title);
+    void projectClose_finishStandalone();
+    [[nodiscard]] bool projectClose_isInteractive() const noexcept;
     void loadJob_start(const juce::File& projectFile, LoadDrive drive, std::function<void(bool ok)> completion);
     /// Runs the next unit; Interactive: schedules the following unit on a short timer so the message
     /// loop paints in between; Synchronous: the caller loops.
@@ -246,6 +283,8 @@ private:
     /// so this box is created after that and is not covered by it.
     void showLoadMessageAsync(juce::MessageBoxIconType icon, const juce::String& title, const juce::String& message);
     std::unique_ptr<LoadJob> loadJob_;
+    std::unique_ptr<ProjectCloseRun> projectCloseRun_;
+    bool projectCloseActive_ = false;
     std::unique_ptr<LoadProgressWindow> loadProgressWindow_;
     std::function<void(bool ok)> onProjectLoadFinished_;
     std::uint64_t loadJobSerialCounter_ = 0;

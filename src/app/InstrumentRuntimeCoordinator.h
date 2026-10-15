@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "app/ProjectCloseContract.h"
 #include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h"
 #include "io/ProjectFile.h"
@@ -78,6 +79,23 @@ public:
     void removeInstrumentRuntimeForTrack(TrackId tid) noexcept;
 
     void clearRuntimesPreserveBridgeOnly() noexcept;
+
+    /// [Message thread] Project close: publish a null instrument snapshot. Does not unload.
+    void publishNoInstrumentPlaybackForProjectClose() noexcept;
+
+    /// [Message thread] Hosts that still have a loaded plugin (primary, secondary, staging).
+    [[nodiscard]] int countLoadedInstrumentHostsForProjectClose() const noexcept;
+
+    /// [Message thread] Display name of the next loaded plugin, or empty when none remain.
+    [[nodiscard]] juce::String nextLoadedInstrumentNameForProjectClose() const;
+
+    /// [Message thread] Unload exactly one loaded plugin after an acknowledged drain.
+    /// `StillHeld` leaves that instance loaded. Does not destroy the host object.
+    project_close::InstrumentCloseUnloadStep unloadNextInstrumentHostForProjectClose(juce::String& nameOut) noexcept;
+
+    /// [Message thread] Drop controllers and host objects after every plugin has been unloaded.
+    /// Hosts that still have a plugin are not expected here.
+    void discardInstrumentControllersAfterProjectClose() noexcept;
 
     // --- P2 Secondary instrument runtime (steering §17, PID-008/PID-009) --------------------
     // A second, independent host per destination for the OPTIONAL Secondary working instrument.

@@ -142,6 +142,30 @@ Session::Session()
 
 Session::~Session() = default;
 
+void Session::replaceWithFreshStartupSession(Transport& transport) noexcept
+{
+    const TrackId audioId = nextTrackId_;
+    nextTrackId_ = static_cast<TrackId>(audioId + 2); // withSingleEmptyTrack uses audioId + 1 as master
+    activeTrackId_ = audioId;
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withSingleEmptyTrack(audioId, juce::String("Track 1"));
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    currentProjectFile_ = {};
+    audioMixdown_ = defaultAudioMixdownProjectSettings();
+    resetTransientSoloStateForProjectLoad();
+    for (auto& memory : soloMemories_)
+    {
+        memory.clear();
+    }
+    visualTrackGroups_.clear();
+    nextVisualTrackGroupId_ = 1;
+    trackColours_.clear();
+    arrangementSnapSettings_ = {};
+    setTimelineRulerTimeDisplay(TimelineRulerTimeDisplay::MusicalBarsBeats);
+    transport.requestSeek(0);
+    transport.requestCycleEnabled(false);
+}
+
 AudioMixdownProjectSettings Session::getAudioMixdownSettings() const noexcept
 {
     return audioMixdown_;
@@ -2624,7 +2648,8 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                                               PluginInsertHost* pluginHost,
                                               const std::uint64_t loadGenerationForDeferredRestore,
                                               const PreDecodedMaterialByPath* preDecodedMaterial,
-                                              std::vector<PendingPluginInsertRestore>* outDeferredInsertRestores)
+                                              std::vector<PendingPluginInsertRestore>* outDeferredInsertRestores,
+                                              const bool pluginInstancesAlreadyReleased)
 {
     outSkippedClipDetails.clear();
     outInfoNote.clear();
@@ -2633,12 +2658,16 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                                     + " experimentalInstrumentTracks="
                                     + juce::String((int)parsed.experimentalInstrumentTracks.size()));
 
-    if (pluginHost != nullptr)
+    if (pluginHost != nullptr && !pluginInstancesAlreadyReleased)
     {
         appendProjectLoadDiagnosticLine("apply: before removeAllPlugins");
         juce::Thread::sleep(120);
         pluginHost->removeAllPlugins();
         appendProjectLoadDiagnosticLine("apply: after removeAllPlugins");
+    }
+    else if (pluginInstancesAlreadyReleased)
+    {
+        appendProjectLoadDiagnosticLine("apply: plugin instances already released by staged close");
     }
 
     if (!juce::approximatelyEqual(deviceSampleRate, parsed.deviceSampleRateAtSave))

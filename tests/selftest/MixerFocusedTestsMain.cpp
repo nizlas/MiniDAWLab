@@ -16,6 +16,7 @@
 // Exit 0 = all green.
 // =============================================================================
 
+#include "app/ProjectCloseContract.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "engine/TrackMeterBank.h"
@@ -59,6 +60,19 @@ namespace
     {
         std::vector<float> l(64, peak), r(64, peak * 0.5f);
         return level_meter::analyzeBlock(l.data(), r.data(), 64);
+    }
+
+    // A timed-out or still-busy holder must not count as "left". Release is allowed only when
+    // the instrument section is idle, the callback has exited, AND the read-ahead pause was
+    // acknowledged. The close stepper checks this before every unload / releaseResources.
+    void testProjectCloseDrainContract()
+    {
+        using project_close::mayReleaseInstances;
+        check(!mayReleaseInstances(false, true, true), "close: busy instrument section blocks release");
+        check(!mayReleaseInstances(true, false, true), "close: callback still inside blocks release");
+        check(!mayReleaseInstances(true, true, false), "close: unacknowledged read-ahead blocks release");
+        check(!mayReleaseInstances(false, false, false), "close: no drain signal blocks release");
+        check(mayReleaseInstances(true, true, true), "close: release only after every holder has left");
     }
 
     // --- TrackMeterBank ---------------------------------------------------------------------------
@@ -1040,6 +1054,7 @@ int main(int argc, char** argv)
         std::printf("%s\n", (openOk && closedOk) ? "fixtures written" : "fixtures failed");
         return (openOk && closedOk) ? 0 : 1;
     }
+    testProjectCloseDrainContract();
     testTrackMeterBank();
     testLevelMeterHub();
     testSectionLayout();

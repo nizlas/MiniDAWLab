@@ -2655,13 +2655,24 @@ juce::Result ExperimentalInstrumentHost::diagnosticScanVst3FileOnly(const juce::
 
 void ExperimentalInstrumentHost::unloadInstrument()
 {
+    (void) unloadInstrumentImpl(true);
+}
+
+bool ExperimentalInstrumentHost::unloadInstrumentAfterAcknowledgedDrain()
+{
+    return unloadInstrumentImpl(false);
+}
+
+bool ExperimentalInstrumentHost::unloadInstrumentImpl(const bool sleepIfOwnerWasLive)
+{
     if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
         || !juce::MessageManager::getInstance()->isThisTheMessageThread())
     {
-        return;
+        return false;
     }
 
-    writeExperimentalInstrumentLogLine("unload: requested");
+    writeExperimentalInstrumentLogLine(sleepIfOwnerWasLive ? "unload: requested"
+                                                           : "unload: requested after acknowledged drain");
 
     rawPluginPitchNamesByNote_.clear();
     pluginPitchNamesByNote_.clear();
@@ -2695,7 +2706,20 @@ void ExperimentalInstrumentHost::unloadInstrument()
     std::shared_ptr<InstrumentOwner> prev = std::atomic_exchange_explicit(
         &activeOwner_, std::shared_ptr<InstrumentOwner>{}, std::memory_order_acq_rel);
 
-    juce::Thread::sleep(100);
+    if (prev != nullptr && sleepIfOwnerWasLive)
+    {
+        juce::Thread::sleep(100);
+    }
+
+    // use_count includes this local copy. More than one means the audio callback or a worker
+    // still holds the owner. Project close restores it and refuses to release; the single-instance
+    // path has already waited and keeps today's release (that path is not the close gate).
+    if (!sleepIfOwnerWasLive && prev != nullptr && prev.use_count() > 1)
+    {
+        std::atomic_store_explicit(&activeOwner_, prev, std::memory_order_release);
+        writeExperimentalInstrumentLogLine("unload: deferred (owner still held)");
+        return false;
+    }
 
     if (prev != nullptr && prev->inst != nullptr)
     {
@@ -2738,6 +2762,7 @@ void ExperimentalInstrumentHost::unloadInstrument()
     juce::Logger::writeToLog("[experimental-instrument] unloaded (global slot)");
 
     writeExperimentalInstrumentLogLine("unload: completed");
+    return true;
 }
 
 bool ExperimentalInstrumentHost::hasInstrument() const noexcept

@@ -11,6 +11,7 @@ struct MainMenuActions
 {
     std::function<void()> saveProject;
     std::function<void()> loadProject;
+    std::function<void()> newProject;
     std::function<void()> openAudioMixdown;
     /// P1J (steering §16.6): explicit portable packaging operation.
     std::function<void()> preparePortableProject;
@@ -26,6 +27,7 @@ enum class MainMenuCommandId : int
 {
     FileSaveProject = 1,
     FileLoadProject = 2,
+    FileNewProject = 5,
     FileAudioMixdown = 3,
     FilePreparePortableProject = 4,
     AudioSettings = 10,

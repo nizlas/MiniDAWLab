@@ -22,6 +22,7 @@ juce::PopupMenu MainMenuModel::getMenuForIndex(const int topLevelMenuIndex,
     {
     case 0: {
         juce::PopupMenu m;
+        m.addItem(static_cast<int>(MainMenuCommandId::FileNewProject), "New Project");
         m.addItem(static_cast<int>(MainMenuCommandId::FileSaveProject), "Save Project...");
         m.addItem(static_cast<int>(MainMenuCommandId::FileLoadProject), "Load Project...");
         m.addSeparator();
@@ -62,6 +63,12 @@ void MainMenuModel::menuItemSelected(const int menuItemID, const int topLevelMen
 
     switch (menuItemID)
     {
+    case static_cast<int>(MainMenuCommandId::FileNewProject):
+        if (actions_.newProject != nullptr)
+        {
+            actions_.newProject();
+        }
+        return;
     case static_cast<int>(MainMenuCommandId::FileSaveProject):
         if (actions_.saveProject != nullptr)
         {

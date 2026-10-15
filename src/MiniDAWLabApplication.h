@@ -35,8 +35,9 @@ public:
     void initialise(const juce::String& commandLine) override;
     void shutdown() override;
 
-    /// Stability Slice 5: quits immediately when the project is clean; otherwise shows the
-    /// save-before-quit prompt (quit resumes from the prompt). Implemented in Main.cpp.
+    /// Unsaved-changes question first, then a staged project close. `quit()` runs only after
+    /// that close finishes, so the window and the message loop stay up while plugins are
+    /// released. A second request during the close does not start another one.
     void systemRequestedQuit() override;
 
     ~MiniDAWLabApplication() override;
