@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "domain/SessionHistory.h"
 #include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h"
 
@@ -102,6 +103,12 @@ public:
     void setSoloUiHooks(SoloUiHooks hooks) noexcept { callbacks_.soloUiHooks = std::move(hooks); }
 
     /// One undo step for a MIDI trim that is published live during the drag.
+    /// Single MIDI-clip moves record the ids that exist before and after the step.
+    void setArrangementSelectionUndoNote(std::function<void(ArrangementSelectionUndoSides)> fn) noexcept
+    {
+        noteArrangementSelection_ = std::move(fn);
+    }
+
     void setMidiTrimUndoCallbacks(
         std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> capture,
         std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)> record)
@@ -181,6 +188,7 @@ private:
     TimelineViewportModel& timelineViewport_;
     InstrumentRuntimeCoordinator& instrumentRuntime_;
     Callbacks callbacks_;
+    std::function<void(ArrangementSelectionUndoSides)> noteArrangementSelection_;
 
     std::unordered_map<TrackId, std::unique_ptr<TrackHeaderView>> instrumentTrackHeadersByTrackId_;
     std::unordered_map<TrackId, std::unique_ptr<MidiEventLane>> instrumentMidiEventLanesByTrackId_;

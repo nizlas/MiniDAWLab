@@ -57,7 +57,7 @@ void UndoRedoCoordinator::onPluginUndoRecord(const juce::String& label, const Pl
         return;
     }
     PluginUndoStepSides copy = sides;
-    sessionHistory_.record(label, snap, snap, std::move(copy), std::nullopt);
+    commitRecord(label, snap, snap, std::move(copy), std::nullopt);
     if (callbacks_.markProjectDirty)
     {
         callbacks_.markProjectDirty();
@@ -209,6 +209,7 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
         }
     }
     refreshAfterSessionSnapshotRestore();
+    restoreArrangementSelectionFromBundle(*bundle);
     // Stability C3: verify runtime invariants right after the undo completed.
     (void) stability_invariants::runRegisteredStabilityInvariantsCheck("undo-end");
     if constexpr (undo_diagnostic::kUndoDiag)
@@ -351,6 +352,7 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
         }
     }
     refreshAfterSessionSnapshotRestore();
+    restoreArrangementSelectionFromBundle(*bundle);
     // Stability C3: verify runtime invariants right after the redo completed.
     (void) stability_invariants::runRegisteredStabilityInvariantsCheck("redo-end");
     if constexpr (undo_diagnostic::kUndoDiag)
@@ -443,6 +445,57 @@ void UndoRedoCoordinator::refreshAfterSessionSnapshotRestore()
     }
 }
 
+void UndoRedoCoordinator::noteArrangementSelectionForCurrentEdit(ArrangementSelectionUndoSides sides) noexcept
+{
+    pendingArrangementSelection_ = std::move(sides);
+}
+
+void UndoRedoCoordinator::setArrangementSelectionRestoreHandler(
+    std::function<void(const std::vector<ArrangementEventSelectionRef>&)> fn) noexcept
+{
+    callbacks_.applyArrangementEventSelection = std::move(fn);
+}
+
+void UndoRedoCoordinator::discardArrangementSelectionNote() noexcept
+{
+    pendingArrangementSelection_.reset();
+}
+
+void UndoRedoCoordinator::restoreArrangementSelectionFromBundle(const SessionHistoryRestoreBundle& bundle)
+{
+    if (!bundle.arrangementSelection.has_value() || !callbacks_.applyArrangementEventSelection)
+    {
+        return;
+    }
+    const std::vector<ArrangementEventSelectionRef>& refs
+        = bundle.isRedo ? bundle.arrangementSelection->after : bundle.arrangementSelection->before;
+    callbacks_.applyArrangementEventSelection(refs);
+}
+
+void UndoRedoCoordinator::commitRecord(juce::String label,
+                                       std::shared_ptr<const SessionSnapshot> before,
+                                       std::shared_ptr<const SessionSnapshot> after,
+                                       std::optional<PluginUndoStepSides> pluginSides,
+                                       std::optional<InstrumentUndoStepSides> instrumentSides,
+                                       std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete,
+                                       std::optional<SoloMemoryUndoSides> soloMemorySides,
+                                       std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides,
+                                       std::optional<TrackColourUndoSides> trackColourSides)
+{
+    auto selection = std::move(pendingArrangementSelection_);
+    pendingArrangementSelection_.reset();
+    sessionHistory_.record(std::move(label),
+                           std::move(before),
+                           std::move(after),
+                           std::move(pluginSides),
+                           std::move(instrumentSides),
+                           std::move(instrumentTrackDelete),
+                           std::move(soloMemorySides),
+                           std::move(visualTrackGroupSides),
+                           std::move(trackColourSides),
+                           std::move(selection));
+}
+
 void UndoRedoCoordinator::executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator)
 {
     if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
@@ -468,6 +521,7 @@ void UndoRedoCoordinator::executeUndoableSessionEdit(const juce::String& label, 
     }
     if (!mutator())
     {
+        discardArrangementSelectionNote();
         if constexpr (undo_diagnostic::kUndoDiag)
         {
             writeUndoDiagnosticLogLine(
@@ -478,6 +532,7 @@ void UndoRedoCoordinator::executeUndoableSessionEdit(const juce::String& label, 
     std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
     if (after == nullptr)
     {
+        discardArrangementSelectionNote();
         if constexpr (undo_diagnostic::kUndoDiag)
         {
             writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableSessionEdit skip: null after label=\""
@@ -486,7 +541,7 @@ void UndoRedoCoordinator::executeUndoableSessionEdit(const juce::String& label, 
         return;
     }
     const SessionSnapshot* const afterPtrForDiag = after.get();
-    sessionHistory_.record(label, std::move(before), std::move(after));
+    commitRecord(label, std::move(before), std::move(after));
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableSessionEdit after record label=\"" + label
@@ -505,7 +560,9 @@ void UndoRedoCoordinator::recordAppliedSessionEdit(
     {
         return;
     }
-    sessionHistory_.record(label, std::move(before), std::move(after));
+    // Gain and fade drags are not arrangement-selection steps.
+    discardArrangementSelectionNote();
+    commitRecord(label, std::move(before), std::move(after));
 }
 
 void UndoRedoCoordinator::executeUndoableTrackDelete(
@@ -549,7 +606,7 @@ void UndoRedoCoordinator::executeUndoableTrackDelete(
         }
         return;
     }
-    sessionHistory_.record(label,
+    commitRecord(label,
                            std::move(before),
                            std::move(after),
                            std::move(pluginSides),
@@ -622,7 +679,7 @@ void UndoRedoCoordinator::executeUndoableRecordingCommit(const juce::String& lab
     {
         instrumentSides = InstrumentUndoStepSides{ std::move(beforeMusical), std::move(afterMusical) };
     }
-    sessionHistory_.record(label, std::move(before), std::move(after), std::nullopt, std::move(instrumentSides));
+    commitRecord(label, std::move(before), std::move(after), std::nullopt, std::move(instrumentSides));
     if (callbacks_.markProjectDirty)
     {
         callbacks_.markProjectDirty();
@@ -694,6 +751,7 @@ void UndoRedoCoordinator::executeUndoableArrangementEdit(const juce::String& lab
         {
             callbacks_.reconcileMidiEditorAfterInstrumentEdit();
         }
+        discardArrangementSelectionNote();
         return;
     }
 
@@ -709,10 +767,12 @@ void UndoRedoCoordinator::executeUndoableArrangementEdit(const juce::String& lab
                                 && !experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, afterMusical);
     if (!sessionChanged && !musicalChanged)
     {
+        discardArrangementSelectionNote();
         return;
     }
     if (after == nullptr)
     {
+        discardArrangementSelectionNote();
         return;
     }
     std::optional<InstrumentUndoStepSides> instrumentSides;
@@ -720,7 +780,7 @@ void UndoRedoCoordinator::executeUndoableArrangementEdit(const juce::String& lab
     {
         instrumentSides = InstrumentUndoStepSides{ std::move(beforeMusical), std::move(afterMusical) };
     }
-    sessionHistory_.record(label, std::move(before), std::move(after), std::nullopt, std::move(instrumentSides));
+    commitRecord(label, std::move(before), std::move(after), std::nullopt, std::move(instrumentSides));
     if (callbacks_.markProjectDirty)
     {
         callbacks_.markProjectDirty();
@@ -768,7 +828,7 @@ void UndoRedoCoordinator::recordAppliedInstrumentMusicalEdit(
     {
         return;
     }
-    sessionHistory_.record(label,
+    commitRecord(label,
                            snap,
                            snap,
                            std::nullopt,
@@ -821,6 +881,7 @@ void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& labe
     }
     if (!mutator())
     {
+        discardArrangementSelectionNote();
         if constexpr (undo_diagnostic::kUndoDiag)
         {
             writeUndoDiagnosticLogLine(
@@ -846,6 +907,7 @@ void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& labe
     }
     if (afterMusical.empty())
     {
+        discardArrangementSelectionNote();
         if constexpr (undo_diagnostic::kUndoDiag)
         {
             writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableInstrumentEdit skip: empty after label=\""
@@ -855,6 +917,7 @@ void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& labe
     }
     if (experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, afterMusical))
     {
+        discardArrangementSelectionNote();
         if constexpr (undo_diagnostic::kUndoDiag)
         {
             writeUndoDiagnosticLogLine(
@@ -862,7 +925,7 @@ void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& labe
         }
         return;
     }
-    sessionHistory_.record(label,
+    commitRecord(label,
                            snap,
                            snap,
                            std::nullopt,
@@ -906,7 +969,7 @@ void UndoRedoCoordinator::executeUndoableSoloMemoryEdit(const juce::String& labe
     {
         return;
     }
-    sessionHistory_.record(label,
+    commitRecord(label,
                            snap,
                            snap,
                            std::nullopt,
@@ -947,7 +1010,7 @@ void UndoRedoCoordinator::executeUndoableVisualTrackGroupsEdit(const juce::Strin
     {
         return;
     }
-    sessionHistory_.record(label,
+    commitRecord(label,
                            snap,
                            snap,
                            std::nullopt,
@@ -985,7 +1048,7 @@ void UndoRedoCoordinator::executeUndoableTrackColourEdit(const TrackId trackId, 
     }
     // Narrow step: identical snapshot pointer on both sides — undo restores exactly this one
     // colour, never instruments, takes or the rest of the Session.
-    sessionHistory_.record("Track colour",
+    commitRecord("Track colour",
                            snap,
                            snap,
                            std::nullopt,

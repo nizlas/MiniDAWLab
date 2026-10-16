@@ -30,6 +30,8 @@ public:
 
     virtual void invokeCopySelectedClipFromWindowShortcut() = 0;
 
+    virtual void invokeCutSelectedClipsFromWindowShortcut() = 0;
+
     virtual void invokePasteClipFromWindowShortcut() = 0;
 
     virtual void invokeUndoFromWindowShortcut() = 0;

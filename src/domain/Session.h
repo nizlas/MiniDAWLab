@@ -208,6 +208,40 @@ public:
     /// refuses timeline audio. An empty list is success and publishes nothing.
     [[nodiscard]] bool tryMoveAudioClipsTogether(const std::vector<AudioClipGroupRelocation>& moves) noexcept;
 
+    /// One audio event in a group paste. Material is shared (not copied). New placement ids are
+    /// assigned by `tryPasteAudioClipsTogether`.
+    struct AudioClipPastePlacement
+    {
+        std::shared_ptr<const AudioClip> material;
+        std::int64_t startSampleOnTimeline = 0;
+        std::int64_t leftTrimSamples = 0;
+        std::int64_t visibleLengthSamples = 0;
+        std::int64_t materialWindowStartSamples = 0;
+        std::int64_t materialWindowEndExclusiveSamples = 0;
+        float eventGainDb = 0.0f;
+        std::int64_t fadeInSamples = 0;
+        std::int64_t fadeOutSamples = 0;
+        juce::String displayName;
+        TrackId destTrackId = kInvalidTrackId;
+    };
+
+    struct AudioClipPasteResult
+    {
+        bool ok = false;
+        std::vector<PlacedClipId> newIds;
+    };
+
+    /// [Message thread] Remove every listed placement on one snapshot publish. Returns false
+    /// without publishing when any id is missing. An empty list is success and publishes nothing.
+    [[nodiscard]] bool tryRemovePlacedClipsTogether(
+        const std::vector<std::pair<TrackId, PlacedClipId>>& clips) noexcept;
+
+    /// [Message thread] Add every placement on one snapshot publish, sharing the given material.
+    /// Returns false without publishing when any destination is missing, the wrong kind, or the
+    /// placement itself is invalid. An empty list is success and publishes nothing.
+    [[nodiscard]] AudioClipPasteResult tryPasteAudioClipsTogether(
+        const std::vector<AudioClipPastePlacement>& placements) noexcept;
+
     // [Message thread] Non-destructive right-edge **trim** (shorter or longer `visible` window in
     // [0, material) on the `PlacedClip` only; PCM unchanged). One snapshot publish; no lane reorder.
     void setClipRightEdgeVisibleLength(PlacedClipId id, std::int64_t newVisibleLengthSamples) noexcept;

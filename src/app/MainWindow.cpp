@@ -278,6 +278,15 @@ bool MainWindow::routeShortcut(const juce::KeyPress& key)
                 return true;
             }
         }
+        if (key.getModifiers().isCommandDown() && !key.getModifiers().isShiftDown()
+            && (key.getKeyCode() == 'x' || key.getKeyCode() == 'X'))
+        {
+            if (shortcutTargetFromContent_ != nullptr)
+            {
+                shortcutTargetFromContent_->invokeCutSelectedClipsFromWindowShortcut();
+                return true;
+            }
+        }
         if (key.getModifiers().isCommandDown() && (key.getKeyCode() == 'v' || key.getKeyCode() == 'V'))
         {
             if (shortcutTargetFromContent_ != nullptr)

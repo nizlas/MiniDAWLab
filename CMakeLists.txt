@@ -1051,6 +1051,7 @@ juce_generate_juce_header(SoloFocusedTests)
 juce_add_console_app(CollapsibleTrackGroupFocusedTests PRODUCT_NAME "CollapsibleTrackGroupFocusedTests")
 target_sources(CollapsibleTrackGroupFocusedTests PRIVATE
     tests/selftest/CollapsibleTrackGroupFocusedTestsMain.cpp
+    src/app/ClipPasteboardController.cpp
     src/app/UndoRedoCoordinator.cpp
     src/audio/LatencySettingsStore.cpp
     src/diagnostics/StabilityDiagnosticLog.cpp

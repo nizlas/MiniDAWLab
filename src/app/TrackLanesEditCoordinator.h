@@ -99,6 +99,12 @@ public:
             const std::vector<InstrumentRuntimeCoordinator::ArrangementMidiRelocation>&)>
             applyMidiRelocations);
 
+    /// Move / the coordinator's own clip move record selection identities on the undo step.
+    void setArrangementSelectionUndoNote(std::function<void(ArrangementSelectionUndoSides)> fn) noexcept
+    {
+        noteArrangementSelection_ = std::move(fn);
+    }
+
     TrackLanesEditCoordinator(Session& session,
                               PlaybackEngine& playbackEngine,
                               PluginInsertHost& pluginHost,
@@ -154,4 +160,5 @@ private:
     std::function<InstrumentRuntimeCoordinator::ArrangementMidiRelocationResult(
         const std::vector<InstrumentRuntimeCoordinator::ArrangementMidiRelocation>&)>
         applyArrangementMidiRelocations_;
+    std::function<void(ArrangementSelectionUndoSides)> noteArrangementSelection_;
 };

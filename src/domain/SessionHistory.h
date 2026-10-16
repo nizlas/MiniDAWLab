@@ -87,6 +87,29 @@ struct TrackColourUndoSides
     TrackColourKey after = TrackColourKey::DefaultGrey;
 };
 
+/// UI-only identity of one arrangement event. Not project state and not a reason to record a
+/// step by itself: it rides on a Move / Delete / Cut / Paste step so undo and redo can put the
+/// selection back. Audio ids survive a move. MIDI ids are the ids that exist on that side of the
+/// step (a cross-track move assigns new ones).
+enum class ArrangementEventSelectionKind : std::uint8_t
+{
+    AudioClip = 0,
+    MidiClip
+};
+
+struct ArrangementEventSelectionRef
+{
+    ArrangementEventSelectionKind kind = ArrangementEventSelectionKind::AudioClip;
+    TrackId trackId = kInvalidTrackId;
+    std::uint64_t eventId = 0;
+};
+
+struct ArrangementSelectionUndoSides
+{
+    std::vector<ArrangementEventSelectionRef> before;
+    std::vector<ArrangementEventSelectionRef> after;
+};
+
 struct SessionHistoryRestoreBundle
 {
     /// Always non-null when `popUndo` / `popRedo` returns has_value.
@@ -103,6 +126,9 @@ struct SessionHistoryRestoreBundle
     std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides {};
     /// Track-colour step: apply `before` (undo) / `after` (redo) to that one track's colour.
     std::optional<TrackColourUndoSides> trackColourSides {};
+    /// Arrangement event selection for this step. Apply `before` on undo and `after` on redo,
+    /// after the model restore has cleared transient UI selection. Never written to the project.
+    std::optional<ArrangementSelectionUndoSides> arrangementSelection {};
     /// True: popped from redo stack (apply `pluginSides->after`), false: undo (apply `before`).
     bool isRedo = false;
 };
@@ -127,7 +153,9 @@ public:
                 std::optional<SoloMemoryUndoSides> soloMemorySides = std::nullopt,
                 std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides
                 = std::nullopt,
-                std::optional<TrackColourUndoSides> trackColourSides = std::nullopt) noexcept;
+                std::optional<TrackColourUndoSides> trackColourSides = std::nullopt,
+                std::optional<ArrangementSelectionUndoSides> arrangementSelection
+                = std::nullopt) noexcept;
 
     /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
     /// restore (`pluginSides` present — caller applies `before` chain).
@@ -152,6 +180,7 @@ private:
         std::optional<SoloMemoryUndoSides> soloMemorySides;
         std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides;
         std::optional<TrackColourUndoSides> trackColourSides;
+        std::optional<ArrangementSelectionUndoSides> arrangementSelection;
     };
 
     int maxSteps_;

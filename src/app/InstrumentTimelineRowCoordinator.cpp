@@ -1131,11 +1131,34 @@ private:
                                 return false;
                             }
                             InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
+                            const std::vector<InstrumentMidiClipId> beforeIds = clipIdsOrdered;
                             std::vector<InstrumentMidiClipId> ids = std::move(clipIdsOrdered);
-                            const bool ok
-                                = rc.moveInstrumentMidiClipsBetweenTracks(srcTid, destTid, std::move(ids), dCommit);
+                            std::vector<InstrumentMidiClipId> newIds;
+                            const bool ok = rc.moveInstrumentMidiClipsBetweenTracks(
+                                srcTid, destTid, std::move(ids), dCommit, false, &newIds);
                             if (ok)
                             {
+                                if (owner_.noteArrangementSelection_)
+                                {
+                                    ArrangementSelectionUndoSides sides;
+                                    for (const InstrumentMidiClipId id : beforeIds)
+                                    {
+                                        ArrangementEventSelectionRef ref;
+                                        ref.kind = ArrangementEventSelectionKind::MidiClip;
+                                        ref.trackId = srcTid;
+                                        ref.eventId = id;
+                                        sides.before.push_back(ref);
+                                    }
+                                    for (const InstrumentMidiClipId id : newIds)
+                                    {
+                                        ArrangementEventSelectionRef ref;
+                                        ref.kind = ArrangementEventSelectionKind::MidiClip;
+                                        ref.trackId = destTid;
+                                        ref.eventId = id;
+                                        sides.after.push_back(ref);
+                                    }
+                                    owner_.noteArrangementSelection_(std::move(sides));
+                                }
                                 if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
                                 {
                                     owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(destTid);
@@ -1175,7 +1198,22 @@ private:
                         {
                             return false;
                         }
+                        const std::vector<InstrumentMidiClipId> ids = ctl->getSelectedClipIds();
                         const bool ok = ctl->moveSelectedInstrumentMidiClipsByDeltaSamples(dCommit);
+                        if (ok && owner_.noteArrangementSelection_)
+                        {
+                            ArrangementSelectionUndoSides sides;
+                            for (const InstrumentMidiClipId id : ids)
+                            {
+                                ArrangementEventSelectionRef ref;
+                                ref.kind = ArrangementEventSelectionKind::MidiClip;
+                                ref.trackId = laneTid;
+                                ref.eventId = id;
+                                sides.before.push_back(ref);
+                                sides.after.push_back(ref);
+                            }
+                            owner_.noteArrangementSelection_(std::move(sides));
+                        }
                         if (ok)
                         {
                             owner_.trackLanes_.repaint();

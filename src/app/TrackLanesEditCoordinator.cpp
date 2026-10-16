@@ -353,6 +353,7 @@ void TrackLanesEditCoordinator::install()
                         return false;
                     }
                     bool found = false;
+                    TrackId ownerId = kInvalidTrackId;
                     for (int ti = 0; ti < snapBefore->getNumTracks(); ++ti)
                     {
                         const Track& tr = snapBefore->getTrack(ti);
@@ -361,6 +362,7 @@ void TrackLanesEditCoordinator::install()
                             if (tr.getPlacedClip(ci).getId() == clipId)
                             {
                                 found = true;
+                                ownerId = tr.getId();
                                 break;
                             }
                         }
@@ -396,6 +398,18 @@ void TrackLanesEditCoordinator::install()
                     if (snapAfter == snapBefore)
                     {
                         return false;
+                    }
+                    if (noteArrangementSelection_)
+                    {
+                        ArrangementSelectionUndoSides sides;
+                        ArrangementEventSelectionRef ref;
+                        ref.kind = ArrangementEventSelectionKind::AudioClip;
+                        ref.trackId = ownerId;
+                        ref.eventId = clipId;
+                        sides.before.push_back(ref);
+                        ref.trackId = destTrack.value_or(ownerId);
+                        sides.after.push_back(ref);
+                        noteArrangementSelection_(std::move(sides));
                     }
                     callbacks_.syncViewportFromSession();
                     trackLanesView_.syncTracksFromSession();
@@ -1321,9 +1335,10 @@ void TrackLanesEditCoordinator::setArrangementGroupMoveBackends(
                         audioMoves.push_back(move);
                     }
                 }
+                InstrumentRuntimeCoordinator::ArrangementMidiRelocationResult midiResult;
                 if (!midiMoves.empty())
                 {
-                    const auto midiResult = applyArrangementMidiRelocations_(midiMoves);
+                    midiResult = applyArrangementMidiRelocations_(midiMoves);
                     if (!midiResult.ok)
                     {
                         return false;
@@ -1332,6 +1347,41 @@ void TrackLanesEditCoordinator::setArrangementGroupMoveBackends(
                 if (!session_.tryMoveAudioClipsTogether(audioMoves))
                 {
                     return false;
+                }
+                if (noteArrangementSelection_)
+                {
+                    ArrangementSelectionUndoSides sides;
+                    for (const ArrangementEventOrigin& origin : origins)
+                    {
+                        ArrangementEventSelectionRef ref;
+                        ref.kind = origin.id.kind == ArrangementEventKind::MidiClip
+                                       ? ArrangementEventSelectionKind::MidiClip
+                                       : ArrangementEventSelectionKind::AudioClip;
+                        ref.trackId = origin.id.trackId;
+                        ref.eventId = origin.id.eventId;
+                        sides.before.push_back(ref);
+                    }
+                    for (const ArrangementMoveDest& dest : plan.dests)
+                    {
+                        if (dest.id.kind != ArrangementEventKind::AudioClip)
+                        {
+                            continue;
+                        }
+                        ArrangementEventSelectionRef ref;
+                        ref.kind = ArrangementEventSelectionKind::AudioClip;
+                        ref.trackId = dest.destTrackId;
+                        ref.eventId = dest.id.eventId;
+                        sides.after.push_back(ref);
+                    }
+                    for (const auto& landed : midiResult.landed)
+                    {
+                        ArrangementEventSelectionRef ref;
+                        ref.kind = ArrangementEventSelectionKind::MidiClip;
+                        ref.trackId = landed.first;
+                        ref.eventId = landed.second;
+                        sides.after.push_back(ref);
+                    }
+                    noteArrangementSelection_(std::move(sides));
                 }
                 if (callbacks_.syncViewportFromSession)
                 {

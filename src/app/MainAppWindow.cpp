@@ -564,6 +564,20 @@ public:
                 // repaint headers + lanes (cached wave rasters re-derive their fill).
                 [this] { trackLanesView.refreshTrackColoursFromSession(); },
             });
+        undoRedoCoordinator_->setArrangementSelectionRestoreHandler(
+            [this](const std::vector<ArrangementEventSelectionRef>& refs) {
+                std::vector<ArrangementEventId> ids;
+                ids.reserve(refs.size());
+                for (const ArrangementEventSelectionRef& ref : refs)
+                {
+                    ids.push_back(ArrangementEventId {
+                        ref.kind == ArrangementEventSelectionKind::MidiClip ? ArrangementEventKind::MidiClip
+                                                                            : ArrangementEventKind::AudioClip,
+                        ref.trackId,
+                        ref.eventId });
+                }
+                trackLanesView.setArrangementEventSelection(ids);
+            });
 
         audioClipImportCoordinator_ = std::make_unique<AudioClipImportCoordinator>(
             session,
@@ -1696,18 +1710,11 @@ public:
         clipPasteCallbacks.isCountInActive = [this] {
             return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
         };
-        clipPasteCallbacks.executeUndoableSessionEdit
+        clipPasteCallbacks.executeUndoableArrangementEdit
             = [this](const juce::String& label, std::function<bool()> mutator) {
                   if (undoRedoCoordinator_ != nullptr)
                   {
-                      undoRedoCoordinator_->executeUndoableSessionEdit(label, std::move(mutator));
-                  }
-              };
-        clipPasteCallbacks.executeUndoableInstrumentEdit
-            = [this](const juce::String& label, std::function<bool()> mutator) {
-                  if (undoRedoCoordinator_ != nullptr)
-                  {
-                      undoRedoCoordinator_->executeUndoableInstrumentEdit(label, std::move(mutator));
+                      undoRedoCoordinator_->executeUndoableArrangementEdit(label, std::move(mutator));
                   }
               };
         clipPasteCallbacks.getInstrumentControllerForTrack = [this](const TrackId tid) {
@@ -1715,23 +1722,20 @@ public:
         };
         clipPasteCallbacks.syncViewportFromSession = [this] { syncViewportFromSession(); };
         clipPasteCallbacks.refreshInstrumentArrangementUi = [this] { refreshInstrumentUi(); };
-        clipPasteCallbacks.openMidiEditorForInstrumentClip = [this](const TrackId timelineTid,
-                                                                     const InstrumentMidiClipId clipId) {
-            if (midiEditorPresenter_ != nullptr)
-            {
-                midiEditorPresenter_->openMidiEditorForInstrumentClip(timelineTid, clipId);
-            }
-        };
+        clipPasteCallbacks.repaintRuler = [this] { rulerView.repaint(); };
+        clipPasteCallbacks.refreshInspector = [this] { inspectorView_.refreshFromSession(); };
         clipPasteCallbacks.snapArrangementTimelineSample
             = [this](std::int64_t s) noexcept { return snapArrangementTimelineSample(s); };
+        clipPasteCallbacks.noteArrangementSelectionUndo
+            = [this](ArrangementSelectionUndoSides sides) {
+                  if (undoRedoCoordinator_ != nullptr)
+                  {
+                      undoRedoCoordinator_->noteArrangementSelectionForCurrentEdit(std::move(sides));
+                  }
+              };
         clipPasteboardController_
             = std::make_unique<ClipPasteboardController>(
-                session,
-                transport,
-                trackLanesView,
-                rulerView,
-                inspectorView_,
-                std::move(clipPasteCallbacks));
+                session, transport, trackLanesView, std::move(clipPasteCallbacks));
 
         addInstrumentTrackCoordinator_ = std::make_unique<AddInstrumentTrackCoordinator>(
             AddInstrumentTrackCoordinator::Refs{ session, *instrumentRuntimeCoordinator_ },
@@ -2558,6 +2562,23 @@ public:
                 }
                 return instrumentRuntimeCoordinator_->applyArrangementMidiRelocations(moves);
             });
+        trackLanesEditCoordinator_->setArrangementSelectionUndoNote(
+            [this](ArrangementSelectionUndoSides sides) {
+                if (undoRedoCoordinator_ != nullptr)
+                {
+                    undoRedoCoordinator_->noteArrangementSelectionForCurrentEdit(std::move(sides));
+                }
+            });
+        if (instrumentTimelineRowCoordinator_ != nullptr)
+        {
+            instrumentTimelineRowCoordinator_->setArrangementSelectionUndoNote(
+                [this](ArrangementSelectionUndoSides sides) {
+                    if (undoRedoCoordinator_ != nullptr)
+                    {
+                        undoRedoCoordinator_->noteArrangementSelectionForCurrentEdit(std::move(sides));
+                    }
+                });
+        }
         trackLanesEditCoordinator_->setOnMidiInputAssignmentChanged([this] {
             if (liveMidiInputCoordinator_ != nullptr)
             {
@@ -2753,6 +2774,7 @@ public:
 
     void invokeDeleteSelectedPlacedClipFromWindowShortcut() override;
     void invokeCopySelectedClipFromWindowShortcut() override;
+    void invokeCutSelectedClipsFromWindowShortcut() override;
     void invokePasteClipFromWindowShortcut() override;
 
     /// [Message thread] True while the staged project load owns the session (see
@@ -9242,6 +9264,14 @@ void mini_daw_app_transport::TransportControlsContent::invokeCopySelectedClipFro
     if (clipPasteboardController_ != nullptr)
     {
         clipPasteboardController_->invokeCopySelectedClipFromWindowShortcut();
+    }
+}
+
+void mini_daw_app_transport::TransportControlsContent::invokeCutSelectedClipsFromWindowShortcut()
+{
+    if (clipPasteboardController_ != nullptr)
+    {
+        clipPasteboardController_->invokeCutSelectedClipsFromWindowShortcut();
     }
 }
 

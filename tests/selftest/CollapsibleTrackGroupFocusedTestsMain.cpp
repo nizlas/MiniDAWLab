@@ -27,7 +27,9 @@
 // Exit 0 = all checks green.
 // =============================================================================
 
+#include "app/ClipPasteboardController.h"
 #include "app/UndoRedoCoordinator.h"
+#include "ui/ArrangementClipboard.h"
 #include "ui/ArrangementGroupMove.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
@@ -2021,10 +2023,23 @@ void testArrangementMarqueeAndGroupMoveByMouse()
     }
 
     PluginInsertHost pluginHost;
-    int dirty = 0;
-    UndoRedoCoordinator undo(fixture.session, pluginHost, UndoRedoCoordinator::Callbacks{});
-    // The coordinator's dirty hook is optional; count recorded steps instead.
-    juce::ignoreUnused(dirty);
+    UndoRedoCoordinator::Callbacks undoCallbacks;
+    undoCallbacks.cancelAllClipGesturesAndTransientUiState
+        = [&] { fixture.lanes->cancelAllClipGesturesAndTransientUiState(); };
+    undoCallbacks.applyArrangementEventSelection = [&](const std::vector<ArrangementEventSelectionRef>& refs) {
+        std::vector<ArrangementEventId> ids;
+        ids.reserve(refs.size());
+        for (const ArrangementEventSelectionRef& ref : refs)
+        {
+            ids.push_back(ArrangementEventId {
+                ref.kind == ArrangementEventSelectionKind::MidiClip ? ArrangementEventKind::MidiClip
+                                                                    : ArrangementEventKind::AudioClip,
+                ref.trackId,
+                ref.eventId });
+        }
+        fixture.lanes->setArrangementEventSelection(ids);
+    };
+    UndoRedoCoordinator undo(fixture.session, pluginHost, std::move(undoCallbacks));
     fixture.lanes->setOnArrangementGroupMoveRequested(
         [&](const ArrangementGroupMovePlan& plan, const std::vector<ArrangementEventOrigin>& origins) {
             bool committed = false;
@@ -2046,6 +2061,18 @@ void testArrangementMarqueeAndGroupMoveByMouse()
                 {
                     return false;
                 }
+                ArrangementSelectionUndoSides sides;
+                for (size_t i = 0; i < origins.size() && i < plan.dests.size(); ++i)
+                {
+                    ArrangementEventSelectionRef ref;
+                    ref.kind = ArrangementEventSelectionKind::AudioClip;
+                    ref.trackId = origins[i].id.trackId;
+                    ref.eventId = origins[i].id.eventId;
+                    sides.before.push_back(ref);
+                    ref.trackId = plan.dests[i].destTrackId;
+                    sides.after.push_back(ref);
+                }
+                undo.noteArrangementSelectionForCurrentEdit(std::move(sides));
                 fixture.lanes->syncTracksFromSession();
                 committed = true;
                 return true;
@@ -2090,6 +2117,12 @@ void testArrangementMarqueeAndGroupMoveByMouse()
     undo.invokeUndoFromWindowShortcut();
     fixture.lanes->syncTracksFromSession();
     expect(startOf(top) == beforeTop && startOf(below) == beforeBelow, "undo restores both clips");
+    expect(fixture.lanes->arrangementSelectedEventCount() == 2, "undo of the group move selects both clips");
+    undo.invokeRedoFromWindowShortcut();
+    expect(startOf(top) == movedTop && startOf(below) == movedBelow, "redo restores the group move");
+    expect(fixture.lanes->arrangementSelectedEventCount() == 2, "redo of the group move selects both clips");
+    undo.invokeUndoFromWindowShortcut();
+    expect(startOf(top) == beforeTop && startOf(below) == beforeBelow, "second undo returns both clips");
 
     const int stackAfterUndo = undo.undoStackSizeForDiagnostics();
     click(*topLane, body, body + juce::Point<float>(-220.0f, 0.0f));
@@ -2112,6 +2145,258 @@ int runRenderMode(const juce::File& outDir)
 }
 } // namespace
 
+void testArrangementClipboardCommands()
+{
+    const std::vector<TrackKind> kinds { TrackKind::Audio, TrackKind::Master, TrackKind::Audio, TrackKind::Audio };
+    const std::vector<TrackId> ids { 1, 2, 3, 4 };
+    const std::vector<int> open { 0, 0, 0, 0 };
+    const std::vector<ArrangementClipboardSourceSample> sources {
+        { ArrangementEventKind::AudioClip, 0, 1000, 0 },
+        { ArrangementEventKind::MidiClip, 2, 5000, 12 },
+    };
+    std::vector<ArrangementClipboardOffset> offsets;
+    expect(buildArrangementClipboardOffsets(sources, offsets) && offsets.size() == 2,
+           "clipboard offsets keep the intervening track");
+    expect(offsets[0].trackOffset == 0 && offsets[1].trackOffset == 2, "track anchor is the topmost source");
+    expect(offsets[0].startOffsetSamples == 0 && offsets[1].startOffsetSamples == 4000, "time anchor is the earliest start");
+    expect(offsets[1].anchorOffsetFromStartSamples == 12, "MIDI anchor offset is stored");
+    const auto pasted = planArrangementClipboardPaste(offsets, 1, 8000, kinds, ids, open);
+    expect(!pasted.valid && pasted.dests.size() == 2, "one master destination rejects the whole paste");
+    std::vector<int> hidden = open;
+    hidden[1] = 1;
+    hidden[3] = 1;
+    const auto collapsed = planArrangementClipboardPaste(offsets, 1, 8000, kinds, ids, hidden);
+    expect(!collapsed.valid, "a collapsed destination rejects the whole paste");
+    const std::vector<TrackKind> landingKinds { TrackKind::Audio, TrackKind::Audio, TrackKind::Audio,
+                                                TrackKind::Instrument };
+    const auto legal = planArrangementClipboardPaste(offsets, 1, 8000, landingKinds, ids, open);
+    expect(legal.valid, "audio and MIDI land on accepting tracks");
+    expect(legal.dests[0].destTrackIndex == 1 && legal.dests[0].startSamples == 8000
+               && legal.dests[1].destTrackIndex == 3 && legal.dests[1].startSamples == 12000
+               && legal.dests[1].anchorSamples == 12012,
+           "paste keeps the time gap and the skipped track");
+    const std::vector<TrackKind> shiftKinds { TrackKind::Audio, TrackKind::Audio, TrackKind::Instrument,
+                                              TrackKind::Audio };
+    const auto shifted = planArrangementClipboardPaste(offsets, 0, -100, shiftKinds, ids, open);
+    expect(shifted.valid && shifted.dests[0].startSamples == 0 && shifted.dests[1].startSamples == 4000,
+           "a negative time anchor shifts the whole group to 0");
+
+    const juce::File wav = writeToneWav("clipboard-tone.wav", 1.0);
+    GroupFixture fixture(4);
+    fixture.lanes->setSize(1200, 700);
+    const auto snap = fixture.session.loadSessionSnapshotForAudioThread();
+    expect(snap != nullptr && snap->getNumTracks() >= 6, "clipboard fixture has room for a two-track gap");
+    if (snap == nullptr)
+    {
+        return;
+    }
+    std::vector<int> audioIndexes;
+    for (int i = 0; i < snap->getNumTracks(); ++i)
+    {
+        if (snap->getTrack(i).getKind() == TrackKind::Audio)
+        {
+            audioIndexes.push_back(i);
+        }
+    }
+    expect(audioIndexes.size() >= 5, "clipboard fixture has five audio rows");
+    if (audioIndexes.size() < 5)
+    {
+        return;
+    }
+    const int sourceIndexA = audioIndexes[0];
+    const int sourceIndexB = audioIndexes[2];
+    const int anchorIndex = audioIndexes[1];
+    const int farIndex = audioIndexes.back();
+    expect(sourceIndexB - sourceIndexA == 2 && anchorIndex + (sourceIndexB - sourceIndexA) < snap->getNumTracks(),
+           "clipboard fixture can place the pair with one intervening track");
+    const TrackId sourceA = snap->getTrack(sourceIndexA).getId();
+    const TrackId sourceB = snap->getTrack(sourceIndexB).getId();
+    const TrackId anchor = snap->getTrack(anchorIndex).getId();
+    const TrackId destB = snap->getTrack(anchorIndex + (sourceIndexB - sourceIndexA)).getId();
+    const TrackId last = snap->getTrack(farIndex).getId();
+    const auto sec = [](const double s) { return (std::int64_t)std::llround(s * kRate); };
+    expect(fixture.session.addRecordedTakeAtSample(wav, kRate, 1000, sourceA, sec(1.0)).wasOk()
+               && fixture.session.addRecordedTakeAtSample(wav, kRate, 5000, sourceB, sec(1.0)).wasOk(),
+           "two audio clips with a gap and an intervening master");
+    fixture.lanes->syncTracksFromSession();
+    const auto placedOn = [&](const TrackId tid, const int index) -> const PlacedClip* {
+        const auto live = fixture.session.loadSessionSnapshotForAudioThread();
+        const int trackIndex = live != nullptr ? live->findTrackIndexById(tid) : -1;
+        if (live == nullptr || trackIndex < 0 || index >= live->getTrack(trackIndex).getNumPlacedClips())
+        {
+            return nullptr;
+        }
+        return &live->getTrack(trackIndex).getPlacedClip(index);
+    };
+    const PlacedClip* first = placedOn(sourceA, 0);
+    const PlacedClip* second = placedOn(sourceB, 0);
+    expect(first != nullptr && second != nullptr, "both source clips are readable");
+    if (first == nullptr || second == nullptr)
+    {
+        return;
+    }
+    const PlacedClipId firstId = first->getId();
+    const PlacedClipId secondId = second->getId();
+    const AudioClip* const sourceMaterial = first->getMaterial().get();
+    fixture.session.setClipEventAmplitude(firstId, -3.0f, 100, 50);
+    fixture.session.setClipLeftEdgeTrim(firstId, 10);
+    fixture.lanes->syncTracksFromSession();
+    fixture.lanes->setArrangementEventSelection({
+        ArrangementEventId { ArrangementEventKind::AudioClip, sourceA, firstId },
+        ArrangementEventId { ArrangementEventKind::AudioClip, sourceB, secondId },
+    });
+    fixture.lanes->handleHeaderSelectionClick(sourceA, false);
+    expect(fixture.lanes->isHeaderMultiSelected(sourceA), "header selection is independent of the event selection");
+
+    PluginInsertHost pluginHost;
+    int dirty = 0;
+    UndoRedoCoordinator::Callbacks undoCallbacks;
+    undoCallbacks.markProjectDirty = [&] { ++dirty; };
+    undoCallbacks.cancelAllClipGesturesAndTransientUiState
+        = [&] { fixture.lanes->cancelAllClipGesturesAndTransientUiState(); };
+    undoCallbacks.applyArrangementEventSelection = [&](const std::vector<ArrangementEventSelectionRef>& refs) {
+        std::vector<ArrangementEventId> ids;
+        for (const ArrangementEventSelectionRef& ref : refs)
+        {
+            ids.push_back(ArrangementEventId { ArrangementEventKind::AudioClip, ref.trackId, ref.eventId });
+        }
+        fixture.lanes->setArrangementEventSelection(ids);
+    };
+    UndoRedoCoordinator undo(fixture.session, pluginHost, std::move(undoCallbacks));
+    ClipPasteboardController::Callbacks pasteCallbacks;
+    pasteCallbacks.isRecording = [] { return false; };
+    pasteCallbacks.isCountInActive = [] { return false; };
+    pasteCallbacks.snapArrangementTimelineSample = [](std::int64_t) { return std::int64_t { 100000 }; };
+    pasteCallbacks.executeUndoableArrangementEdit
+        = [&](const juce::String& label, std::function<bool()> mutator) {
+              undo.executeUndoableArrangementEdit(label, std::move(mutator));
+          };
+    pasteCallbacks.noteArrangementSelectionUndo = [&](ArrangementSelectionUndoSides sides) {
+        undo.noteArrangementSelectionForCurrentEdit(std::move(sides));
+    };
+    ClipPasteboardController clipboard(fixture.session, fixture.transport, *fixture.lanes, std::move(pasteCallbacks));
+
+    fixture.session.setActiveTrack(last);
+    clipboard.invokePasteClipFromWindowShortcut();
+    expect(undo.undoStackSizeForDiagnostics() == 0 && dirty == 0, "paste with an empty clipboard records nothing");
+    clipboard.invokeCopySelectedClipFromWindowShortcut();
+    expect(fixture.lanes->isHeaderMultiSelected(sourceA), "copy leaves the header multi-selection alone");
+    clipboard.invokePasteClipFromWindowShortcut();
+    expect(undo.undoStackSizeForDiagnostics() == 0 && dirty == 0, "one destination past the track list rejects the paste");
+    std::vector<int> foldIndexes;
+    for (int i = anchorIndex; i <= anchorIndex + (sourceIndexB - sourceIndexA); ++i)
+    {
+        foldIndexes.push_back(i);
+    }
+    const auto folded = fixture.makeGroup(foldIndexes, "Folded paste");
+    expect(folded.has_value(), "collapsed paste target group");
+    if (folded.has_value())
+    {
+        fixture.setCollapsed(*folded, true);
+        fixture.session.setActiveTrack(anchor);
+        clipboard.invokePasteClipFromWindowShortcut();
+        expect(undo.undoStackSizeForDiagnostics() == 0 && dirty == 0, "a collapsed destination rejects the paste");
+        fixture.setCollapsed(*folded, false);
+    }
+    fixture.session.setActiveTrack(anchor);
+    clipboard.invokePasteClipFromWindowShortcut();
+    expect(undo.undoStackSizeForDiagnostics() == 1 && dirty == 1, "a two-track paste is one undo step");
+    const PlacedClip* pastedA = placedOn(anchor, 0);
+    const PlacedClip* pastedB = placedOn(destB, 0);
+    expect(pastedA != nullptr && pastedB != nullptr, "paste lands on the anchor and two tracks below");
+    if (pastedA != nullptr && pastedB != nullptr)
+    {
+        const PlacedClip* const srcANow = placedOn(sourceA, 0);
+        const PlacedClip* const srcBNow = placedOn(sourceB, 0);
+        expect(srcANow != nullptr && srcBNow != nullptr
+                   && pastedA->getStartSample() - pastedB->getStartSample()
+                          == srcANow->getStartSample() - srcBNow->getStartSample()
+                   && std::min(pastedA->getStartSample(), pastedB->getStartSample()) == 100000,
+               "relative start times survive paste");
+        expect(pastedA->getId() != firstId && pastedA->getMaterial().get() == sourceMaterial,
+               "the copy has its own id and the same audio material");
+        expect(pastedA->getEventGainDb() == -3.0f && pastedA->getFadeInSamples() == 100
+                   && pastedA->getFadeOutSamples() == 50 && pastedA->getLeftTrimSamples() == 10,
+               "gain, fades and trim are copied");
+        const PlacedClipId pastedAId = pastedA->getId();
+        fixture.session.setClipEventAmplitude(pastedAId, -6.0f, 1, 2);
+        const PlacedClip* sourceAfter = placedOn(sourceA, 0);
+        const PlacedClip* pastedAfter = placedOn(anchor, 0);
+        expect(sourceAfter != nullptr && sourceAfter->getEventGainDb() == -3.0f
+                   && pastedAfter != nullptr && pastedAfter->getEventGainDb() == -6.0f,
+               "editing the copy does not change the source");
+    }
+    std::vector<ArrangementEventId> pastedSelection;
+    fixture.lanes->copyArrangementEventSelection(pastedSelection);
+    expect(pastedSelection.size() == 2, "the pasted pair is selected");
+    expect(pastedSelection.size() == 2
+               && pastedSelection[0].eventId != firstId && pastedSelection[1].eventId != secondId
+               && pastedSelection[0].eventId != pastedSelection[1].eventId,
+           "the pasted selection is the new clips");
+
+    fixture.lanes->setArrangementEventSelection({
+        ArrangementEventId { ArrangementEventKind::AudioClip, sourceA, firstId },
+        ArrangementEventId { ArrangementEventKind::AudioClip, sourceB, secondId },
+    });
+    const int undoBeforeDelete = undo.undoStackSizeForDiagnostics();
+    clipboard.invokeDeleteSelectedPlacedClipFromWindowShortcut();
+    expect(undo.undoStackSizeForDiagnostics() == undoBeforeDelete + 1, "delete of both clips is one undo step");
+    expect(placedOn(sourceA, 0) == nullptr && placedOn(sourceB, 0) == nullptr, "delete removes every selected clip");
+    const int undoBeforeSecondPaste = undo.undoStackSizeForDiagnostics();
+    clipboard.invokePasteClipFromWindowShortcut();
+    expect(undo.undoStackSizeForDiagnostics() == undoBeforeSecondPaste + 1 && placedOn(anchor, 0) != nullptr,
+           "the clipboard still pastes after the sources are deleted");
+    undo.invokeUndoFromWindowShortcut();
+    undo.invokeUndoFromWindowShortcut();
+    expect(placedOn(sourceA, 0) != nullptr && placedOn(sourceB, 0) != nullptr, "undo of delete restores both sources");
+    expect(fixture.lanes->arrangementSelectedEventCount() == 2, "undo of delete selects the restored clips");
+    undo.invokeRedoFromWindowShortcut();
+    expect(placedOn(sourceA, 0) == nullptr && fixture.lanes->arrangementSelectedEventCount() == 0,
+           "redo of delete removes the clips and clears that selection");
+    undo.invokeUndoFromWindowShortcut();
+
+    fixture.lanes->setArrangementEventSelection({
+        ArrangementEventId { ArrangementEventKind::AudioClip, sourceA, firstId },
+        ArrangementEventId { ArrangementEventKind::AudioClip, sourceB, secondId },
+    });
+    const int undoBeforeCut = undo.undoStackSizeForDiagnostics();
+    const int dirtyBeforeCut = dirty;
+    clipboard.invokeCutSelectedClipsFromWindowShortcut();
+    expect(undo.undoStackSizeForDiagnostics() == undoBeforeCut + 1 && dirty == dirtyBeforeCut + 1,
+           "cut copies and deletes in one undo step");
+    expect(placedOn(sourceA, 0) == nullptr && placedOn(sourceB, 0) == nullptr, "cut removes the whole selection");
+    undo.invokeUndoFromWindowShortcut();
+    expect(placedOn(sourceA, 0) != nullptr && fixture.lanes->arrangementSelectedEventCount() == 2,
+           "undo of cut restores and selects both clips");
+    clipboard.invokePasteClipFromWindowShortcut();
+    expect(placedOn(anchor, 0) != nullptr, "the cut clipboard pastes after undo brings the sources back");
+
+    fixture.lanes->setArrangementEventSelection({
+        ArrangementEventId { ArrangementEventKind::AudioClip, sourceA, firstId },
+    });
+    fixture.session.setActiveTrack(sourceB);
+    ClipPasteboardController::Callbacks singleCallbacks;
+    singleCallbacks.isRecording = [] { return false; };
+    singleCallbacks.isCountInActive = [] { return false; };
+    singleCallbacks.snapArrangementTimelineSample = [](std::int64_t) { return std::int64_t { 2000 }; };
+    singleCallbacks.executeUndoableArrangementEdit = [&](const juce::String& label, std::function<bool()> mutator) {
+        undo.executeUndoableArrangementEdit(label, std::move(mutator));
+    };
+    singleCallbacks.noteArrangementSelectionUndo = [&](ArrangementSelectionUndoSides sides) {
+        undo.noteArrangementSelectionForCurrentEdit(std::move(sides));
+    };
+    ClipPasteboardController singlePaste(fixture.session, fixture.transport, *fixture.lanes, std::move(singleCallbacks));
+    // The first controller owns the clipboard. Paste from it still uses its snap of 100000.
+    // Copy again into the single controller, then paste.
+    singlePaste.invokeCopySelectedClipFromWindowShortcut();
+    const int undoBeforeSingle = undo.undoStackSizeForDiagnostics();
+    singlePaste.invokePasteClipFromWindowShortcut();
+    expect(undo.undoStackSizeForDiagnostics() == undoBeforeSingle + 1, "a single clip paste is still one undo step");
+    const PlacedClip* single = placedOn(sourceB, 0);
+    expect(single != nullptr && single->getStartSample() == 2000 && single->getEventGainDb() == -3.0f,
+           "a single clip still pastes at the playhead on the active track");
+}
+
 int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceGui;
@@ -2123,6 +2408,7 @@ int main(int argc, char** argv)
 
     testArrangementGroupMovePlanAndRowHit();
     testArrangementMarqueeAndGroupMoveByMouse();
+    testArrangementClipboardCommands();
     testHeaderSelectionAndCreateValidation();
     testCollapsedLayoutExactFourPx();
     testCollapsedMiniViewClipIntervals();
@@ -2178,6 +2464,20 @@ void InstrumentTrackController::replaceInstrumentMidiClipSelectionOrdered(
     std::vector<InstrumentMidiClipId>) noexcept
 {
     jassertfalse;
+}
+
+bool InstrumentTrackController::removeInstrumentMidiClipsByIds(const std::vector<InstrumentMidiClipId>&) noexcept
+{
+    jassertfalse;
+    return false;
+}
+
+std::vector<InstrumentMidiClipId> InstrumentTrackController::appendDeepCopiedInstrumentMidiClips(
+    const std::vector<InstrumentMidiClip>&,
+    const std::vector<std::pair<std::int64_t, std::int64_t>>&) noexcept
+{
+    jassertfalse;
+    return {};
 }
 
 InstrumentTrackController* InstrumentRuntimeCoordinator::getMidiClipControllerForTrack(const TrackId) const noexcept

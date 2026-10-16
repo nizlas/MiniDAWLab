@@ -4791,6 +4791,59 @@ std::int64_t TrackLanesView::snapArrangementSampleNonNegative(std::int64_t sampl
     return sample;
 }
 
+void TrackLanesView::copyArrangementEventSelection(std::vector<ArrangementEventId>& out)
+{
+    collectArrangementSelection(out);
+}
+
+void TrackLanesView::setArrangementEventSelection(const std::vector<ArrangementEventId>& ids) noexcept
+{
+    std::vector<ArrangementEventId> visible;
+    visible.reserve(ids.size());
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    for (const ArrangementEventId& id : ids)
+    {
+        if (id.trackId == kInvalidTrackId || isTrackInCollapsedVisualGroup(id.trackId))
+        {
+            continue;
+        }
+        if (id.kind == ArrangementEventKind::AudioClip)
+        {
+            if (snap == nullptr)
+            {
+                continue;
+            }
+            const int trackIndex = snap->findTrackIndexById(id.trackId);
+            if (trackIndex < 0)
+            {
+                continue;
+            }
+            const Track& track = snap->getTrack(trackIndex);
+            bool found = false;
+            for (int i = 0; i < track.getNumPlacedClips(); ++i)
+            {
+                if (track.getPlacedClip(i).getId() == id.eventId)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                continue;
+            }
+        }
+        else if (arrangementRuntime_ == nullptr
+                 || arrangementRuntime_->getMidiClipControllerForTrack(id.trackId) == nullptr
+                 || arrangementRuntime_->getMidiClipControllerForTrack(id.trackId)->getClipById(id.eventId) == nullptr)
+        {
+            continue;
+        }
+        visible.push_back(id);
+    }
+    applyArrangementSelection(visible);
+}
+
 void TrackLanesView::collectArrangementSelection(std::vector<ArrangementEventId>& out)
 {
     out.clear();

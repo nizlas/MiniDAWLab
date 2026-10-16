@@ -96,6 +96,11 @@ public:
         /// lanes (cached event rasters re-derive their fill) — no audio-side state is involved.
         /// NOTE: appended LAST on purpose — callers use positional aggregate init.
         std::function<void()> refreshTrackColoursAfterUndoRestore;
+
+        /// After undo/redo has restored the model and cleared transient selection, put back the
+        /// event selection recorded with that step. Empty means the selection for this step is
+        /// empty (redo of Delete/Cut). Absent callback: selection stays cleared.
+        std::function<void(const std::vector<ArrangementEventSelectionRef>&)> applyArrangementEventSelection;
     };
 
     UndoRedoCoordinator(Session& session, PluginInsertHost& pluginHost, Callbacks callbacks);
@@ -167,6 +172,15 @@ public:
     /// when the mutator changes neither side. Marks the project dirty only when a step is recorded.
     void executeUndoableArrangementEdit(const juce::String& label, std::function<bool()> mutator);
 
+    /// The in-progress edit's selection identities. Consumed by the next recorded step and
+    /// discarded when that edit records nothing. Does not record a step by itself.
+    void noteArrangementSelectionForCurrentEdit(ArrangementSelectionUndoSides sides) noexcept;
+
+    /// Installed after construction so the composition root can name `trackLanesView` without
+    /// extending the positional callback list.
+    void setArrangementSelectionRestoreHandler(
+        std::function<void(const std::vector<ArrangementEventSelectionRef>&)> fn) noexcept;
+
     /// Delete Track: like `executeUndoableSessionEdit`, but the mutator may also hand back the
     /// pre-teardown insert chain (`outPluginSides`) and, for instrument tracks, the full captured
     /// project row (`outInstrumentDelete`) so undo can restore inserts and the instrument runtime.
@@ -181,6 +195,17 @@ public:
 
 private:
     void refreshAfterSessionSnapshotRestore();
+    void restoreArrangementSelectionFromBundle(const SessionHistoryRestoreBundle& bundle);
+    void commitRecord(juce::String label,
+                      std::shared_ptr<const SessionSnapshot> before,
+                      std::shared_ptr<const SessionSnapshot> after,
+                      std::optional<PluginUndoStepSides> pluginSides = std::nullopt,
+                      std::optional<InstrumentUndoStepSides> instrumentSides = std::nullopt,
+                      std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete = std::nullopt,
+                      std::optional<SoloMemoryUndoSides> soloMemorySides = std::nullopt,
+                      std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides = std::nullopt,
+                      std::optional<TrackColourUndoSides> trackColourSides = std::nullopt);
+    void discardArrangementSelectionNote() noexcept;
     /// Instrument-runtime side of a structural step (Delete / Duplicate Track): recreate when the
     /// restored timeline contains the row, retire when it does not.
     void applyInstrumentTrackRuntimeSides(const InstrumentTrackDeleteUndoSides& sides,
@@ -194,4 +219,5 @@ private:
     PluginInsertHost& pluginHost_;
     Callbacks callbacks_;
     SessionHistory sessionHistory_;
+    std::optional<ArrangementSelectionUndoSides> pendingArrangementSelection_;
 };

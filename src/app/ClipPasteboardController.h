@@ -2,60 +2,58 @@
 
 #include <JuceHeader.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
 
 #include "domain/AudioClip.h"
+#include "domain/SessionHistory.h"
 #include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h"
+#include "ui/ArrangementClipboard.h"
 
 class Session;
 class Transport;
 class TrackLanesView;
-class TimelineRulerView;
-class InspectorView;
 
-/// Message-thread clip clipboard for window shortcuts (delete/copy/paste). Delegates undo session
-/// edits and instrument musical edits to the owner via callbacks.
+/// Message-thread clipboard for arrangement Delete / Cut / Copy / Paste.
+/// One selected event and several selected events share this path. Copy stores event
+/// values (shared audio material, copied MIDI clips, relative time and track offsets),
+/// not pointers into the live session. Delete, Cut and Paste are each one undo step.
+/// Copy does not change the project.
 class ClipPasteboardController
 {
 public:
-    enum class PayloadKind : std::uint8_t
-    {
-        None = 0,
-        Audio,
-        InstrumentMidi,
-    };
-
     struct Callbacks
     {
         std::function<bool()> isRecording;
         std::function<bool()> isCountInActive;
-        std::function<void(const juce::String& label, std::function<bool()> mutator)> executeUndoableSessionEdit;
-        std::function<void(const juce::String& label, std::function<bool()> mutator)> executeUndoableInstrumentEdit;
+        std::function<void(const juce::String& label, std::function<bool()> mutator)> executeUndoableArrangementEdit;
         std::function<InstrumentTrackController*(TrackId)> getInstrumentControllerForTrack;
         std::function<void()> syncViewportFromSession;
         std::function<void()> refreshInstrumentArrangementUi;
-        std::function<void(TrackId timelineInstrumentTrackId, InstrumentMidiClipId clipId)> openMidiEditorForInstrumentClip;
+        std::function<void()> repaintRuler;
+        std::function<void()> refreshInspector;
         std::function<std::int64_t(std::int64_t timelineSample)> snapArrangementTimelineSample;
+        std::function<void(ArrangementSelectionUndoSides)> noteArrangementSelectionUndo;
     };
 
     ClipPasteboardController(Session& session,
                              Transport& transport,
                              TrackLanesView& trackLanesView,
-                             TimelineRulerView& rulerView,
-                             InspectorView& inspectorView,
                              Callbacks callbacks);
 
     void invokeDeleteSelectedPlacedClipFromWindowShortcut();
     void invokeCopySelectedClipFromWindowShortcut();
+    void invokeCutSelectedClipsFromWindowShortcut();
     void invokePasteClipFromWindowShortcut();
 
 private:
-    struct InternalClipPasteboard
+    struct ClipboardItem
     {
+        ArrangementClipboardOffset offset;
         std::shared_ptr<const AudioClip> material;
         std::int64_t leftTrimSamples = 0;
         std::int64_t visibleLengthSamples = 0;
@@ -64,26 +62,27 @@ private:
         float eventGainDb = 0.0f;
         std::int64_t fadeInSamples = 0;
         std::int64_t fadeOutSamples = 0;
+        juce::String displayName;
+        InstrumentMidiClip midiClip;
     };
 
-    struct InternalInstrumentMidiPasteboard
+    struct ClipboardPayload
     {
-        TrackId sourceTrackId = kInvalidTrackId;
-        std::int64_t groupEarliestStartSamples = 0;
-        /// Sorted by original `startSamples`. `InstrumentMidiClip::id` fields are stale and ignored on paste.
-        std::vector<InstrumentMidiClip> clipsSortedByOriginalStart;
+        std::vector<ClipboardItem> items;
+        /// Set when every item is MIDI on one source track, so a single-track paste can
+        /// still use the previous target rule if that track still owns MIDI clips.
+        TrackId midiSameTrackSourceId = kInvalidTrackId;
     };
 
+    [[nodiscard]] std::optional<ClipboardPayload> captureSelection();
+    [[nodiscard]] bool selectionIsMidiOnOneTrack(const ClipboardPayload& payload) const noexcept;
     [[nodiscard]] TrackId resolveInstrumentMidiPasteTargetTrack(TrackId sourceTrackFromPasteboard) const noexcept;
+    void deleteCurrentSelection(const juce::String& labelOverride = {});
+    void refreshAfterEdit() const;
 
     Session& session_;
     Transport& transport_;
     TrackLanesView& trackLanesView_;
-    TimelineRulerView& rulerView_;
-    InspectorView& inspectorView_;
     Callbacks callbacks_;
-
-    PayloadKind payloadKind_ = PayloadKind::None;
-    std::optional<InternalClipPasteboard> audioPasteboard_;
-    std::optional<InternalInstrumentMidiPasteboard> instrumentMidiPasteboard_;
+    std::optional<ClipboardPayload> clipboard_;
 };

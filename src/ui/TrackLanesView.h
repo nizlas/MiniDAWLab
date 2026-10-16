@@ -601,6 +601,11 @@ public:
     void setOnArrangementGroupMoveRequested(
         std::function<bool(const ArrangementGroupMovePlan&, const std::vector<ArrangementEventOrigin>&)> fn) noexcept;
     [[nodiscard]] int arrangementSelectedEventCount() noexcept;
+    /// Current arrangement event selection (audio and MIDI). Header multi-select is not included.
+    void copyArrangementEventSelection(std::vector<ArrangementEventId>& out);
+    /// Replace the arrangement event selection. Events on a collapsed visual group, and events
+    /// that are not in the session, are left out. Does not mark the project dirty.
+    void setArrangementEventSelection(const std::vector<ArrangementEventId>& ids) noexcept;
     [[nodiscard]] int sessionTrackIndexAtLocalPoint(juce::Point<int> localPoint) const noexcept;
     bool armArrangementMarquee(juce::Point<int> localPoint, bool shiftAdds) noexcept;
     bool beginArrangementGroupDrag(ArrangementEventId grabbed, juce::Point<int> localPoint) noexcept;

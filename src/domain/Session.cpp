@@ -1123,6 +1123,163 @@ bool Session::tryMoveAudioClipsTogether(const std::vector<AudioClipGroupRelocati
     return true;
 }
 
+bool Session::tryRemovePlacedClipsTogether(
+    const std::vector<std::pair<TrackId, PlacedClipId>>& clips) noexcept
+{
+    if (clips.empty())
+    {
+        return true;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    for (const auto& clip : clips)
+    {
+        const int trackIndex = current->findTrackIndexById(clip.first);
+        if (trackIndex < 0 || clip.second == kInvalidPlacedClipId)
+        {
+            return false;
+        }
+        const Track& track = current->getTrack(trackIndex);
+        bool found = false;
+        for (int i = 0; i < track.getNumPlacedClips(); ++i)
+        {
+            if (track.getPlacedClip(i).getId() == clip.second)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            return false;
+        }
+    }
+    std::shared_ptr<const SessionSnapshot> working = current;
+    for (const auto& clip : clips)
+    {
+        working = SessionSnapshot::withPlacedClipRemoved(*working, clip.first, clip.second);
+        if (working == nullptr)
+        {
+            return false;
+        }
+        const int trackIndex = working->findTrackIndexById(clip.first);
+        if (trackIndex >= 0)
+        {
+            const Track& track = working->getTrack(trackIndex);
+            for (int i = 0; i < track.getNumPlacedClips(); ++i)
+            {
+                if (track.getPlacedClip(i).getId() == clip.second)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, working, std::memory_order_release);
+    return true;
+}
+
+Session::AudioClipPasteResult Session::tryPasteAudioClipsTogether(
+    const std::vector<AudioClipPastePlacement>& placements) noexcept
+{
+    AudioClipPasteResult result;
+    if (placements.empty())
+    {
+        result.ok = true;
+        return result;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return result;
+    }
+    for (const AudioClipPastePlacement& placement : placements)
+    {
+        if (placement.material == nullptr || placement.visibleLengthSamples <= 0
+            || placement.leftTrimSamples < 0 || placement.startSampleOnTimeline < 0
+            || placement.destTrackId == kInvalidTrackId)
+        {
+            return result;
+        }
+        const int destIndex = current->findTrackIndexById(placement.destTrackId);
+        if (destIndex < 0
+            || !trackKindAcceptsTimelineAudioClips(current->getTrack(destIndex).getKind()))
+        {
+            return result;
+        }
+    }
+
+    std::shared_ptr<const SessionSnapshot> working = current;
+    PlacedClipId nextId = nextPlacedClipId_;
+    result.newIds.reserve(placements.size());
+    for (const AudioClipPastePlacement& placement : placements)
+    {
+        const PlacedClipId id = nextId++;
+        working = SessionSnapshot::withClipAddedAsNewestOnTargetTrack(
+            *working,
+            id,
+            placement.material,
+            placement.startSampleOnTimeline,
+            placement.destTrackId,
+            placement.leftTrimSamples,
+            placement.visibleLengthSamples,
+            placement.materialWindowStartSamples,
+            placement.materialWindowEndExclusiveSamples);
+        if (working == nullptr)
+        {
+            result.newIds.clear();
+            return result;
+        }
+        bool added = false;
+        const int destIndex = working->findTrackIndexById(placement.destTrackId);
+        if (destIndex >= 0)
+        {
+            const Track& track = working->getTrack(destIndex);
+            for (int i = 0; i < track.getNumPlacedClips(); ++i)
+            {
+                if (track.getPlacedClip(i).getId() == id)
+                {
+                    added = true;
+                    break;
+                }
+            }
+        }
+        if (!added)
+        {
+            result.newIds.clear();
+            return result;
+        }
+        if (placement.eventGainDb != 0.0f || placement.fadeInSamples != 0 || placement.fadeOutSamples != 0)
+        {
+            working = SessionSnapshot::withClipEventAmplitude(
+                *working, id, placement.eventGainDb, placement.fadeInSamples, placement.fadeOutSamples);
+            if (working == nullptr)
+            {
+                result.newIds.clear();
+                return result;
+            }
+        }
+        const juce::String name = placement.displayName.trim();
+        if (name.isNotEmpty())
+        {
+            working = SessionSnapshot::withClipRenamed(*working, id, name);
+            if (working == nullptr)
+            {
+                result.newIds.clear();
+                return result;
+            }
+        }
+        result.newIds.push_back(id);
+    }
+    nextPlacedClipId_ = nextId;
+    std::atomic_store_explicit(&sessionSnapshot_, working, std::memory_order_release);
+    result.ok = true;
+    return result;
+}
+
 void Session::moveClip(const PlacedClipId id, const std::int64_t newStartSampleOnTimeline) noexcept
 {
     if (id == kInvalidPlacedClipId)
