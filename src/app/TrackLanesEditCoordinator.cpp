@@ -16,6 +16,7 @@
 #include "plugins/PluginInsertHost.h"
 #include "ui/InspectorView.h"
 #include "ui/TimelineRulerView.h"
+#include "ui/ArrangementGroupMove.h"
 #include "ui/TrackLanesView.h"
 
 namespace
@@ -1221,4 +1222,128 @@ std::optional<TrackId> TrackLanesEditCoordinator::duplicateTrack(const TrackId s
             return true;
         });
     return created;
+}
+
+void TrackLanesEditCoordinator::setArrangementGroupMoveBackends(
+    std::function<void(const juce::String& label, std::function<bool()> mutator)> executeUndoableArrangementEdit,
+    std::function<InstrumentRuntimeCoordinator::ArrangementMidiRelocationResult(
+        const std::vector<InstrumentRuntimeCoordinator::ArrangementMidiRelocation>&)>
+        applyMidiRelocations)
+{
+    executeArrangementEdit_ = std::move(executeUndoableArrangementEdit);
+    applyArrangementMidiRelocations_ = std::move(applyMidiRelocations);
+    trackLanesView_.setOnArrangementGroupMoveRequested(
+        [this](const ArrangementGroupMovePlan& plan, const std::vector<ArrangementEventOrigin>& origins) -> bool {
+            if (callbacks_.isRecording() || callbacks_.isCountInActive() || executeArrangementEdit_ == nullptr)
+            {
+                return false;
+            }
+            const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr || origins.empty() || plan.dests.size() != origins.size())
+            {
+                return false;
+            }
+            for (size_t i = 0; i < origins.size(); ++i)
+            {
+                const ArrangementEventOrigin& origin = origins[i];
+                const ArrangementMoveDest& dest = plan.dests[i];
+                if (!(dest.id == origin.id) || dest.destStartSamples != origin.startSamples + plan.timeDelta
+                    || dest.destTrackIndex != origin.trackIndex + plan.trackDelta
+                    || dest.destStartSamples < 0 || dest.destTrackId == kInvalidTrackId)
+                {
+                    return false;
+                }
+                if (snap->findTrackIndexById(origin.id.trackId) != origin.trackIndex
+                    || snap->findTrackIndexById(dest.destTrackId) != dest.destTrackIndex)
+                {
+                    return false;
+                }
+                if (trackLanesView_.isTrackInCollapsedVisualGroup(dest.destTrackId))
+                {
+                    return false;
+                }
+                const Track& destTrack = snap->getTrack(dest.destTrackIndex);
+                const bool kindOk = origin.id.kind == ArrangementEventKind::AudioClip
+                                        ? trackKindAcceptsTimelineAudioClips(destTrack.getKind())
+                                        : trackKindOwnsTimelineMidiClips(destTrack.getKind());
+                if (!kindOk)
+                {
+                    return false;
+                }
+                if (origin.id.kind == ArrangementEventKind::AudioClip)
+                {
+                    bool found = false;
+                    const Track& owner = snap->getTrack(origin.trackIndex);
+                    for (int ci = 0; ci < owner.getNumPlacedClips(); ++ci)
+                    {
+                        if (owner.getPlacedClip(ci).getId() == origin.id.eventId
+                            && owner.getPlacedClip(ci).getStartSample() == origin.startSamples)
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            bool committed = false;
+            executeArrangementEdit_("Move events", [&]() -> bool {
+                std::vector<InstrumentRuntimeCoordinator::ArrangementMidiRelocation> midiMoves;
+                std::vector<Session::AudioClipGroupRelocation> audioMoves;
+                for (size_t i = 0; i < origins.size(); ++i)
+                {
+                    const ArrangementEventOrigin& origin = origins[i];
+                    const ArrangementMoveDest& dest = plan.dests[i];
+                    if (origin.id.kind == ArrangementEventKind::MidiClip)
+                    {
+                        if (applyArrangementMidiRelocations_ == nullptr)
+                        {
+                            return false;
+                        }
+                        InstrumentRuntimeCoordinator::ArrangementMidiRelocation move;
+                        move.sourceTrackId = origin.id.trackId;
+                        move.destTrackId = dest.destTrackId;
+                        move.clipId = origin.id.eventId;
+                        move.originStartSamples = origin.startSamples;
+                        move.deltaSamples = plan.timeDelta;
+                        midiMoves.push_back(move);
+                    }
+                    else
+                    {
+                        Session::AudioClipGroupRelocation move;
+                        move.id = origin.id.eventId;
+                        move.newStartSampleOnTimeline = dest.destStartSamples;
+                        move.destTrackId = dest.destTrackId;
+                        audioMoves.push_back(move);
+                    }
+                }
+                if (!midiMoves.empty())
+                {
+                    const auto midiResult = applyArrangementMidiRelocations_(midiMoves);
+                    if (!midiResult.ok)
+                    {
+                        return false;
+                    }
+                }
+                if (!session_.tryMoveAudioClipsTogether(audioMoves))
+                {
+                    return false;
+                }
+                if (callbacks_.syncViewportFromSession)
+                {
+                    callbacks_.syncViewportFromSession();
+                }
+                trackLanesView_.syncTracksFromSession();
+                rulerView_.repaint();
+                trackLanesView_.repaint();
+                inspectorView_.refreshFromSession();
+                committed = true;
+                return true;
+            });
+            return committed;
+        });
 }

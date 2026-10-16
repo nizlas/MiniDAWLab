@@ -161,6 +161,12 @@ public:
     /// take leaves no undo step). Marks the project dirty when a step was recorded.
     void executeUndoableRecordingCommit(const juce::String& label, std::function<void()> mutator);
 
+    /// Arrangement group move: ONE undo step that may change the timeline (audio clips) and
+    /// instrument musical state (MIDI clips). `mutator` returns false when the move must not
+    /// stick; this method then restores both sides and records nothing. Nothing is recorded
+    /// when the mutator changes neither side. Marks the project dirty only when a step is recorded.
+    void executeUndoableArrangementEdit(const juce::String& label, std::function<bool()> mutator);
+
     /// Delete Track: like `executeUndoableSessionEdit`, but the mutator may also hand back the
     /// pre-teardown insert chain (`outPluginSides`) and, for instrument tracks, the full captured
     /// project row (`outInstrumentDelete`) so undo can restore inserts and the instrument runtime.

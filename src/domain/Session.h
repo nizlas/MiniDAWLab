@@ -36,6 +36,8 @@
 // =============================================================================
 
 #include "domain/PlacedClip.h"
+
+#include <vector>
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
 #include "domain/VisualTrackGroup.h"
@@ -190,6 +192,21 @@ public:
     // already lives on `targetTrackId` (defensive, see .cpp).
     void moveClipToTrack(
         PlacedClipId id, std::int64_t newStartSampleOnTimeline, TrackId targetTrackId) noexcept;
+
+    /// One audio clip in a group move. `destTrackId` may equal the clip's current track
+    /// (within-track `withClipMoved`). `newStartSampleOnTimeline` must be >= 0.
+    struct AudioClipGroupRelocation
+    {
+        PlacedClipId id = kInvalidPlacedClipId;
+        std::int64_t newStartSampleOnTimeline = 0;
+        TrackId destTrackId = kInvalidTrackId;
+    };
+
+    /// [Message thread] Move every listed audio clip on one snapshot publish. Same-track rows
+    /// use `withClipMoved`; cross-track rows use `withClipMovedToTrack`. Returns false without
+    /// publishing when any id is missing, any start is negative, or any destination kind
+    /// refuses timeline audio. An empty list is success and publishes nothing.
+    [[nodiscard]] bool tryMoveAudioClipsTogether(const std::vector<AudioClipGroupRelocation>& moves) noexcept;
 
     // [Message thread] Non-destructive right-edge **trim** (shorter or longer `visible` window in
     // [0, material) on the `PlacedClip` only; PCM unchanged). One snapshot publish; no lane reorder.

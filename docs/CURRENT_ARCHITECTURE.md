@@ -63,7 +63,7 @@ Use it alongside [ARCHITECTURE_PRINCIPLES.md](ARCHITECTURE_PRINCIPLES.md), [PROJ
 | [`MainAppDialogs`](../src/app/MainAppDialogs.h) | Audio settings, Help, undo-behavior dialogs |
 | [`AudioClipImportCoordinator`](../src/app/AudioClipImportCoordinator.h) | Add/import audio clip at playhead flow |
 | [`UndoRedoCoordinator`](../src/app/UndoRedoCoordinator.h) | `SessionHistory`, undo/redo, plugin undo recorder, editor shortcut callbacks |
-| [`TrackLanesEditCoordinator`](../src/app/TrackLanesEditCoordinator.h) | Track delete/reorder and clip move / trim / split callback wiring |
+| [`TrackLanesEditCoordinator`](../src/app/TrackLanesEditCoordinator.h) | Track delete/reorder, clip move / trim / split, and arrangement group-move undo wiring |
 | [`TransportLayoutHelper`](../src/app/TransportLayoutHelper.h) (`TransportLayoutHelper.cpp`) | Shared layout geometry for transport controls strip |
 | [`TransportPlayPauseStopController`](../src/app/TransportPlayPauseStopController.h) | Play / pause / stop behavior vs transport and recorder |
 | [`PluginHostUiBindings`](../src/app/PluginHostUiBindings.h) | Wiring `PluginInsertHost` callbacks into track headers and inspector |
@@ -359,6 +359,12 @@ Full report with the time model, behaviour matrix and verification: [`LIVE_MIDI_
 - **Verification**: `TrackHeaderColumnFocusedTests` (derived limits 181 / 200 and segment widths, per-kind geometry at 120 / 181 / 200 / 240 px — overlap, alignment, ellipsis, paint evidence —, the grid values, snapping, clamps and keys, every kind × Micro / Mini / Small / Medium: title row inside and hittable, second-row presence rules, band clear; writes the header PNGs when given a directory), `TrackRowHeightFocusedTests` (presets incl. Micro / Mini, snapping drags from a start height, Custom, heights above Large, load keeps pre-grid heights as Custom, first resize snaps, `"micro"` key), `CollapsibleTrackGroupFocusedTests` (button + label placement — first track, viewport, scrolled past the top, scrolled out, Micro neighbours, two adjacent groups, a group right below a collapsed block —, `getComponentAt` reaching only the controls, collapsed blocks for 2 / 8 / 16 members with 4 px strips + 1 px gaps and the 25 px readable minimum through scroll and collapse / expand, hidden-member normal heights, Mini lanes painting the real waveform without label and Micro the thin bar with the shared 4 px margin, track-colour narrow undo through the real coordinator, immediate raster update, Duplicate inheritance, v28 round trip, pre-v28 and malformed colour values; `--render <dir>` writes the Micro / Mini / Small / Medium + mixed-heights example images with colours and collapsed groups).
 
 ---
+
+## Arrangement marquee and group move
+
+- **Main window only.** The pointer tool's empty-area drag on the timeline (not headers, the ruler or scrollbars) draws the same marquee colours as the piano roll. Events whose rectangles meet the box become the arrangement selection, across audio, instrument and MIDI rows. Shift adds. Escape restores the selection from before the drag. A click that never passes the 3 px threshold keeps the old empty-click deselect. Header multi-select for visual groups is a separate selection.
+- **One move.** Dragging the body of an already selected event, when more than one event is selected, moves the whole selection by the grabbed event's snap delta and by one session-track index delta (real row bounds, collapsed members still count). Trim, fade and event-gain handles stay their own gestures. A single selected event still uses the existing single-clip move.
+- **All or nothing.** The drop is refused when any event would start before sample 0, leave the track list, land on a kind that single-move would refuse, or land on a hidden member of a collapsed group. The preview uses the existing blue ghost and the forbidden cursor. Mouse-up commits one undo step (`Move events`) or restores nothing. Collapsing a group removes its events from the selection and cancels a gesture that included them. Selection and the preview are not saved in the project.
 
 ## Collapsible track groups (visual)
 

@@ -28,6 +28,7 @@
 // =============================================================================
 
 #include "app/UndoRedoCoordinator.h"
+#include "ui/ArrangementGroupMove.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -1908,6 +1909,195 @@ void renderCompactLayoutExample(const juce::File& outDir)
              outDir.getChildFile("compact-mixed-heights-expanded-group.png"));
 }
 
+void testArrangementGroupMovePlanAndRowHit()
+{
+    const std::vector<TrackKind> kinds { TrackKind::Audio, TrackKind::Audio, TrackKind::Audio,
+                                         TrackKind::Instrument, TrackKind::Midi };
+    const std::vector<TrackId> ids { 1, 2, 3, 4, 5 };
+    const std::vector<int> open { 0, 0, 0, 0, 0 };
+    const ArrangementEventOrigin first {
+        ArrangementEventId { ArrangementEventKind::AudioClip, 1, 10 }, 0, 1000, 100
+    };
+    const ArrangementEventOrigin second {
+        ArrangementEventId { ArrangementEventKind::AudioClip, 2, 20 }, 1, 3000, 80
+    };
+    const ArrangementEventId grabbed = second.id;
+    const auto legal = planArrangementGroupMove({ first, second }, grabbed, 3500, 2, kinds, ids, open);
+    expect(legal.valid, "group move valid when every dest kind accepts the event");
+    expect(legal.timeDelta == 500 && legal.trackDelta == 1, "shared time delta and track delta");
+    expect(legal.dests.size() == 2, "valid plan lists every event");
+    expect(legal.dests[0].destTrackIndex == 1 && legal.dests[0].destStartSamples == 1500
+               && legal.dests[1].destTrackIndex == 2 && legal.dests[1].destStartSamples == 3500,
+           "relative gap stays 2000 samples");
+
+    const auto negative = planArrangementGroupMove({ first, second }, grabbed, 1999, 1, kinds, ids, open);
+    expect(!negative.valid && negative.dests.size() == 2, "one start before 0 rejects the whole plan");
+
+    std::vector<int> hidden = open;
+    hidden[2] = 1;
+    const auto collapsed = planArrangementGroupMove({ first, second }, grabbed, 3500, 2, kinds, ids, hidden);
+    expect(!collapsed.valid && collapsed.dests.size() == 2, "collapsed member destination rejects the whole plan");
+
+    const auto wrongKind = planArrangementGroupMove({ first, second }, grabbed, 3500, 3, kinds, ids, open);
+    expect(!wrongKind.valid && wrongKind.dests.size() == 2, "one illegal track kind rejects the whole plan");
+
+    const auto outOfRange = planArrangementGroupMove({ first, second }, grabbed, 3500, 5, kinds, ids, open);
+    expect(!outOfRange.valid && outOfRange.dests.size() == 2, "a destination past the last track rejects the whole plan");
+
+    const auto noRow = planArrangementGroupMove({ first, second }, grabbed, 3500, -1, kinds, ids, open);
+    expect(!noRow.valid && noRow.trackDelta == 0 && noRow.dests[1].destStartSamples == 3500,
+           "pointer off a legal row keeps the time preview and rejects the drop");
+
+    GroupFixture fixture(4);
+    fixture.lanes->setSize(1000, 800);
+    const std::vector<TrackId> rows = fixture.rowTrackIds();
+    expect(rows.size() >= 4, "fixture has enough rows for mixed heights");
+    fixture.lanes->setTrackRowHeightPxForStabilityTest(rows[0], 80);
+    fixture.lanes->setTrackRowHeightPxForStabilityTest(rows[1], 120);
+    fixture.lanes->setTrackRowHeightPxForStabilityTest(rows[2], 40);
+    fixture.lanes->setSize(1000, 800);
+    const int x = fixture.lanes->headerColumnWidthPx() + 30;
+    constexpr int gutter = TrackLanesView::kArrangementTimelineHeaderGutterPx;
+    expect(fixture.lanes->sessionTrackIndexAtLocalPoint({ x, gutter + 10 }) == 0, "tall first row");
+    expect(fixture.lanes->sessionTrackIndexAtLocalPoint({ x, gutter + 80 + 10 }) == 1, "second row uses its own top");
+    expect(fixture.lanes->sessionTrackIndexAtLocalPoint({ x, gutter + 80 + 120 + 5 }) == 2, "third row after mixed heights");
+    expect(fixture.lanes->sessionTrackIndexAtLocalPoint({ 4, gutter + 10 }) == -1, "header column is not an event destination");
+    fixture.lanes->setSize(1000, 180);
+    fixture.lanes->scrollVerticallyToOffsetPx(80);
+    expect(fixture.lanes->verticalScrollModel().offsetPx == 80, "scroll offset of 80 is legal in the short viewport");
+    expect(fixture.lanes->sessionTrackIndexAtLocalPoint({ x, gutter + 10 }) == 1,
+           "vertical scroll moves which session row is under the pointer");
+
+    const auto groupId = fixture.makeGroup({ 1, 2 }, "Fold");
+    expect(groupId.has_value(), "group for collapsed hit test");
+    if (groupId.has_value())
+    {
+        fixture.setCollapsed(*groupId, true);
+        fixture.lanes->scrollVerticallyToOffsetPx(0);
+        fixture.lanes->resized();
+        expect(fixture.lanes->sessionTrackIndexAtLocalPoint({ x, gutter + 80 + 2 }) == -1,
+               "collapsed mini-strip is not an event destination");
+        int nextOpen = -1;
+        for (int y = gutter + 80; y < gutter + 400; ++y)
+        {
+            const int index = fixture.lanes->sessionTrackIndexAtLocalPoint({ x, y });
+            if (index >= 0)
+            {
+                nextOpen = index;
+                break;
+            }
+        }
+        expect(nextOpen == 3, "the row after a collapsed group keeps its session index");
+    }
+}
+
+void testArrangementMarqueeAndGroupMoveByMouse()
+{
+    const juce::File wav = writeToneWav("group-move-tone.wav", 1.0);
+    GroupFixture fixture(3);
+    fixture.lanes->setSize(1200, 700);
+    const std::vector<TrackId> rows = fixture.rowTrackIds();
+    const TrackId top = rows[0];
+    const TrackId below = rows[1];
+    const auto sec = [](const double s) { return (std::int64_t)std::llround(s * kRate); };
+    expect(fixture.session.addRecordedTakeAtSample(wav, kRate, sec(1.0), top, sec(1.0)).wasOk()
+               && fixture.session.addRecordedTakeAtSample(wav, kRate, sec(3.0), below, sec(1.0)).wasOk(),
+           "mouse fixture: two audio clips on two rows");
+    fixture.lanes->syncTracksFromSession();
+
+    ClipWaveformView* topLane = nullptr;
+    for (int i = 0; i < fixture.lanes->getNumChildComponents(); ++i)
+    {
+        if (auto* lane = dynamic_cast<ClipWaveformView*>(fixture.lanes->getChildComponent(i));
+            lane != nullptr && lane->getTrackId() == top && lane->getWidth() > 0)
+        {
+            topLane = lane;
+        }
+    }
+    expect(topLane != nullptr, "mouse fixture: top audio lane is laid out");
+    if (topLane == nullptr)
+    {
+        return;
+    }
+
+    PluginInsertHost pluginHost;
+    int dirty = 0;
+    UndoRedoCoordinator undo(fixture.session, pluginHost, UndoRedoCoordinator::Callbacks{});
+    // The coordinator's dirty hook is optional; count recorded steps instead.
+    juce::ignoreUnused(dirty);
+    fixture.lanes->setOnArrangementGroupMoveRequested(
+        [&](const ArrangementGroupMovePlan& plan, const std::vector<ArrangementEventOrigin>& origins) {
+            bool committed = false;
+            undo.executeUndoableArrangementEdit("Move events", [&]() -> bool {
+                std::vector<Session::AudioClipGroupRelocation> moves;
+                for (size_t i = 0; i < origins.size() && i < plan.dests.size(); ++i)
+                {
+                    if (origins[i].id.kind != ArrangementEventKind::AudioClip)
+                    {
+                        return false;
+                    }
+                    Session::AudioClipGroupRelocation move;
+                    move.id = origins[i].id.eventId;
+                    move.newStartSampleOnTimeline = plan.dests[i].destStartSamples;
+                    move.destTrackId = plan.dests[i].destTrackId;
+                    moves.push_back(move);
+                }
+                if (!fixture.session.tryMoveAudioClipsTogether(moves))
+                {
+                    return false;
+                }
+                fixture.lanes->syncTracksFromSession();
+                committed = true;
+                return true;
+            });
+            return committed;
+        });
+
+    const auto now = juce::Time::getCurrentTime();
+    const auto src = juce::Desktop::getInstance().getMainMouseSource();
+    const auto click = [&](ClipWaveformView& lane, juce::Point<float> down, juce::Point<float> to) {
+        lane.mouseDown(juce::MouseEvent(src, down, juce::ModifierKeys::leftButtonModifier, 0.f, 0.f, 0.f, 0.f, 0.f,
+                                         &lane, &lane, now, down, now, 1, false));
+        lane.mouseDrag(juce::MouseEvent(src, to, juce::ModifierKeys::leftButtonModifier, 0.f, 0.f, 0.f, 0.f, 0.f,
+                                        &lane, &lane, now, down, now, 1, true));
+        lane.mouseUp(juce::MouseEvent(src, to, juce::ModifierKeys(), 0.f, 0.f, 0.f, 0.f, 0.f, &lane, &lane, now, down,
+                                      now, 1, false));
+    };
+
+    const juce::Point<float> empty { 12.0f, (float)topLane->getHeight() * 0.5f };
+    const juce::Point<float> cover { 460.0f, (float)topLane->getHeight() + 30.0f };
+    click(*topLane, empty, cover);
+    expect(fixture.lanes->arrangementSelectedEventCount() == 2, "marquee selects both audio events");
+
+    const auto startOf = [&](const TrackId tid) {
+        const auto snap = fixture.session.loadSessionSnapshotForAudioThread();
+        const int index = snap->findTrackIndexById(tid);
+        return snap->getTrack(index).getPlacedClip(0).getStartSample();
+    };
+    const std::int64_t beforeTop = startOf(top);
+    const std::int64_t beforeBelow = startOf(below);
+    const juce::Point<float> body { 150.0f, (float)topLane->getHeight() * 0.5f };
+    click(*topLane, body, body + juce::Point<float>(40.0f, 0.0f));
+    const std::int64_t movedTop = startOf(top);
+    const std::int64_t movedBelow = startOf(below);
+    const double spp = fixture.viewport.getSamplesPerPixel();
+    const std::int64_t expectedDelta = (std::int64_t)std::llround(40.0 * spp);
+    expect(movedTop - beforeTop == expectedDelta && movedBelow - beforeBelow == expectedDelta,
+           "group drag applies one time delta to both clips");
+    expect(undo.undoStackSizeForDiagnostics() == 1, "the group move is one undo step");
+    expect(fixture.lanes->arrangementSelectedEventCount() == 2, "moved clips stay selected");
+
+    undo.invokeUndoFromWindowShortcut();
+    fixture.lanes->syncTracksFromSession();
+    expect(startOf(top) == beforeTop && startOf(below) == beforeBelow, "undo restores both clips");
+
+    const int stackAfterUndo = undo.undoStackSizeForDiagnostics();
+    click(*topLane, body, body + juce::Point<float>(-220.0f, 0.0f));
+    expect(startOf(top) == beforeTop && startOf(below) == beforeBelow,
+           "an invalid drop leaves both clips where they were");
+    expect(undo.undoStackSizeForDiagnostics() == stackAfterUndo, "an invalid drop records no undo step");
+}
+
 int runRenderMode(const juce::File& outDir)
 {
     (void)outDir.createDirectory();
@@ -1931,6 +2121,8 @@ int main(int argc, char** argv)
     }
     info("CollapsibleTrackGroupFocusedTests - purely visual collapsible track groups (spec slice)");
 
+    testArrangementGroupMovePlanAndRowHit();
+    testArrangementMarqueeAndGroupMoveByMouse();
     testHeaderSelectionAndCreateValidation();
     testCollapsedLayoutExactFourPx();
     testCollapsedMiniViewClipIntervals();
@@ -1957,6 +2149,8 @@ int main(int argc, char** argv)
 // harness registers no instrument timeline attachments and creates only instrument SHELL rows,
 // so the stubs are never executed.
 // ---------------------------------------------------------------------------
+#include "app/InstrumentRuntimeCoordinator.h"
+#include "app/InstrumentTimelineRowCoordinator.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 
@@ -1973,6 +2167,42 @@ juce::String InstrumentTrackController::getLaneHeaderSubtitle() const
 }
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(
     float* const*, int, int, float, float) noexcept {}
+
+InstrumentMidiClip* InstrumentTrackController::getClipById(const InstrumentMidiClipId) noexcept
+{
+    jassertfalse;
+    return nullptr;
+}
+
+void InstrumentTrackController::replaceInstrumentMidiClipSelectionOrdered(
+    std::vector<InstrumentMidiClipId>) noexcept
+{
+    jassertfalse;
+}
+
+InstrumentTrackController* InstrumentRuntimeCoordinator::getMidiClipControllerForTrack(const TrackId) const noexcept
+{
+    jassertfalse;
+    return nullptr;
+}
+
+void InstrumentRuntimeCoordinator::forEachInstrumentController(
+    const std::function<void(TrackId, InstrumentTrackController&)>&)
+{
+    jassertfalse;
+}
+
+void InstrumentTimelineRowCoordinator::collectVisibleMidiEventRects(
+    std::vector<VisibleMidiEventRect>&) const
+{
+    jassertfalse;
+}
+
+void InstrumentTimelineRowCoordinator::setArrangementGroupMidiGhosts(
+    const std::vector<std::pair<TrackId, std::vector<std::pair<std::int64_t, std::int64_t>>>>&) noexcept
+{
+    jassertfalse;
+}
 
 // UndoRedoCoordinator calls the stability-invariants check after each undo/redo. The production
 // implementation pulls in the whole PlaybackEngine; this harness registers no invariant

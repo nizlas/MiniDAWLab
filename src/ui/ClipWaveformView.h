@@ -158,8 +158,16 @@ public:
 
     // [Message thread] Select a placement from host code (`TrackLanesView` after paste).
     void applyExternalPlacedClipSelection(std::optional<PlacedClipId> id) noexcept;
+    /// [Message thread] Replace this lane's arrangement selection. `active` is the inspector clip
+    /// (`selectedPlacedId_`); the other ids stay selected for marquee / group move.
+    void setArrangementCoSelected(std::vector<PlacedClipId> allIds, std::optional<PlacedClipId> active) noexcept;
+    [[nodiscard]] bool isPlacedClipSelected(PlacedClipId id) const noexcept;
+    [[nodiscard]] int arrangementSelectedCount() const noexcept;
+    void appendVisiblePlacedEventRectsInParent(
+        std::vector<std::pair<PlacedClipId, juce::Rectangle<int>>>& out) const;
     // [Message thread] Cross-lane drag ghost (one lane at a time); called by `TrackLanesView` only.
     void setDragGhost(std::int64_t startSampleOnTimeline, std::int64_t lengthSamples);
+    void setDragGhostSpans(std::vector<std::pair<std::int64_t, std::int64_t>> spans);
     void clearDragGhost();
 
     // [Message thread] Live recording preview only (not `SessionSnapshot`). `TrackLanesView` owns
@@ -390,6 +398,10 @@ private:
 
     // UI-local selection; never published in `SessionSnapshot` (see `PHASE_PLAN` / `ARCHITECTURE_…`).
     std::optional<PlacedClipId> selectedPlacedId_;
+    /// Other selected placements on this lane. Empty during a single-clip selection.
+    std::vector<PlacedClipId> coSelectedPlacedIds_;
+    bool arrangementGestureOwned_ = false;
+    PlacedClipId arrangementGestureClipId_ = kInvalidPlacedClipId;
 
     // Move vs. trim vs. per-event amplitude. Trim never calls `Session::moveClip`.
     // A fade or gain drag keeps its mode after the pointer leaves the handle.
@@ -432,9 +444,12 @@ private:
     bool renameDismissInProgress_ = false;
 
     // Drop ghost (this component may be the non-source lane showing a placeholder only).
+    // Group move stores one span per event destined for this lane; the single-span fields mirror
+    // the first span so older bypass checks stay valid.
     bool hasDragGhost_ = false;
     std::int64_t dragGhostStartOnTimeline_ = 0;
     std::int64_t dragGhostLengthSamples_ = 0;
+    std::vector<std::pair<std::int64_t, std::int64_t>> dragGhostSpans_;
 
     bool cursorOverriddenForInvalidDrop_ = false;
 

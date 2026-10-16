@@ -2493,6 +2493,38 @@ std::int64_t InstrumentTrackController::clampInstrumentMidiClipMoveDeltaForCurre
     return juce::jmax(deltaSamples, -minStart);
 }
 
+bool InstrumentTrackController::shiftInstrumentMidiClipsByDelta(
+    const std::vector<InstrumentMidiClipId>& ids,
+    const std::int64_t deltaSamples) noexcept
+{
+    if (!trackActive_ || ids.empty())
+    {
+        return false;
+    }
+    for (const InstrumentMidiClipId id : ids)
+    {
+        const InstrumentMidiClip* const c = getClipById(id);
+        if (c == nullptr || c->startSamples + deltaSamples < 0)
+        {
+            return false;
+        }
+    }
+    if (deltaSamples == 0)
+    {
+        return true;
+    }
+    for (const InstrumentMidiClipId id : ids)
+    {
+        InstrumentMidiClip* const c = getClipById(id);
+        c->startSamples += deltaSamples;
+        c->timelineAnchorSamples += deltaSamples;
+    }
+    promoteMovedClipsFreeOfOverlapToTop(ids);
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return true;
+}
+
 bool InstrumentTrackController::moveSelectedInstrumentMidiClipsByDeltaSamples(const std::int64_t deltaSamples) noexcept
 {
     const std::int64_t d = clampInstrumentMidiClipMoveDeltaForCurrentSelection(deltaSamples);

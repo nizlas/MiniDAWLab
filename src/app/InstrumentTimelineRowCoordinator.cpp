@@ -236,6 +236,7 @@ struct InstrumentTimelineRowCoordinator::MidiEventLane final : public juce::Comp
         , laneTimelineTrackId_(timelineInstrumentTrackId)
     {
         setOpaque(false);
+        setWantsKeyboardFocus(true);
         if (boundCtl_ != nullptr)
         {
             boundCtl_->addChangeListener(this);
@@ -735,7 +736,11 @@ private:
             }
             else
             {
-                if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
+                auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent());
+                const bool keepGroup = ac->isClipSelected(clip->id) && lanes != nullptr
+                                       && lanes->arrangementSelectedEventCount() > 1;
+                if (!keepGroup
+                    && owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
                 {
                     owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(laneTimelineTrackId_);
                 }
@@ -755,6 +760,20 @@ private:
                             renameArmedClipId_ = clip->id;
                         }
                     }
+                    if (keepGroup
+                        && lanes->beginArrangementGroupDrag(
+                            ArrangementEventId{ ArrangementEventKind::MidiClip, laneTimelineTrackId_, clip->id },
+                            e.getEventRelativeTo(lanes).getPosition()))
+                    {
+                        arrangementGestureOwned_ = true;
+                        arrangementGestureClipId_ = clip->id;
+                        arrangementGestureClipStart_ = clip->startSamples;
+                        dragMouseDownScreen_ = e.getScreenPosition().toFloat();
+                        dragCouldMove_ = false;
+                        grabKeyboardFocus();
+                        repaint();
+                        return;
+                    }
                 }
                 else
                 {
@@ -769,11 +788,34 @@ private:
 
             dragMouseDownLocal_ = e.position.toInt();
             dragMouseDownScreen_ = e.getScreenPosition().toFloat();
+            if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent());
+                lanes != nullptr && ac->isClipSelected(clip->id) && lanes->arrangementSelectedEventCount() > 1
+                && lanes->beginArrangementGroupDrag(
+                    ArrangementEventId{ ArrangementEventKind::MidiClip, laneTimelineTrackId_, clip->id },
+                    e.getEventRelativeTo(lanes).getPosition()))
+            {
+                arrangementGestureOwned_ = true;
+                arrangementGestureClipId_ = clip->id;
+                arrangementGestureClipStart_ = clip->startSamples;
+                dragCouldMove_ = false;
+                grabKeyboardFocus();
+                repaint();
+                return;
+            }
             dragCouldMove_ = !midiMoveBlocked && ac->isClipSelected(clip->id)
                              && timelineMappingAvailableForClipDrag_();
         }
         else
         {
+            if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent());
+                lanes != nullptr
+                && lanes->armArrangementMarquee(e.getEventRelativeTo(lanes).getPosition(), e.mods.isShiftDown()))
+            {
+                arrangementGestureOwned_ = true;
+                grabKeyboardFocus();
+                repaint();
+                return;
+            }
             if (owner_.callbacks_.clearAllArrangementEventSelections != nullptr)
             {
                 owner_.callbacks_.clearAllArrangementEventSelections();
@@ -795,6 +837,32 @@ private:
     {
         if (e.mods.isMiddleButtonDown())
         {
+            return;
+        }
+        if (arrangementGestureOwned_)
+        {
+            if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent()))
+            {
+                std::optional<std::int64_t> proposed;
+                if (arrangementGestureClipId_ != 0)
+                {
+                    const auto p0 = getLocalPoint(nullptr, dragMouseDownScreen_).toInt();
+                    const auto p1 = getLocalPoint(nullptr, e.getScreenPosition().toFloat()).toInt();
+                    const std::int64_t s0 = laneTimelineSampleAtLocalX(p0);
+                    const std::int64_t s1 = laneTimelineSampleAtLocalX(p1);
+                    proposed = arrangementGestureClipStart_ + (s1 - s0);
+                }
+                const bool dropOk = lanes->updateArrangementGesture(
+                    e.getEventRelativeTo(lanes).getPosition(), proposed);
+                if (dropOk)
+                {
+                    restoreNormalCursorAfterInvalidMidiDrop();
+                }
+                else
+                {
+                    setInvalidMidiDropCursor();
+                }
+            }
             return;
         }
         if (trimLaneGestureActive_)
@@ -913,10 +981,57 @@ private:
         owner_.repaintInstrumentTrackRow();
     }
 
+    bool keyPressed(const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::escapeKey && arrangementGestureOwned_)
+        {
+            if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent()))
+            {
+                lanes->cancelArrangementGesture();
+            }
+            arrangementGestureOwned_ = false;
+            arrangementGestureClipId_ = 0;
+            return true;
+        }
+        return false;
+    }
+
     void mouseUp(const juce::MouseEvent& e) override
     {
         if (e.mods.isMiddleButtonDown())
         {
+            return;
+        }
+        if (arrangementGestureOwned_)
+        {
+            arrangementGestureOwned_ = false;
+            bool dragged = false;
+            if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent()))
+            {
+                dragged = lanes->endArrangementGesture();
+            }
+            owner_.clearInstrumentMidiCrossTrackDropGhosts();
+            restoreNormalCursorAfterInvalidMidiDrop();
+            if (!dragged && mouseDownOnSelectedClipNameLabel_ && renameArmedClipId_ != 0
+                && e.getNumberOfClicks() == 1)
+            {
+                const InstrumentMidiClipId cid = renameArmedClipId_;
+                const int gen = renameArmGeneration_;
+                juce::Component::SafePointer<MidiEventLane> safe(this);
+                juce::Timer::callAfterDelay(
+                    mini_daw::timeline_clip_chrome::kClipRenameSecondClickDelayMs, [safe, gen, cid] {
+                        if (safe != nullptr && gen == safe->renameArmGeneration_)
+                        {
+                            safe->beginInlineClipRename(cid);
+                        }
+                    });
+            }
+            mouseDownOnSelectedClipNameLabel_ = false;
+            renameArmedClipId_ = 0;
+            arrangementGestureClipId_ = 0;
+            dragCouldMove_ = false;
+            dragDragging_ = false;
+            repaint();
             return;
         }
         owner_.clearInstrumentMidiCrossTrackDropGhosts();
@@ -1636,6 +1751,9 @@ private:
     TrackId laneTimelineTrackId_ = kInvalidTrackId;
 
     bool dragCouldMove_ = false;
+    bool arrangementGestureOwned_ = false;
+    InstrumentMidiClipId arrangementGestureClipId_ = 0;
+    std::int64_t arrangementGestureClipStart_ = 0;
     bool dragDragging_ = false;
     // Explorer-style inline clip rename (mirrors `ClipWaveformView`): a slow second click on the
     // top-left name label of the already-selected clip opens a `TextEditor` (Return commits,
@@ -1674,6 +1792,36 @@ private:
     void setCrossTrackDropGhost(std::vector<std::pair<std::int64_t, std::int64_t>> spans) noexcept
     {
         crossTrackDropGhostSpans_ = std::move(spans);
+        repaint();
+    }
+
+    void appendVisibleEventRects(
+        std::vector<InstrumentTimelineRowCoordinator::VisibleMidiEventRect>& out) const
+    {
+        if (getWidth() <= 0 || getHeight() <= 0 || boundCtl_ == nullptr)
+        {
+            return;
+        }
+        const auto laneContent = getLaneContentBounds();
+        const juce::Point<int> origin = getPosition();
+        for (const auto& clipPtr : boundCtl_->getClips())
+        {
+            const InstrumentMidiClip* const clip = clipPtr.get();
+            if (clip == nullptr || clip->lengthSamples <= 0)
+            {
+                continue;
+            }
+            const auto eb = getEventBoundsForClip(*clip, laneContent, 0);
+            if (eb.isEmpty())
+            {
+                continue;
+            }
+            InstrumentTimelineRowCoordinator::VisibleMidiEventRect row;
+            row.trackId = laneTimelineTrackId_;
+            row.clipId = clip->id;
+            row.boundsInParent = eb.translated(origin.x, origin.y);
+            out.push_back(row);
+        }
     }
 
     [[nodiscard]] bool hasCrossTrackDropGhost() const noexcept { return !crossTrackDropGhostSpans_.empty(); }
@@ -1762,6 +1910,39 @@ void InstrumentTimelineRowCoordinator::clearInstrumentMidiCrossTrackDropGhosts()
     if (changed)
     {
         repaintInstrumentTrackRow();
+    }
+}
+
+void InstrumentTimelineRowCoordinator::collectVisibleMidiEventRects(
+    std::vector<VisibleMidiEventRect>& out) const
+{
+    for (const auto& kv : instrumentMidiEventLanesByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->appendVisibleEventRects(out);
+        }
+    }
+}
+
+void InstrumentTimelineRowCoordinator::setArrangementGroupMidiGhosts(
+    const std::vector<std::pair<TrackId, std::vector<std::pair<std::int64_t, std::int64_t>>>>& perTrack) noexcept
+{
+    for (auto& kv : instrumentMidiEventLanesByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->clearCrossTrackDropGhost();
+            kv.second->repaint();
+        }
+    }
+    for (const auto& row : perTrack)
+    {
+        auto it = instrumentMidiEventLanesByTrackId_.find(row.first);
+        if (it != instrumentMidiEventLanesByTrackId_.end() && it->second != nullptr && !row.second.empty())
+        {
+            it->second->setCrossTrackDropGhost(row.second);
+        }
     }
 }
 

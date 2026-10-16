@@ -28,6 +28,9 @@
 // =============================================================================
 
 #include "ui/ClipWaveformView.h"
+#include "ui/TrackLanesView.h"
+
+#include <algorithm>
 
 #include "ui/TrackColourPalette.h"
 #include "ui/TrackRowHeightPresets.h"
@@ -808,6 +811,16 @@ bool ClipWaveformView::keyPressed(const juce::KeyPress& key)
         cancelEnvelopeGesture();
         return true;
     }
+    if (key == juce::KeyPress::escapeKey && arrangementGestureOwned_)
+    {
+        if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent()))
+        {
+            lanes->cancelArrangementGesture();
+        }
+        arrangementGestureOwned_ = false;
+        arrangementGestureClipId_ = kInvalidPlacedClipId;
+        return true;
+    }
     return false;
 }
 
@@ -851,19 +864,43 @@ ClipWaveformView::ClipWaveformView(
 
 void ClipWaveformView::setDragGhost(const std::int64_t startSampleOnTimeline, const std::int64_t lengthSamples)
 {
-    hasDragGhost_ = true;
-    dragGhostStartOnTimeline_ = startSampleOnTimeline;
-    dragGhostLengthSamples_ = juce::jmax(static_cast<std::int64_t>(0), lengthSamples);
+    setDragGhostSpans({ { startSampleOnTimeline, lengthSamples } });
+}
+
+void ClipWaveformView::setDragGhostSpans(std::vector<std::pair<std::int64_t, std::int64_t>> spans)
+{
+    dragGhostSpans_.clear();
+    for (const auto& span : spans)
+    {
+        if (span.second > 0)
+        {
+            dragGhostSpans_.push_back(span);
+        }
+    }
+    hasDragGhost_ = !dragGhostSpans_.empty();
+    if (hasDragGhost_)
+    {
+        dragGhostStartOnTimeline_ = dragGhostSpans_.front().first;
+        dragGhostLengthSamples_ = dragGhostSpans_.front().second;
+    }
+    else
+    {
+        dragGhostStartOnTimeline_ = 0;
+        dragGhostLengthSamples_ = 0;
+    }
     repaint();
 }
 
 void ClipWaveformView::clearDragGhost()
 {
-    if (!hasDragGhost_)
+    if (!hasDragGhost_ && dragGhostSpans_.empty())
     {
         return;
     }
     hasDragGhost_ = false;
+    dragGhostSpans_.clear();
+    dragGhostStartOnTimeline_ = 0;
+    dragGhostLengthSamples_ = 0;
     repaint();
 }
 
@@ -966,13 +1003,103 @@ ClipWaveformView::~ClipWaveformView()
 
 void ClipWaveformView::applyExternalPlacedClipSelection(const std::optional<PlacedClipId> id) noexcept
 {
+    coSelectedPlacedIds_.clear();
     selectedPlacedId_ = id;
     publishPlacedClipSelectionToLaneHost();
     repaint();
 }
 
+bool ClipWaveformView::isPlacedClipSelected(const PlacedClipId id) const noexcept
+{
+    if (selectedPlacedId_.has_value() && *selectedPlacedId_ == id)
+    {
+        return true;
+    }
+    for (const PlacedClipId extra : coSelectedPlacedIds_)
+    {
+        if (extra == id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+int ClipWaveformView::arrangementSelectedCount() const noexcept
+{
+    return (selectedPlacedId_.has_value() ? 1 : 0) + (int)coSelectedPlacedIds_.size();
+}
+
+void ClipWaveformView::setArrangementCoSelected(std::vector<PlacedClipId> allIds,
+                                                std::optional<PlacedClipId> active) noexcept
+{
+    if (active.has_value())
+    {
+        bool found = false;
+        for (const PlacedClipId id : allIds)
+        {
+            if (id == *active)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            active.reset();
+        }
+    }
+    if (!active.has_value() && !allIds.empty())
+    {
+        active = allIds.back();
+    }
+    coSelectedPlacedIds_.clear();
+    for (const PlacedClipId id : allIds)
+    {
+        if (!active.has_value() || id != *active)
+        {
+            coSelectedPlacedIds_.push_back(id);
+        }
+    }
+    selectedPlacedId_ = active;
+    publishPlacedClipSelectionToLaneHost();
+    repaint();
+}
+
+void ClipWaveformView::appendVisiblePlacedEventRectsInParent(
+    std::vector<std::pair<PlacedClipId, juce::Rectangle<int>>>& out) const
+{
+    if (getWidth() <= 0 || getHeight() <= 0)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int tIdx = snap->findTrackIndexById(trackId_);
+    if (tIdx < 0)
+    {
+        return;
+    }
+    const Track& tr = snap->getTrack(tIdx);
+    const juce::Point<int> origin = getPosition();
+    for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+    {
+        const PlacedClipId id = tr.getPlacedClip(i).getId();
+        const juce::Rectangle<float> local = eventRectForClipNow(id);
+        if (local.isEmpty())
+        {
+            continue;
+        }
+        out.emplace_back(id, local.toNearestInt().translated(origin.x, origin.y));
+    }
+}
+
 void ClipWaveformView::clearSelectionOnly()
 {
+    coSelectedPlacedIds_.clear();
     selectedPlacedId_.reset();
     publishPlacedClipSelectionToLaneHost();
     pointerLaneMode_ = PointerLaneMode::None;
@@ -1004,7 +1131,10 @@ void ClipWaveformView::cancelInteractionStateForSnapshotRestore()
     ++renameArmGeneration_;
     dismissInlineClipRename(false);
 
+    coSelectedPlacedIds_.clear();
     selectedPlacedId_.reset();
+    arrangementGestureOwned_ = false;
+    arrangementGestureClipId_ = kInvalidPlacedClipId;
     publishPlacedClipSelectionToLaneHost();
 
     pointerLaneMode_ = PointerLaneMode::None;
@@ -1032,6 +1162,7 @@ void ClipWaveformView::cancelInteractionStateForSnapshotRestore()
     hasDragGhost_ = false;
     dragGhostStartOnTimeline_ = 0;
     dragGhostLengthSamples_ = 0;
+    dragGhostSpans_.clear();
 
     hoverEventTrimCueId_.reset();
     hoverLeftTrimHandleId_.reset();
@@ -1071,10 +1202,17 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     // Any new press invalidates a pending delayed rename open (fast double clicks never rename).
     ++renameArmGeneration_;
     mouseDownOnSelectedClipNameLabel_ = false;
-    if (laneHost_.onBeginMouseDown)
-    {
-        laneHost_.onBeginMouseDown(*this);
-    }
+    arrangementGestureOwned_ = false;
+    arrangementGestureClipId_ = kInvalidPlacedClipId;
+    // Exclusive select clears other lanes. A group drag or marquee arm must not: those gestures
+    // keep the arrangement selection until the drag actually replaces it.
+    const auto exclusiveLaneFocus = [this]() {
+        coSelectedPlacedIds_.clear();
+        if (laneHost_.onBeginMouseDown)
+        {
+            laneHost_.onBeginMouseDown(*this);
+        }
+    };
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
     if (snap == nullptr)
     {
@@ -1115,6 +1253,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     if (ph.kind == LanePixelHitKind::FadeIn || ph.kind == LanePixelHitKind::FadeOut
         || ph.kind == LanePixelHitKind::EventGain)
     {
+        exclusiveLaneFocus();
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
         selectedPlacedId_ = ph.id;
         publishPlacedClipSelectionToLaneHost();
@@ -1149,6 +1288,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     }
     if (ph.kind == LanePixelHitKind::TrimLeft)
     {
+        exclusiveLaneFocus();
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
         selectedPlacedId_ = ph.id;
         publishPlacedClipSelectionToLaneHost();
@@ -1180,6 +1320,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     }
     if (ph.kind == LanePixelHitKind::TrimRight)
     {
+        exclusiveLaneFocus();
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
         selectedPlacedId_ = ph.id;
         publishPlacedClipSelectionToLaneHost();
@@ -1221,6 +1362,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
         if (editTool == EditTool::Split)
         {
+            exclusiveLaneFocus();
             const std::int64_t S = hitPlaced.getStartSample();
             const std::int64_t V = hitPlaced.getEffectiveLengthSamples();
             const float tClickL
@@ -1256,13 +1398,37 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
             return;
         }
         // Explorer-style rename arm: single click on the name label of the already-selected clip.
-        if (selectedPlacedId_.has_value() && *selectedPlacedId_ == ph.id
-            && e.getNumberOfClicks() == 1)
+        const bool alreadySelected = isPlacedClipSelected(ph.id);
+        if (alreadySelected && e.getNumberOfClicks() == 1)
         {
             const juce::Rectangle<float> nameR
                 = tc::clipEventTopLeftNameBounds(eventRectForClipNow(ph.id));
             mouseDownOnSelectedClipNameLabel_ = !nameR.isEmpty() && nameR.contains(e.position);
         }
+        if (editTool == EditTool::Pointer && alreadySelected && !e.mods.isShiftDown())
+        {
+            if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent()))
+            {
+                if (lanes->arrangementSelectedEventCount() > 1
+                    && lanes->beginArrangementGroupDrag(
+                        ArrangementEventId{ ArrangementEventKind::AudioClip, trackId_, ph.id },
+                        e.getEventRelativeTo(lanes).getPosition()))
+                {
+                    arrangementGestureOwned_ = true;
+                    arrangementGestureClipId_ = ph.id;
+                    clickDownX_ = e.position.x;
+                    clickDownStartSample_ = hitPlaced.getStartSample();
+                    grabKeyboardFocus();
+                    pointerLaneMode_ = PointerLaneMode::None;
+                    mouseDownPlacedId_.reset();
+                    dragMovementBeyondThreshold_ = false;
+                    trimPlacedId_.reset();
+                    repaint();
+                    return;
+                }
+            }
+        }
+        exclusiveLaneFocus();
         selectedPlacedId_ = ph.id;
         publishPlacedClipSelectionToLaneHost();
         const std::int64_t eff = hitPlaced.getEffectiveLengthSamples();
@@ -1278,6 +1444,23 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
+    if (editTool == EditTool::Pointer)
+    {
+        if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent()))
+        {
+            if (lanes->armArrangementMarquee(e.getEventRelativeTo(lanes).getPosition(), e.mods.isShiftDown()))
+            {
+                arrangementGestureOwned_ = true;
+                grabKeyboardFocus();
+                mouseDownPlacedId_.reset();
+                dragMovementBeyondThreshold_ = false;
+                pointerLaneMode_ = PointerLaneMode::None;
+                trimPlacedId_.reset();
+                return;
+            }
+        }
+    }
+    exclusiveLaneFocus();
     selectedPlacedId_.reset();
     publishPlacedClipSelectionToLaneHost();
     mouseDownPlacedId_.reset();
@@ -1291,6 +1474,34 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
 {
     if (e.mods.isMiddleButtonDown())
     {
+        return;
+    }
+    if (arrangementGestureOwned_)
+    {
+        if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent()))
+        {
+            std::optional<std::int64_t> proposed;
+            if (arrangementGestureClipId_ != kInvalidPlacedClipId)
+            {
+                const double spp = timelineViewport_.getSamplesPerPixel();
+                const float dx = e.position.x - clickDownX_;
+                if (spp > 0.0)
+                {
+                    proposed = clickDownStartSample_
+                               + static_cast<std::int64_t>(std::llround((double)dx * spp));
+                }
+            }
+            const bool dropOk = lanes->updateArrangementGesture(
+                e.getEventRelativeTo(lanes).getPosition(), proposed);
+            if (dropOk)
+            {
+                restoreNormalCursorAfterInvalidDrop();
+            }
+            else
+            {
+                setInvalidDropCursor();
+            }
+        }
         return;
     }
     if (isClipEnvelopeGestureInProgress())
@@ -1519,6 +1730,34 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
 {
     if (e.mods.isMiddleButtonDown())
     {
+        return;
+    }
+    if (arrangementGestureOwned_)
+    {
+        arrangementGestureOwned_ = false;
+        bool dragged = false;
+        if (auto* lanes = dynamic_cast<TrackLanesView*>(getParentComponent()))
+        {
+            dragged = lanes->endArrangementGesture();
+        }
+        restoreNormalCursorAfterInvalidDrop();
+        if (!dragged && mouseDownOnSelectedClipNameLabel_
+            && arrangementGestureClipId_ != kInvalidPlacedClipId && e.getNumberOfClicks() == 1)
+        {
+            const PlacedClipId cid = arrangementGestureClipId_;
+            const int gen = renameArmGeneration_;
+            juce::Component::SafePointer<ClipWaveformView> safe(this);
+            juce::Timer::callAfterDelay(tc::kClipRenameSecondClickDelayMs, [safe, gen, cid] {
+                if (safe != nullptr && gen == safe->renameArmGeneration_)
+                {
+                    safe->beginInlineClipRename(cid);
+                }
+            });
+        }
+        mouseDownOnSelectedClipNameLabel_ = false;
+        arrangementGestureClipId_ = kInvalidPlacedClipId;
+        updateTrimHoverAndCursor(e.position);
+        repaint();
         return;
     }
     if (laneHost_.clearAllGhosts)
@@ -1805,32 +2044,41 @@ void ClipWaveformView::dismissInlineClipRename(const bool commit)
 void ClipWaveformView::clearSelectionIfIdMissing(
     const std::shared_ptr<const SessionSnapshot>& snap)
 {
+    const auto clipStillHere = [&](const PlacedClipId id) {
+        if (snap == nullptr)
+        {
+            return false;
+        }
+        const int tIdx = snap->findTrackIndexById(trackId_);
+        if (tIdx < 0)
+        {
+            return false;
+        }
+        const Track& tr = snap->getTrack(tIdx);
+        for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+        {
+            if (tr.getPlacedClip(i).getId() == id)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    coSelectedPlacedIds_.erase(
+        std::remove_if(coSelectedPlacedIds_.begin(),
+                       coSelectedPlacedIds_.end(),
+                       [&](const PlacedClipId id) { return !clipStillHere(id); }),
+        coSelectedPlacedIds_.end());
     if (!selectedPlacedId_.has_value())
     {
         return;
     }
-    if (snap == nullptr)
+    if (clipStillHere(*selectedPlacedId_))
     {
-        selectedPlacedId_.reset();
-        publishPlacedClipSelectionToLaneHost();
         return;
-    }
-    const int tIdx = snap->findTrackIndexById(trackId_);
-    if (tIdx < 0)
-    {
-        selectedPlacedId_.reset();
-        publishPlacedClipSelectionToLaneHost();
-        return;
-    }
-    const Track& tr = snap->getTrack(tIdx);
-    for (int i = 0; i < tr.getNumPlacedClips(); ++i)
-    {
-        if (tr.getPlacedClip(i).getId() == *selectedPlacedId_)
-        {
-            return;
-        }
     }
     selectedPlacedId_.reset();
+    coSelectedPlacedIds_.clear();
     hoverEventTrimCueId_.reset();
     hoverLeftTrimHandleId_.reset();
     hoverRightTrimHandleId_.reset();
@@ -2780,11 +3028,14 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
     const juce::Colour bodyFill = currentEventBodyFill();
 
     // --- (1b) Cross-lane **drop ghost** on a target lane (not the overlap underlap hint).
-    if (hasDragGhost_ && dragGhostLengthSamples_ > 0)
+    for (const auto& ghost : dragGhostSpans_)
     {
-        const float gs0 = sessionSampleToX(dragGhostStartOnTimeline_);
-        const float gs1
-            = sessionSampleToX(dragGhostStartOnTimeline_ + dragGhostLengthSamples_);
+        if (ghost.second <= 0)
+        {
+            continue;
+        }
+        const float gs0 = sessionSampleToX(ghost.first);
+        const float gs1 = sessionSampleToX(ghost.first + ghost.second);
         const float gLeft = juce::jmin(gs0, gs1);
         const float gRight = juce::jmax(gs0, gs1);
         juce::Rectangle<float> ghostRect{ gLeft, eventTrackY.getY(), juce::jmax(1.0f, gRight - gLeft),
@@ -2874,14 +3125,14 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
         {
             const juce::Rectangle<float> bar = thinBarRectForEvent(eventRect);
             tc::paintEventChromeBody(g, bar, bodyFill);
-            if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
+            if (isPlacedClipSelected(strip.clipId))
             {
                 tc::paintEventChromeSelectionOverlay(g, bar);
             }
             continue;
         }
         tc::paintEventChromeBody(g, eventRect, bodyFill);
-        if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
+        if (isPlacedClipSelected(strip.clipId))
         {
             tc::paintEventChromeSelectionOverlay(g, eventRect);
         }
@@ -2976,7 +3227,7 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
             const bool showEnvelopeHandles
                 = detail != track_row_heights::LaneEventDetail::Bars
                   && tc::envelopeHandlesFit(eventRect)
-                  && ((selectedPlacedId_.has_value() && *selectedPlacedId_ == strip.clipId)
+                  && (isPlacedClipSelected(strip.clipId)
                       || hoverEventTrimCueId_ == strip.clipId
                       || hoverLeftTrimHandleId_ == strip.clipId
                       || hoverRightTrimHandleId_ == strip.clipId
@@ -3179,12 +3430,16 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
     // (playhead-stripe underpaints during playback) is skipped; full repaints cover everything.
     const juce::Rectangle<float> dirtyPx = g.getClipBounds().toFloat().expanded(2.0f, 0.0f);
 
-    if (hasDragGhost_ && dragGhostLengthSamples_ > 0)
+    for (const auto& ghost : dragGhostSpans_)
     {
+        if (ghost.second <= 0)
+        {
+            continue;
+        }
         const float gs0 = TimelineRulerView::sessionSampleToLocalX(
-            dragGhostStartOnTimeline_, bounds.getX(), visStart, spp);
+            ghost.first, bounds.getX(), visStart, spp);
         const float gs1 = TimelineRulerView::sessionSampleToLocalX(
-            dragGhostStartOnTimeline_ + dragGhostLengthSamples_, bounds.getX(), visStart, spp);
+            ghost.first + ghost.second, bounds.getX(), visStart, spp);
         const float gLeft = juce::jmin(gs0, gs1);
         const float gRight = juce::jmax(gs0, gs1);
         juce::Rectangle<float> ghostRect{ gLeft, eventTrackY.getY(), juce::jmax(1.0f, gRight - gLeft),
@@ -3220,7 +3475,7 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
             continue;
         }
 
-        if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
+        if (isPlacedClipSelected(strip.clipId))
         {
             tc::paintEventChromeSelectionOverlay(
                 g, detail == track_row_heights::LaneEventDetail::Bars ? thinBarRectForEvent(eventRect) : eventRect);
@@ -3252,7 +3507,7 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
             const bool showEnvelopeHandles
                 = detail != track_row_heights::LaneEventDetail::Bars
                   && tc::envelopeHandlesFit(eventRect)
-                  && ((selectedPlacedId_.has_value() && *selectedPlacedId_ == strip.clipId)
+                  && (isPlacedClipSelected(strip.clipId)
                       || hoverEventTrimCueId_ == strip.clipId
                       || hoverLeftTrimHandleId_ == strip.clipId
                       || hoverRightTrimHandleId_ == strip.clipId

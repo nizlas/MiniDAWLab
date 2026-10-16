@@ -159,10 +159,37 @@ public:
     [[nodiscard]] ExperimentalInstrumentHost* stagingInstrumentHostUnchecked() const noexcept;
     [[nodiscard]] InstrumentTrackController* stagingInstrumentControllerUnchecked() const noexcept;
 
-    [[nodiscard]] bool moveInstrumentMidiClipsBetweenTracks(TrackId sourceTrackId,
-                                                           TrackId destTrackId,
-                                                           std::vector<InstrumentMidiClipId> clipIdsInOrder,
-                                                           std::int64_t deltaSamples) noexcept;
+    /// `rejectNegativeStarts`: group move. False (default) keeps the single-move clamp to sample 0.
+    /// When true, a clip that would start before 0 fails the call before any clip is removed.
+    /// `newIdsOut`, when set, receives the destination ids in `clipIdsInOrder` order.
+    [[nodiscard]] bool moveInstrumentMidiClipsBetweenTracks(
+        TrackId sourceTrackId,
+        TrackId destTrackId,
+        std::vector<InstrumentMidiClipId> clipIdsInOrder,
+        std::int64_t deltaSamples,
+        bool rejectNegativeStarts = false,
+        std::vector<InstrumentMidiClipId>* newIdsOut = nullptr) noexcept;
+
+    /// One MIDI clip in an arrangement group move. Same-track rows are an in-place shift.
+    struct ArrangementMidiRelocation
+    {
+        TrackId sourceTrackId = kInvalidTrackId;
+        TrackId destTrackId = kInvalidTrackId;
+        InstrumentMidiClipId clipId = 0;
+        std::int64_t originStartSamples = 0;
+        std::int64_t deltaSamples = 0;
+    };
+
+    /// [Message thread] Apply every relocation or none of the caller's undo step. On success
+    /// `landed` is dest-track + clip id (new id when the clip changed track). A failed call may
+    /// already have mutated controllers; the caller restores the musical undo snapshot.
+    struct ArrangementMidiRelocationResult
+    {
+        bool ok = false;
+        std::vector<std::pair<TrackId, InstrumentMidiClipId>> landed;
+    };
+    [[nodiscard]] ArrangementMidiRelocationResult applyArrangementMidiRelocations(
+        const std::vector<ArrangementMidiRelocation>& moves) noexcept;
 
     void applyTimelineSampleRateToKeyedAndStaging(double sr) noexcept;
     /// Clips always play at the project tempo: re-align every keyed + staging controller's clip bpm

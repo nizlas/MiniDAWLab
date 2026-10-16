@@ -710,7 +710,9 @@ bool InstrumentRuntimeCoordinator::moveInstrumentMidiClipsBetweenTracks(
     const TrackId sourceTrackId,
     const TrackId destTrackId,
     std::vector<InstrumentMidiClipId> clipIdsInOrder,
-    const std::int64_t deltaSamples) noexcept
+    const std::int64_t deltaSamples,
+    const bool rejectNegativeStarts,
+    std::vector<InstrumentMidiClipId>* const newIdsOut) noexcept
 {
     if (sourceTrackId == kInvalidTrackId || destTrackId == kInvalidTrackId || sourceTrackId == destTrackId
         || clipIdsInOrder.empty())
@@ -759,6 +761,10 @@ bool InstrumentRuntimeCoordinator::moveInstrumentMidiClipsBetweenTracks(
         }
         snapshots.push_back(*c);
         const std::int64_t ns = c->startSamples + deltaSamples;
+        if (rejectNegativeStarts && ns < 0)
+        {
+            return false;
+        }
         const std::int64_t na = c->timelineAnchorSamples + deltaSamples;
         newStartsAnchors.emplace_back(juce::jmax(std::int64_t{ 0 }, ns), na);
     }
@@ -784,8 +790,136 @@ bool InstrumentRuntimeCoordinator::moveInstrumentMidiClipsBetweenTracks(
         return false;
     }
 
+    if (newIdsOut != nullptr)
+    {
+        *newIdsOut = newIds;
+    }
     destCtl->replaceInstrumentMidiClipSelectionOrdered(std::move(newIds));
     return true;
+}
+
+InstrumentRuntimeCoordinator::ArrangementMidiRelocationResult
+InstrumentRuntimeCoordinator::applyArrangementMidiRelocations(
+    const std::vector<ArrangementMidiRelocation>& moves) noexcept
+{
+    ArrangementMidiRelocationResult result;
+    if (moves.empty())
+    {
+        result.ok = true;
+        return result;
+    }
+
+    struct InPlaceGroup
+    {
+        TrackId trackId = kInvalidTrackId;
+        std::vector<InstrumentMidiClipId> ids;
+        std::int64_t delta = 0;
+    };
+    struct CrossGroup
+    {
+        TrackId source = kInvalidTrackId;
+        TrackId dest = kInvalidTrackId;
+        std::vector<InstrumentMidiClipId> ids;
+        std::int64_t delta = 0;
+    };
+    std::vector<InPlaceGroup> inPlace;
+    std::vector<CrossGroup> cross;
+    result.landed.reserve(moves.size());
+
+    for (const ArrangementMidiRelocation& move : moves)
+    {
+        InstrumentTrackController* const sourceCtl = getMidiClipControllerForTrack(move.sourceTrackId);
+        const InstrumentMidiClip* const clip = sourceCtl != nullptr ? sourceCtl->getClipById(move.clipId) : nullptr;
+        if (clip == nullptr || clip->startSamples != move.originStartSamples)
+        {
+            return result;
+        }
+        if (move.sourceTrackId == move.destTrackId)
+        {
+            InPlaceGroup* group = nullptr;
+            for (InPlaceGroup& existing : inPlace)
+            {
+                if (existing.trackId == move.sourceTrackId && existing.delta == move.deltaSamples)
+                {
+                    group = &existing;
+                    break;
+                }
+            }
+            if (group == nullptr)
+            {
+                inPlace.push_back(InPlaceGroup{ move.sourceTrackId, {}, move.deltaSamples });
+                group = &inPlace.back();
+            }
+            group->ids.push_back(move.clipId);
+        }
+        else
+        {
+            InstrumentTrackController* const destCtl = getMidiClipControllerForTrack(move.destTrackId);
+            if (destCtl == nullptr)
+            {
+                return result;
+            }
+            CrossGroup* group = nullptr;
+            for (CrossGroup& existing : cross)
+            {
+                if (existing.source == move.sourceTrackId && existing.dest == move.destTrackId
+                    && existing.delta == move.deltaSamples)
+                {
+                    group = &existing;
+                    break;
+                }
+            }
+            if (group == nullptr)
+            {
+                cross.push_back(CrossGroup{ move.sourceTrackId, move.destTrackId, {}, move.deltaSamples });
+                group = &cross.back();
+            }
+            group->ids.push_back(move.clipId);
+        }
+    }
+
+    for (const InPlaceGroup& group : inPlace)
+    {
+        InstrumentTrackController* const ctl = getMidiClipControllerForTrack(group.trackId);
+        if (ctl == nullptr || !ctl->shiftInstrumentMidiClipsByDelta(group.ids, group.delta))
+        {
+            return result;
+        }
+        for (const InstrumentMidiClipId id : group.ids)
+        {
+            result.landed.emplace_back(group.trackId, id);
+        }
+    }
+
+    for (const CrossGroup& group : cross)
+    {
+        std::vector<InstrumentMidiClipId> newIds;
+        if (!moveInstrumentMidiClipsBetweenTracks(
+                group.source, group.dest, group.ids, group.delta, true, &newIds)
+            || newIds.size() != group.ids.size())
+        {
+            return result;
+        }
+        for (const InstrumentMidiClipId id : newIds)
+        {
+            result.landed.emplace_back(group.dest, id);
+        }
+    }
+
+    std::unordered_map<TrackId, std::vector<InstrumentMidiClipId>> selectionByTrack;
+    for (const auto& landed : result.landed)
+    {
+        selectionByTrack[landed.first].push_back(landed.second);
+    }
+    for (const auto& kv : selectionByTrack)
+    {
+        if (InstrumentTrackController* const ctl = getMidiClipControllerForTrack(kv.first))
+        {
+            ctl->replaceInstrumentMidiClipSelectionOrdered(kv.second);
+        }
+    }
+    result.ok = true;
+    return result;
 }
 
 void InstrumentRuntimeCoordinator::publishNoInstrumentPlaybackForProjectClose() noexcept

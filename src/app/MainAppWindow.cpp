@@ -1678,6 +1678,9 @@ public:
                 },
             });
 
+        trackLanesView.setArrangementInteractionPeers(instrumentTimelineRowCoordinator_.get(),
+                                                      instrumentRuntimeCoordinator_.get());
+
         session.setOnTimelineRulerTimeDisplayChanged([this]() {
             applyTimelineRulerFormatButtonFromSession();
             rulerView.repaint();
@@ -2541,6 +2544,20 @@ public:
                 },
             });
         trackLanesEditCoordinator_->install();
+        trackLanesEditCoordinator_->setArrangementGroupMoveBackends(
+            [this](const juce::String& label, std::function<bool()> mutator) {
+                if (undoRedoCoordinator_ != nullptr)
+                {
+                    undoRedoCoordinator_->executeUndoableArrangementEdit(label, std::move(mutator));
+                }
+            },
+            [this](const std::vector<InstrumentRuntimeCoordinator::ArrangementMidiRelocation>& moves) {
+                if (instrumentRuntimeCoordinator_ == nullptr)
+                {
+                    return InstrumentRuntimeCoordinator::ArrangementMidiRelocationResult{};
+                }
+                return instrumentRuntimeCoordinator_->applyArrangementMidiRelocations(moves);
+            });
         trackLanesEditCoordinator_->setOnMidiInputAssignmentChanged([this] {
             if (liveMidiInputCoordinator_ != nullptr)
             {

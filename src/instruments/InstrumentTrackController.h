@@ -653,6 +653,12 @@ public:
     /// clip starts before sample 0. Returns false if nothing changed.
     [[nodiscard]] bool moveSelectedInstrumentMidiClipsByDeltaSamples(std::int64_t deltaSamples) noexcept;
 
+    /// Group move: shift these clips by `deltaSamples` with no clamp. Returns false without
+    /// mutating when any id is missing or any start would become negative. `deltaSamples == 0`
+    /// is success and publishes nothing.
+    [[nodiscard]] bool shiftInstrumentMidiClipsByDelta(const std::vector<InstrumentMidiClipId>& ids,
+                                                       std::int64_t deltaSamples) noexcept;
+
     /// Arrangement delete: remove clips by id on this lane. Prunes selection and republishes render snapshot.
     /// Returns false when nothing was removed.
     [[nodiscard]] bool removeInstrumentMidiClipsByIds(const std::vector<InstrumentMidiClipId>& ids) noexcept;

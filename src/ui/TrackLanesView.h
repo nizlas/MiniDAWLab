@@ -9,8 +9,10 @@
 //   aligned with the timeline row so the header column reads continuous with track headers.
 //   When `Session` publishes a snapshot
 //   with N tracks, this component ensures N child lanes, each created with a stable `TrackId` and
-//   the same session-wide x -> sample map as the ruler. It wires a small callback so selecting a
-//   clip in one lane clears selection in the others. **Cross-track drag:** `ClipWaveformLaneHost`
+//   the same session-wide x -> sample map as the ruler. A plain click still selects one event and
+//   clears the others. A marquee drag, or a drag that starts on an already selected event while
+//   more than one event is selected, keeps that selection and moves it as one group.
+//   **Cross-track drag:** `ClipWaveformLaneHost`
 //   callbacks resolve which lane is under the pointer, set a **single** drop ghost on that lane, and
 //   clear ghosts — **no** track-type predicate; “valid lane” is geometric only (the header strip
 //   is not a lane — pointer over a header is not a valid drop). **Header drag** (track reorder) is
@@ -32,6 +34,7 @@
 #include "domain/PlacedClip.h"
 #include "instruments/InstrumentTrackController.h"
 #include "engine/RecorderService.h"
+#include "ui/ArrangementGroupMove.h"
 #include "ui/ClipWaveformView.h"
 #include "ui/SoloUiHooks.h"
 #include "ui/TrackHeaderView.h"
@@ -591,6 +594,24 @@ public:
     [[nodiscard]] bool isTrackInDisplayableVisualGroup(TrackId tid) const noexcept;
     [[nodiscard]] bool isTrackInCollapsedVisualGroup(TrackId tid) const noexcept;
 
+    /// [Message thread] Arrangement marquee and group-move gestures. Owned here so audio lanes
+    /// and MIDI lanes share one selection and one preview. Not project state.
+    void setArrangementInteractionPeers(class InstrumentTimelineRowCoordinator* rows,
+                                        class InstrumentRuntimeCoordinator* runtime) noexcept;
+    void setOnArrangementGroupMoveRequested(
+        std::function<bool(const ArrangementGroupMovePlan&, const std::vector<ArrangementEventOrigin>&)> fn) noexcept;
+    [[nodiscard]] int arrangementSelectedEventCount() noexcept;
+    [[nodiscard]] int sessionTrackIndexAtLocalPoint(juce::Point<int> localPoint) const noexcept;
+    bool armArrangementMarquee(juce::Point<int> localPoint, bool shiftAdds) noexcept;
+    bool beginArrangementGroupDrag(ArrangementEventId grabbed, juce::Point<int> localPoint) noexcept;
+    /// True while the proposed drop is legal (marquee is always "legal"). Group drag passes the
+    /// grabbed event's unsnapped start, computed the same way as that event's single move.
+    bool updateArrangementGesture(juce::Point<int> localPoint,
+                                  std::optional<std::int64_t> unsnappedGrabbedStart) noexcept;
+    /// Returns true when the gesture passed the drag threshold.
+    bool endArrangementGesture() noexcept;
+    void cancelArrangementGesture() noexcept;
+
     /// [Test] Group-control introspection + the exact mouse-equivalent actions: the chevron
     /// BUTTON bounds (short click toggles) and the NAME LABEL bounds (empty when hidden; long
     /// press begins the inline rename). False / empty when the group has no laid-out control.
@@ -876,6 +897,39 @@ private:
     std::function<std::int64_t(std::int64_t)> arrangementTimelineSnap_;
     std::function<void(TrackId)> onAudioTrackImportClipAtPlayhead_;
     std::function<bool(TrackId, juce::String)> onUndoableRenameTrackRequested_;
+
+    enum class ArrangementGestureKind
+    {
+        None,
+        MarqueePending,
+        Marquee,
+        GroupPending,
+        Group
+    };
+    void collectArrangementSelection(std::vector<ArrangementEventId>& out);
+    void collectArrangementOrigins(std::vector<ArrangementEventOrigin>& out);
+    void applyArrangementSelection(const std::vector<ArrangementEventId>& ids) noexcept;
+    void applyAudioSelectionFromPlan(const ArrangementGroupMovePlan& plan) noexcept;
+    void updateGroupMovePreview(const ArrangementGroupMovePlan& plan) noexcept;
+    void clearArrangementMovePreview() noexcept;
+    void pruneArrangementSelectionHiddenByCollapsedGroups() noexcept;
+    [[nodiscard]] std::int64_t snapArrangementSampleNonNegative(std::int64_t sample) const noexcept;
+    void paintArrangementMarquee(juce::Graphics& g) const;
+
+    class InstrumentTimelineRowCoordinator* arrangementRows_ = nullptr;
+    class InstrumentRuntimeCoordinator* arrangementRuntime_ = nullptr;
+    std::function<bool(const ArrangementGroupMovePlan&, const std::vector<ArrangementEventOrigin>&)>
+        onArrangementGroupMoveRequested_;
+    ArrangementGestureKind arrangementGesture_ = ArrangementGestureKind::None;
+    juce::Point<int> arrangementGestureAnchor_;
+    juce::Rectangle<int> arrangementMarqueeRect_;
+    bool arrangementMarqueeShiftAdds_ = false;
+    std::vector<ArrangementEventId> arrangementSelectionSnapshot_;
+    ArrangementEventId arrangementGrabbed_{};
+    std::vector<ArrangementEventOrigin> arrangementGestureOrigins_;
+    ArrangementGroupMovePlan arrangementPlan_;
+    bool arrangementGesturePassedThreshold_ = false;
+    static constexpr int kArrangementGestureThresholdPx = 3;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

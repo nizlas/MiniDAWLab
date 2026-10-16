@@ -1032,6 +1032,97 @@ std::optional<TrackId> Session::appendExperimentalInstrumentShellTrack(juce::Str
     return newId;
 }
 
+bool Session::tryMoveAudioClipsTogether(const std::vector<AudioClipGroupRelocation>& moves) noexcept
+{
+    if (moves.empty())
+    {
+        return true;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->isEmpty())
+    {
+        return false;
+    }
+
+    struct ResolvedMove
+    {
+        PlacedClipId id = kInvalidPlacedClipId;
+        std::int64_t newStart = 0;
+        std::int64_t oldStart = 0;
+        TrackId owner = kInvalidTrackId;
+        TrackId dest = kInvalidTrackId;
+    };
+    std::vector<ResolvedMove> resolved;
+    resolved.reserve(moves.size());
+    for (const AudioClipGroupRelocation& move : moves)
+    {
+        if (move.id == kInvalidPlacedClipId || move.newStartSampleOnTimeline < 0
+            || move.destTrackId == kInvalidTrackId)
+        {
+            return false;
+        }
+        const int destIndex = current->findTrackIndexById(move.destTrackId);
+        if (destIndex < 0
+            || !trackKindAcceptsTimelineAudioClips(current->getTrack(destIndex).getKind()))
+        {
+            return false;
+        }
+        ResolvedMove row;
+        row.id = move.id;
+        row.newStart = move.newStartSampleOnTimeline;
+        row.dest = move.destTrackId;
+        bool found = false;
+        for (int ti = 0; ti < current->getNumTracks() && !found; ++ti)
+        {
+            const Track& tr = current->getTrack(ti);
+            for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
+            {
+                if (tr.getPlacedClip(ci).getId() == move.id)
+                {
+                    row.owner = tr.getId();
+                    row.oldStart = tr.getPlacedClip(ci).getStartSample();
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found || row.owner == kInvalidTrackId)
+        {
+            return false;
+        }
+        resolved.push_back(row);
+    }
+
+    std::shared_ptr<const SessionSnapshot> working = current;
+    bool any = false;
+    for (const ResolvedMove& row : resolved)
+    {
+        if (row.owner == row.dest)
+        {
+            if (row.oldStart == row.newStart)
+            {
+                continue;
+            }
+            working = SessionSnapshot::withClipMoved(*working, row.id, row.newStart);
+        }
+        else
+        {
+            working = SessionSnapshot::withClipMovedToTrack(*working, row.id, row.newStart, row.dest);
+        }
+        if (working == nullptr)
+        {
+            return false;
+        }
+        any = true;
+    }
+    if (!any)
+    {
+        return true;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, working, std::memory_order_release);
+    return true;
+}
+
 void Session::moveClip(const PlacedClipId id, const std::int64_t newStartSampleOnTimeline) noexcept
 {
     if (id == kInvalidPlacedClipId)

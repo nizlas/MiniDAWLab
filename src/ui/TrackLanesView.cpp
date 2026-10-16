@@ -4,6 +4,9 @@
 
 #include "ui/TrackLanesView.h"
 
+#include "app/InstrumentRuntimeCoordinator.h"
+#include "app/InstrumentTimelineRowCoordinator.h"
+
 #include "audio/LatencySettingsStore.h"
 #include "ui/ClipWaveformView.h"
 #include "ui/TimelineLocatorPainter.h"
@@ -1607,6 +1610,7 @@ void TrackLanesView::cancelAllClipGesturesAndTransientUiState() noexcept
             + juce::String(static_cast<int>(lanes_.size())));
     }
     aggregatedSelectedPlacedClip_.reset();
+    cancelArrangementGesture();
     for (auto& u : lanes_)
     {
         if (u != nullptr)
@@ -3666,6 +3670,8 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
         paintVisualGroupMarkersOverSeparators(g);
     }
 
+    paintArrangementMarquee(g);
+
     if (!headerTrackDragActive_ || headerTrackDragInvalidArea_)
     {
         return;
@@ -4085,6 +4091,7 @@ void TrackLanesView::rebuildVisualGroupDisplayCache()
         }
     }
     rebuildVisualGroupHandles();
+    pruneArrangementSelectionHiddenByCollapsedGroups();
 }
 
 void TrackLanesView::rebuildVisualGroupHandles()
@@ -4711,4 +4718,659 @@ bool TrackLanesView::commitVisualGroupHandleRenameForTest(const int groupId,
         return false;
     }
     return it->second.label->commitRenameWithTextForTest(newName);
+}
+
+void TrackLanesView::setArrangementInteractionPeers(InstrumentTimelineRowCoordinator* const rows,
+                                                   InstrumentRuntimeCoordinator* const runtime) noexcept
+{
+    arrangementRows_ = rows;
+    arrangementRuntime_ = runtime;
+}
+
+void TrackLanesView::setOnArrangementGroupMoveRequested(
+    std::function<bool(const ArrangementGroupMovePlan&, const std::vector<ArrangementEventOrigin>&)> fn) noexcept
+{
+    onArrangementGroupMoveRequested_ = std::move(fn);
+}
+
+int TrackLanesView::arrangementSelectedEventCount() noexcept
+{
+    int count = 0;
+    for (const auto& lane : lanes_)
+    {
+        if (lane != nullptr)
+        {
+            count += lane->arrangementSelectedCount();
+        }
+    }
+    if (arrangementRuntime_ != nullptr)
+    {
+        arrangementRuntime_->forEachInstrumentController(
+            [&](TrackId, InstrumentTrackController& ctl) { count += (int)ctl.getSelectedClipIds().size(); });
+    }
+    return count;
+}
+
+int TrackLanesView::sessionTrackIndexAtLocalPoint(const juce::Point<int> localPoint) const noexcept
+{
+    if (localPoint.x < headerColumnWidthPx())
+    {
+        return -1;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return -1;
+    }
+    const int rowCount = (int)visibleTrackEntries_.size();
+    for (int vi = 0; vi < rowCount; ++vi)
+    {
+        const int top = yTopForVisibleIndex(vi);
+        const int height = rowHeightForVisibleEntry(vi);
+        if (localPoint.y < top || localPoint.y >= top + height)
+        {
+            continue;
+        }
+        const TrackId tid = visibleTrackEntries_[(size_t)vi].sessionTrackId;
+        if (isTrackInCollapsedVisualGroup(tid))
+        {
+            return -1;
+        }
+        return snap->findTrackIndexById(tid);
+    }
+    return -1;
+}
+
+std::int64_t TrackLanesView::snapArrangementSampleNonNegative(std::int64_t sample) const noexcept
+{
+    sample = juce::jmax(std::int64_t{ 0 }, sample);
+    if (arrangementTimelineSnap_ != nullptr)
+    {
+        return arrangementTimelineSnap_(sample);
+    }
+    return sample;
+}
+
+void TrackLanesView::collectArrangementSelection(std::vector<ArrangementEventId>& out)
+{
+    out.clear();
+    for (const auto& lane : lanes_)
+    {
+        if (lane == nullptr)
+        {
+            continue;
+        }
+        const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr)
+        {
+            continue;
+        }
+        const int tIdx = snap->findTrackIndexById(lane->getTrackId());
+        if (tIdx < 0)
+        {
+            continue;
+        }
+        const Track& tr = snap->getTrack(tIdx);
+        for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+        {
+            const PlacedClipId id = tr.getPlacedClip(i).getId();
+            if (lane->isPlacedClipSelected(id))
+            {
+                out.push_back(ArrangementEventId{ ArrangementEventKind::AudioClip, lane->getTrackId(), id });
+            }
+        }
+    }
+    if (arrangementRuntime_ != nullptr)
+    {
+        arrangementRuntime_->forEachInstrumentController([&](const TrackId tid, InstrumentTrackController& ctl) {
+            for (const InstrumentMidiClipId id : ctl.getSelectedClipIds())
+            {
+                out.push_back(ArrangementEventId{ ArrangementEventKind::MidiClip, tid, id });
+            }
+        });
+    }
+}
+
+void TrackLanesView::collectArrangementOrigins(std::vector<ArrangementEventOrigin>& out)
+{
+    out.clear();
+    std::vector<ArrangementEventId> selected;
+    collectArrangementSelection(selected);
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    for (const ArrangementEventId& id : selected)
+    {
+        ArrangementEventOrigin origin;
+        origin.id = id;
+        origin.trackIndex = snap->findTrackIndexById(id.trackId);
+        if (origin.trackIndex < 0)
+        {
+            continue;
+        }
+        if (id.kind == ArrangementEventKind::AudioClip)
+        {
+            const Track& tr = snap->getTrack(origin.trackIndex);
+            bool found = false;
+            for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+            {
+                if (tr.getPlacedClip(i).getId() == id.eventId)
+                {
+                    origin.startSamples = tr.getPlacedClip(i).getStartSample();
+                    origin.lengthSamples = tr.getPlacedClip(i).getEffectiveLengthSamples();
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                continue;
+            }
+        }
+        else if (arrangementRuntime_ != nullptr)
+        {
+            InstrumentTrackController* const ctl = arrangementRuntime_->getMidiClipControllerForTrack(id.trackId);
+            const InstrumentMidiClip* const clip = ctl != nullptr ? ctl->getClipById(id.eventId) : nullptr;
+            if (clip == nullptr)
+            {
+                continue;
+            }
+            origin.startSamples = clip->startSamples;
+            origin.lengthSamples = clip->lengthSamples;
+        }
+        else
+        {
+            continue;
+        }
+        out.push_back(origin);
+    }
+}
+
+void TrackLanesView::applyArrangementSelection(const std::vector<ArrangementEventId>& ids) noexcept
+{
+    std::unordered_map<TrackId, std::vector<PlacedClipId>> audio;
+    std::unordered_map<TrackId, std::vector<InstrumentMidiClipId>> midi;
+    for (const ArrangementEventId& id : ids)
+    {
+        if (id.kind == ArrangementEventKind::AudioClip)
+        {
+            audio[id.trackId].push_back(id.eventId);
+        }
+        else
+        {
+            midi[id.trackId].push_back(id.eventId);
+        }
+    }
+    for (auto& lane : lanes_)
+    {
+        if (lane == nullptr)
+        {
+            continue;
+        }
+        const auto it = audio.find(lane->getTrackId());
+        if (it == audio.end())
+        {
+            lane->setArrangementCoSelected({}, std::nullopt);
+        }
+    }
+    for (auto& lane : lanes_)
+    {
+        if (lane == nullptr)
+        {
+            continue;
+        }
+        const auto it = audio.find(lane->getTrackId());
+        if (it != audio.end())
+        {
+            lane->setArrangementCoSelected(it->second, it->second.back());
+        }
+    }
+    if (arrangementRuntime_ != nullptr)
+    {
+        arrangementRuntime_->forEachInstrumentController(
+            [&](const TrackId tid, InstrumentTrackController& ctl) {
+                const auto it = midi.find(tid);
+                ctl.replaceInstrumentMidiClipSelectionOrdered(
+                    it == midi.end() ? std::vector<InstrumentMidiClipId>{} : it->second);
+            });
+    }
+}
+
+void TrackLanesView::applyAudioSelectionFromPlan(const ArrangementGroupMovePlan& plan) noexcept
+{
+    std::vector<ArrangementEventId> ids;
+    ids.reserve(plan.dests.size());
+    for (const ArrangementMoveDest& dest : plan.dests)
+    {
+        if (dest.id.kind != ArrangementEventKind::AudioClip || dest.destTrackId == kInvalidTrackId)
+        {
+            continue;
+        }
+        ArrangementEventId moved = dest.id;
+        moved.trackId = dest.destTrackId;
+        ids.push_back(moved);
+    }
+    std::unordered_map<TrackId, std::vector<PlacedClipId>> audio;
+    for (const ArrangementEventId& id : ids)
+    {
+        audio[id.trackId].push_back(id.eventId);
+    }
+    for (auto& lane : lanes_)
+    {
+        if (lane == nullptr)
+        {
+            continue;
+        }
+        const auto it = audio.find(lane->getTrackId());
+        lane->setArrangementCoSelected(it == audio.end() ? std::vector<PlacedClipId>{} : it->second,
+                                       it == audio.end() ? std::nullopt : std::optional<PlacedClipId>(it->second.back()));
+    }
+}
+
+void TrackLanesView::clearArrangementMovePreview() noexcept
+{
+    for (auto& lane : lanes_)
+    {
+        if (lane != nullptr)
+        {
+            lane->clearDragGhost();
+        }
+    }
+    if (arrangementRows_ != nullptr)
+    {
+        arrangementRows_->setArrangementGroupMidiGhosts({});
+    }
+}
+
+void TrackLanesView::updateGroupMovePreview(const ArrangementGroupMovePlan& plan) noexcept
+{
+    std::unordered_map<TrackId, std::vector<std::pair<std::int64_t, std::int64_t>>> audio;
+    std::vector<std::pair<TrackId, std::vector<std::pair<std::int64_t, std::int64_t>>>> midi;
+    std::unordered_map<TrackId, size_t> midiIndex;
+    for (const ArrangementMoveDest& dest : plan.dests)
+    {
+        if (dest.destTrackId == kInvalidTrackId || dest.lengthSamples <= 0)
+        {
+            continue;
+        }
+        if (dest.id.kind == ArrangementEventKind::AudioClip)
+        {
+            audio[dest.destTrackId].emplace_back(dest.destStartSamples, dest.lengthSamples);
+        }
+        else
+        {
+            const auto it = midiIndex.find(dest.destTrackId);
+            if (it == midiIndex.end())
+            {
+                midiIndex.emplace(dest.destTrackId, midi.size());
+                midi.push_back({ dest.destTrackId, {} });
+            }
+            midi[midiIndex[dest.destTrackId]].second.emplace_back(dest.destStartSamples, dest.lengthSamples);
+        }
+    }
+    for (auto& lane : lanes_)
+    {
+        if (lane == nullptr)
+        {
+            continue;
+        }
+        const auto it = audio.find(lane->getTrackId());
+        if (it == audio.end())
+        {
+            lane->clearDragGhost();
+        }
+        else
+        {
+            lane->setDragGhostSpans(it->second);
+        }
+    }
+    if (arrangementRows_ != nullptr)
+    {
+        arrangementRows_->setArrangementGroupMidiGhosts(midi);
+    }
+}
+
+void TrackLanesView::paintArrangementMarquee(juce::Graphics& g) const
+{
+    if (arrangementGesture_ != ArrangementGestureKind::Marquee || arrangementMarqueeRect_.isEmpty())
+    {
+        return;
+    }
+    const auto rf = arrangementMarqueeRect_.toFloat();
+    g.setColour(juce::Colour(0xff3d4e63).withAlpha(0.22f));
+    g.fillRect(rf);
+    g.setColour(juce::Colour(0xffe8eef5).withAlpha(0.82f));
+    g.drawRect(rf, 1.0f);
+}
+
+bool TrackLanesView::armArrangementMarquee(const juce::Point<int> localPoint, const bool shiftAdds) noexcept
+{
+    if (arrangementGesture_ != ArrangementGestureKind::None)
+    {
+        return false;
+    }
+    if (localPoint.x < headerColumnWidthPx())
+    {
+        return false;
+    }
+    arrangementGesture_ = ArrangementGestureKind::MarqueePending;
+    arrangementGestureAnchor_ = localPoint;
+    arrangementMarqueeShiftAdds_ = shiftAdds;
+    arrangementMarqueeRect_ = {};
+    arrangementGesturePassedThreshold_ = false;
+    collectArrangementSelection(arrangementSelectionSnapshot_);
+    return true;
+}
+
+bool TrackLanesView::beginArrangementGroupDrag(const ArrangementEventId grabbed,
+                                              const juce::Point<int> localPoint) noexcept
+{
+    if (arrangementGesture_ != ArrangementGestureKind::None || arrangementSelectedEventCount() <= 1)
+    {
+        return false;
+    }
+    collectArrangementOrigins(arrangementGestureOrigins_);
+    bool grabbedFound = false;
+    for (const ArrangementEventOrigin& origin : arrangementGestureOrigins_)
+    {
+        if (origin.id == grabbed)
+        {
+            grabbedFound = true;
+            break;
+        }
+    }
+    if (!grabbedFound)
+    {
+        arrangementGestureOrigins_.clear();
+        return false;
+    }
+    arrangementGesture_ = ArrangementGestureKind::GroupPending;
+    arrangementGestureAnchor_ = localPoint;
+    arrangementGrabbed_ = grabbed;
+    arrangementGesturePassedThreshold_ = false;
+    arrangementPlan_ = {};
+    return true;
+}
+
+bool TrackLanesView::updateArrangementGesture(const juce::Point<int> localPoint,
+                                              const std::optional<std::int64_t> unsnappedGrabbedStart) noexcept
+{
+    const int dx = localPoint.x - arrangementGestureAnchor_.x;
+    const int dy = localPoint.y - arrangementGestureAnchor_.y;
+    const bool past = std::abs(dx) >= kArrangementGestureThresholdPx
+                      || std::abs(dy) >= kArrangementGestureThresholdPx;
+    if (arrangementGesture_ == ArrangementGestureKind::MarqueePending
+        || arrangementGesture_ == ArrangementGestureKind::Marquee)
+    {
+        if (arrangementGesture_ == ArrangementGestureKind::MarqueePending && !past)
+        {
+            return true;
+        }
+        arrangementGesture_ = ArrangementGestureKind::Marquee;
+        arrangementGesturePassedThreshold_ = true;
+        arrangementMarqueeRect_ = juce::Rectangle<int>(arrangementGestureAnchor_, localPoint);
+        if (arrangementMarqueeRect_.getWidth() == 0)
+        {
+            arrangementMarqueeRect_.setWidth(1);
+        }
+        if (arrangementMarqueeRect_.getHeight() == 0)
+        {
+            arrangementMarqueeRect_.setHeight(1);
+        }
+        std::vector<std::pair<PlacedClipId, juce::Rectangle<int>>> audioRects;
+        for (const auto& lane : lanes_)
+        {
+            if (lane != nullptr)
+            {
+                lane->appendVisiblePlacedEventRectsInParent(audioRects);
+            }
+        }
+        std::vector<InstrumentTimelineRowCoordinator::VisibleMidiEventRect> midiRects;
+        if (arrangementRows_ != nullptr)
+        {
+            arrangementRows_->collectVisibleMidiEventRects(midiRects);
+        }
+        std::vector<ArrangementEventId> hits;
+        for (const auto& lane : lanes_)
+        {
+            if (lane == nullptr)
+            {
+                continue;
+            }
+            for (const auto& rect : audioRects)
+            {
+                if (rect.second.intersects(arrangementMarqueeRect_))
+                {
+                    bool onLane = false;
+                    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+                    const int tIdx = snap != nullptr ? snap->findTrackIndexById(lane->getTrackId()) : -1;
+                    if (snap != nullptr && tIdx >= 0)
+                    {
+                        const Track& tr = snap->getTrack(tIdx);
+                        for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+                        {
+                            if (tr.getPlacedClip(i).getId() == rect.first)
+                            {
+                                onLane = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (onLane)
+                    {
+                        hits.push_back(ArrangementEventId{
+                            ArrangementEventKind::AudioClip, lane->getTrackId(), rect.first });
+                    }
+                }
+            }
+        }
+        for (const auto& rect : midiRects)
+        {
+            if (rect.boundsInParent.intersects(arrangementMarqueeRect_))
+            {
+                hits.push_back(ArrangementEventId{ ArrangementEventKind::MidiClip, rect.trackId, rect.clipId });
+            }
+        }
+        std::vector<ArrangementEventId> next = arrangementMarqueeShiftAdds_ ? arrangementSelectionSnapshot_ : std::vector<ArrangementEventId>{};
+        for (const ArrangementEventId& hit : hits)
+        {
+            bool already = false;
+            for (const ArrangementEventId& existing : next)
+            {
+                if (existing == hit)
+                {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already)
+            {
+                next.push_back(hit);
+            }
+        }
+        applyArrangementSelection(next);
+        repaint();
+        return true;
+    }
+    if (arrangementGesture_ == ArrangementGestureKind::GroupPending
+        || arrangementGesture_ == ArrangementGestureKind::Group)
+    {
+        if (arrangementGesture_ == ArrangementGestureKind::GroupPending && !past)
+        {
+            return true;
+        }
+        arrangementGesture_ = ArrangementGestureKind::Group;
+        arrangementGesturePassedThreshold_ = true;
+        const ArrangementEventOrigin* grabbed = nullptr;
+        for (const ArrangementEventOrigin& origin : arrangementGestureOrigins_)
+        {
+            if (origin.id == arrangementGrabbed_)
+            {
+                grabbed = &origin;
+                break;
+            }
+        }
+        if (grabbed == nullptr)
+        {
+            return false;
+        }
+        const std::int64_t proposed = unsnappedGrabbedStart.has_value() ? *unsnappedGrabbedStart
+                                                                        : grabbed->startSamples;
+        const std::int64_t snapped = proposed < 0 ? proposed : snapArrangementSampleNonNegative(proposed);
+        const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+        std::vector<TrackKind> kinds;
+        std::vector<TrackId> ids;
+        std::vector<int> collapsed;
+        if (snap != nullptr)
+        {
+            kinds.reserve((size_t)snap->getNumTracks());
+            ids.reserve((size_t)snap->getNumTracks());
+            collapsed.reserve((size_t)snap->getNumTracks());
+            for (int i = 0; i < snap->getNumTracks(); ++i)
+            {
+                const Track& tr = snap->getTrack(i);
+                kinds.push_back(tr.getKind());
+                ids.push_back(tr.getId());
+                collapsed.push_back(isTrackInCollapsedVisualGroup(tr.getId()) ? 1 : 0);
+            }
+        }
+        arrangementPlan_ = planArrangementGroupMove(
+            arrangementGestureOrigins_,
+            arrangementGrabbed_,
+            snapped,
+            sessionTrackIndexAtLocalPoint(localPoint),
+            kinds,
+            ids,
+            collapsed);
+        updateGroupMovePreview(arrangementPlan_);
+        repaint();
+        return arrangementPlan_.valid;
+    }
+    return true;
+}
+
+bool TrackLanesView::endArrangementGesture() noexcept
+{
+    if (arrangementGesture_ == ArrangementGestureKind::None)
+    {
+        const bool swallowed = arrangementGesturePassedThreshold_;
+        arrangementGesturePassedThreshold_ = false;
+        return swallowed;
+    }
+    const ArrangementGestureKind kind = arrangementGesture_;
+    const bool dragged = arrangementGesturePassedThreshold_;
+    if (kind == ArrangementGestureKind::MarqueePending)
+    {
+        applyArrangementSelection({});
+    }
+    else if (kind == ArrangementGestureKind::Group)
+    {
+        const bool changed = arrangementPlan_.valid
+                             && (arrangementPlan_.timeDelta != 0 || arrangementPlan_.trackDelta != 0);
+        bool committed = false;
+        if (changed && onArrangementGroupMoveRequested_ != nullptr)
+        {
+            committed = onArrangementGroupMoveRequested_(arrangementPlan_, arrangementGestureOrigins_);
+        }
+        if (committed)
+        {
+            applyAudioSelectionFromPlan(arrangementPlan_);
+        }
+        else if (changed)
+        {
+            std::vector<ArrangementEventId> restore;
+            restore.reserve(arrangementGestureOrigins_.size());
+            for (const ArrangementEventOrigin& origin : arrangementGestureOrigins_)
+            {
+                restore.push_back(origin.id);
+            }
+            applyArrangementSelection(restore);
+        }
+        clearArrangementMovePreview();
+    }
+    arrangementGesture_ = ArrangementGestureKind::None;
+    arrangementMarqueeRect_ = {};
+    arrangementGestureOrigins_.clear();
+    arrangementPlan_ = {};
+    arrangementGesturePassedThreshold_ = false;
+    repaint();
+    return dragged;
+}
+
+void TrackLanesView::cancelArrangementGesture() noexcept
+{
+    if (arrangementGesture_ == ArrangementGestureKind::None)
+    {
+        return;
+    }
+    if (arrangementGesture_ == ArrangementGestureKind::Marquee
+        || arrangementGesture_ == ArrangementGestureKind::MarqueePending)
+    {
+        applyArrangementSelection(arrangementSelectionSnapshot_);
+    }
+    clearArrangementMovePreview();
+    arrangementGesture_ = ArrangementGestureKind::None;
+    arrangementMarqueeRect_ = {};
+    arrangementGestureOrigins_.clear();
+    arrangementPlan_ = {};
+    arrangementGesturePassedThreshold_ = true;
+    repaint();
+}
+
+void TrackLanesView::pruneArrangementSelectionHiddenByCollapsedGroups() noexcept
+{
+    std::vector<ArrangementEventId> selected;
+    collectArrangementSelection(selected);
+    std::vector<ArrangementEventId> kept;
+    bool removed = false;
+    bool gestureAffected = false;
+    for (const ArrangementEventId& id : selected)
+    {
+        if (isTrackInCollapsedVisualGroup(id.trackId))
+        {
+            removed = true;
+            gestureAffected = true;
+        }
+        else
+        {
+            kept.push_back(id);
+        }
+    }
+    arrangementSelectionSnapshot_.erase(
+        std::remove_if(arrangementSelectionSnapshot_.begin(),
+                       arrangementSelectionSnapshot_.end(),
+                       [this](const ArrangementEventId& id) {
+                           return isTrackInCollapsedVisualGroup(id.trackId);
+                       }),
+        arrangementSelectionSnapshot_.end());
+    for (const ArrangementEventOrigin& origin : arrangementGestureOrigins_)
+    {
+        if (isTrackInCollapsedVisualGroup(origin.id.trackId))
+        {
+            gestureAffected = true;
+        }
+    }
+    for (const ArrangementMoveDest& dest : arrangementPlan_.dests)
+    {
+        if (dest.destTrackId != kInvalidTrackId && isTrackInCollapsedVisualGroup(dest.destTrackId))
+        {
+            gestureAffected = true;
+        }
+    }
+    if (removed)
+    {
+        applyArrangementSelection(kept);
+    }
+    if (gestureAffected && arrangementGesture_ != ArrangementGestureKind::None)
+    {
+        clearArrangementMovePreview();
+        arrangementGesture_ = ArrangementGestureKind::None;
+        arrangementMarqueeRect_ = {};
+        arrangementGestureOrigins_.clear();
+        arrangementPlan_ = {};
+        arrangementGesturePassedThreshold_ = true;
+        repaint();
+    }
 }

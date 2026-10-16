@@ -636,6 +636,97 @@ void UndoRedoCoordinator::executeUndoableRecordingCommit(const juce::String& lab
     }
 }
 
+void UndoRedoCoordinator::executeUndoableArrangementEdit(const juce::String& label,
+                                                         std::function<bool()> mutator)
+{
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return;
+    }
+    std::shared_ptr<const SessionSnapshot> before = session_.loadSessionSnapshotForAudioThread();
+    if (before == nullptr)
+    {
+        return;
+    }
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical;
+    if (callbacks_.buildSortedInstrumentMusicalUndoSnapshot)
+    {
+        beforeMusical = callbacks_.buildSortedInstrumentMusicalUndoSnapshot();
+    }
+    if (callbacks_.stableSortInstrumentMusicalUndoVector)
+    {
+        callbacks_.stableSortInstrumentMusicalUndoVector(beforeMusical);
+    }
+
+    const bool mutated = mutator && mutator();
+    auto musicalNow = [&]() {
+        std::vector<ProjectFileExperimentalInstrumentTrackV1> musical;
+        if (callbacks_.buildSortedInstrumentMusicalUndoSnapshot)
+        {
+            musical = callbacks_.buildSortedInstrumentMusicalUndoSnapshot();
+        }
+        if (callbacks_.stableSortInstrumentMusicalUndoVector)
+        {
+            callbacks_.stableSortInstrumentMusicalUndoVector(musical);
+        }
+        return musical;
+    };
+
+    if (!mutated)
+    {
+        const std::shared_ptr<const SessionSnapshot> now = session_.loadSessionSnapshotForAudioThread();
+        if (now != nullptr && now.get() != before.get())
+        {
+            session_.restoreSessionSnapshotForUndo(before);
+            if (callbacks_.rebuildRoutingPlanFromSession)
+            {
+                callbacks_.rebuildRoutingPlanFromSession();
+            }
+        }
+        const std::vector<ProjectFileExperimentalInstrumentTrackV1> mid = musicalNow();
+        const bool musicalDirty = !beforeMusical.empty() && !mid.empty()
+                                  && !experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, mid);
+        if (musicalDirty && callbacks_.applyInstrumentMusicalUndoVectorToAllKeyedAndStaging)
+        {
+            callbacks_.applyInstrumentMusicalUndoVectorToAllKeyedAndStaging(beforeMusical);
+        }
+        if (callbacks_.reconcileMidiEditorAfterInstrumentEdit)
+        {
+            callbacks_.reconcileMidiEditorAfterInstrumentEdit();
+        }
+        return;
+    }
+
+    if (callbacks_.reconcileMidiEditorAfterInstrumentEdit)
+    {
+        callbacks_.reconcileMidiEditorAfterInstrumentEdit();
+    }
+
+    std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical = musicalNow();
+    const bool sessionChanged = after != nullptr && before.get() != after.get();
+    const bool musicalChanged = !beforeMusical.empty() && !afterMusical.empty()
+                                && !experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, afterMusical);
+    if (!sessionChanged && !musicalChanged)
+    {
+        return;
+    }
+    if (after == nullptr)
+    {
+        return;
+    }
+    std::optional<InstrumentUndoStepSides> instrumentSides;
+    if (musicalChanged)
+    {
+        instrumentSides = InstrumentUndoStepSides{ std::move(beforeMusical), std::move(afterMusical) };
+    }
+    sessionHistory_.record(label, std::move(before), std::move(after), std::nullopt, std::move(instrumentSides));
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
+}
+
 std::vector<ProjectFileExperimentalInstrumentTrackV1>
 UndoRedoCoordinator::captureInstrumentMusicalUndoSnapshot() const
 {

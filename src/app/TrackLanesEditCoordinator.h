@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "app/InstrumentRuntimeCoordinator.h"
 #include "app/TrackEditActions.h"
 #include "domain/PlacedClip.h"
 #include "domain/SessionHistory.h"
@@ -90,6 +91,14 @@ public:
     /// Install the optional live-MIDI notification after construction (composition root).
     void setOnMidiInputAssignmentChanged(std::function<void()> fn) { callbacks_.onMidiInputAssignmentChanged = std::move(fn); }
 
+    /// Arrangement group move: one undo step for audio clips and MIDI clips together.
+    /// Call once after `UndoRedoCoordinator` and `InstrumentRuntimeCoordinator` exist.
+    void setArrangementGroupMoveBackends(
+        std::function<void(const juce::String& label, std::function<bool()> mutator)> executeUndoableArrangementEdit,
+        std::function<InstrumentRuntimeCoordinator::ArrangementMidiRelocationResult(
+            const std::vector<InstrumentRuntimeCoordinator::ArrangementMidiRelocation>&)>
+            applyMidiRelocations);
+
     TrackLanesEditCoordinator(Session& session,
                               PlaybackEngine& playbackEngine,
                               PluginInsertHost& pluginHost,
@@ -141,4 +150,8 @@ private:
     InspectorView& inspectorView_;
     Callbacks callbacks_;
     TrackEditActions trackEditActions_;
+    std::function<void(const juce::String& label, std::function<bool()> mutator)> executeArrangementEdit_;
+    std::function<InstrumentRuntimeCoordinator::ArrangementMidiRelocationResult(
+        const std::vector<InstrumentRuntimeCoordinator::ArrangementMidiRelocation>&)>
+        applyArrangementMidiRelocations_;
 };

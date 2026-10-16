@@ -145,6 +145,21 @@ public:
     /// Screen point in global pixels: instrument MIDI event lane row under the point, if any.
     [[nodiscard]] std::optional<TrackId> instrumentMidiLaneHitAtScreen(juce::Point<float> screenPt) const noexcept;
 
+    struct VisibleMidiEventRect
+    {
+        TrackId trackId = kInvalidTrackId;
+        InstrumentMidiClipId clipId = 0;
+        juce::Rectangle<int> boundsInParent;
+    };
+
+    /// Visible MIDI event rectangles in `TrackLanesView` coordinates. Collapsed lanes (empty
+    /// bounds) contribute nothing.
+    void collectVisibleMidiEventRects(std::vector<VisibleMidiEventRect>& out) const;
+
+    /// Group-move preview: one ghost list per destination MIDI lane. Clears every lane first.
+    void setArrangementGroupMidiGhosts(
+        const std::vector<std::pair<TrackId, std::vector<std::pair<std::int64_t, std::int64_t>>>>& perTrack) noexcept;
+
     /// Cross-lane MIDI move: transient drop ghost (session start + length per clip), matching `ClipWaveformView` drag ghost.
     void clearInstrumentMidiCrossTrackDropGhosts() noexcept;
     void syncInstrumentMidiCrossTrackDropGhostPreview(
