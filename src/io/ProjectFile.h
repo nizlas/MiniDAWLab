@@ -144,6 +144,9 @@ struct ProjectFileExperimentalTimelineNoteV12
     int channel = 1;
     std::int64_t startTick = 0;
     std::int64_t durationTicks = 240;
+    /// In-memory only (undo). Never written or read as JSON, so the project schema stays put.
+    std::uint64_t uid = 0;
+    bool editorSelected = false;
 };
 
 /// v19: one sparse MIDI CC automation point (clip-owned, tick domain of `timelineNotes`).

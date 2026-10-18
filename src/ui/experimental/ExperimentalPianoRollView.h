@@ -1,8 +1,10 @@
 #pragma once
 
+#include "domain/Track.h"
 #include "ui/experimental/ExperimentalMidiChannelDiagnostics.h"
 #include "ui/experimental/ExperimentalMidiNoteLengthFormat.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
+#include "ui/experimental/MidiEditorCohort.h"
 #include "ui/CoalescedRepaintFlusher.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/FollowAutoscrollGovernor.h"
@@ -97,6 +99,42 @@ public:
 
     /// Bind the roll to a session clip (absolute timeline). Pass nullptrs when unbound.
     /// When the clip has no saved roll viewport, horizontal zoom is seeded to ~5 bars using `Session` tempo/meter (not main-timeline zoom).
+    /// One event in the shared editor. `clip` is non-owning and valid only on the message thread
+    /// until the next cohort refresh (undo rebuilds clip objects).
+    struct CohortMember
+    {
+        TrackId trackId = kInvalidTrackId;
+        std::uint64_t clipId = 0;
+        int trackOrder = 0;
+        InstrumentMidiClip* clip = nullptr;
+        InstrumentTrackController* controller = nullptr;
+        ExperimentalMidiPatternPlayer* auditionPlayer = nullptr;
+        bool active = false;
+    };
+
+    /// Replace the member list. Does not move the viewport, playhead, or clipboard. The member
+    /// whose clip pointer matches the bound clip stays active.
+    void setCohort(std::vector<CohortMember> members) noexcept;
+
+    /// Piano-key audition destination. Arranged-note note-off stays on the player that started it.
+    void setAuditionPlayer(ExperimentalMidiPatternPlayer* player) noexcept;
+
+    /// Fired after a click activates a different member. The roll has already reseated; the window
+    /// updates title, status, and the piano-key player. Must not rebuild the roll.
+    std::function<void(TrackId trackId, std::uint64_t clipId)> onActiveCohortMemberChanged;
+
+    struct TimelineClipboardNote
+    {
+        std::int64_t deltaProjectSamples = 0;
+        std::int64_t durationSamples = 1;
+        int midiNote = 60;
+        int velocity = 100;
+        int offVelocity = kDefaultMidiNoteOffVelocity;
+        std::uint8_t channel = 1;
+    };
+    void copyTimelineClipboard(std::vector<TimelineClipboardNote>& out) const;
+    void setTimelineClipboard(std::vector<TimelineClipboardNote> items);
+
     void setSessionTimelineContext(InstrumentMidiClip* timelineClip,
                                    Session* session,
                                    Transport* transport,
@@ -370,11 +408,42 @@ private:
     {
         int index = -1;
         TimelineMidiNote original {};
+        TrackId trackId = kInvalidTrackId;
+        std::uint64_t clipId = 0;
     };
     using TimelineNoteResizeCapture = TimelineNoteMoveCapture;
     void beginTimelineNoteMoveGesture(const juce::MouseEvent& e);
     void updateTimelineNoteMoveGesture(juce::Point<int> localPos);
     void finishTimelineNoteMoveGesture();
+    void syncEditorSelectionFlags() noexcept;
+    void selectAppliedCaptures(const std::vector<TimelineNoteMoveCapture>& captures,
+                               const std::vector<TimelineMidiNote>& notes) noexcept;
+    void notifyCohortControllersMusicalChange() noexcept;
+    void rebuildSelectionFromEditorFlags() noexcept;
+    void reseatActiveMember(const CohortMember& member) noexcept;
+    struct CohortHit
+    {
+        int memberIndex = -1;
+        int noteIndex = -1;
+    };
+    [[nodiscard]] std::optional<CohortHit> findTopCohortNote(juce::Point<int> pos) const;
+    [[nodiscard]] ExperimentalMidiPattern* patternForTrackClip(TrackId trackId, std::uint64_t clipId) const noexcept;
+    [[nodiscard]] ExperimentalMidiPattern* patternForCapture(const TimelineNoteMoveCapture& cap) const noexcept;
+    [[nodiscard]] InstrumentMidiClip* clipForTrackClip(TrackId trackId, std::uint64_t clipId) const noexcept;
+    void commitEditOrPromptExtend(const juce::String& label,
+                                   bool notesSitOutside,
+                                   std::function<bool(bool extend)> apply);
+    void paintActiveEventShade(juce::Graphics& g, juce::Rectangle<float> area) const;
+    void paintOtherCohortNotes(juce::Graphics& g, juce::Rectangle<int> grid) const;
+    [[nodiscard]] std::optional<juce::Rectangle<float>> cohortNoteBounds(const CohortMember& member,
+                                                                        int noteIndex) const;
+    [[nodiscard]] bool groupedCapturesOverlap(const std::vector<TimelineNoteMoveCapture>& captures,
+                                              const std::vector<TimelineMidiNote>& candidates) const noexcept;
+    [[nodiscard]] bool capturedSpansNeedExtend(
+        const std::vector<std::pair<InstrumentMidiClip*, midi_editor_cohort::ProjectSpan>>& spans) const noexcept;
+    void extendClipsToCover(
+        const std::vector<std::pair<InstrumentMidiClip*, midi_editor_cohort::ProjectSpan>>& spans) noexcept;
+    [[nodiscard]] bool noteIsSelected(TrackId trackId, std::uint64_t clipId, int noteIndex) const noexcept;
     void clearTimelineNoteMovePending() noexcept;
 
     [[nodiscard]] bool currentEditCandidatesOverlap(
@@ -548,11 +617,14 @@ private:
     struct InternalTimelineClipboardItem
     {
         std::int64_t deltaStartTicks = 0;
+        std::int64_t deltaProjectSamples = 0;
+        std::int64_t durationSamples = 1;
         int midiNote = 60;
         int velocity = 100;
         int offVelocity = kDefaultMidiNoteOffVelocity;
         std::uint8_t channel = 1;
         std::int64_t durationTicks = 240;
+        bool useProjectSamples = false;
     };
     std::vector<InternalTimelineClipboardItem> timelineInternalClipboard_;
     /// Earliest `startTick` among notes last copied (for paste fallback anchor).
@@ -617,7 +689,7 @@ private:
     float lastPaintedPlayheadCentreX_ = std::numeric_limits<float>::quiet_NaN();
 
 
-    ExperimentalMidiPattern& pattern_;
+    ExperimentalMidiPattern* pattern_ = nullptr;
     ExperimentalMidiPatternPlayer* player_;
 
     InstrumentMidiClip* timelineClip_ = nullptr;
@@ -678,8 +750,21 @@ private:
     int timelineNotesDisplayComboId_ = 1;
     int lastObservedTimelineNoteCountUi_ = -1;
 
-    /// Indices into `pattern_.timelineNotes` (not undoable).
+    /// Indices into the active pattern. Notes owned by other members live in `foreignSelectedNotes_`.
     std::unordered_set<int> selectedTimelineNoteIndices_;
+    struct ForeignSelectedNote
+    {
+        TrackId trackId = kInvalidTrackId;
+        std::uint64_t clipId = 0;
+        std::uint64_t uid = 0;
+        int index = -1;
+    };
+    std::vector<ForeignSelectedNote> foreignSelectedNotes_;
+    std::vector<CohortMember> cohort_;
+    TrackId boundTrackId_ = kInvalidTrackId;
+    /// Player that received the current gesture's Note On. Note Off uses this even if the active
+    /// event changes while the button is held.
+    ExperimentalMidiPatternPlayer* auditionGesturePlayer_ = nullptr;
     TimelineMarqueeInteraction timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
     juce::Point<int> timelineMarqueeAnchor_;
     juce::Rectangle<int> timelineMarqueeRect_;

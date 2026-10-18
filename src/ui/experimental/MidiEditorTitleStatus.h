@@ -34,6 +34,18 @@ namespace midi_editor_text
                                       : juce::String("MIDI Editor");
     }
 
+    /// Same title as one event. A shared editor adds the member count so the active track stays
+    /// named and the other events are visible in the title.
+    [[nodiscard]] inline juce::String buildWindowTitle(const juce::String& trackName, const int openEventCount)
+    {
+        juce::String title = buildWindowTitle(trackName);
+        if (openEventCount > 1)
+        {
+            title += " (" + juce::String(openEventCount) + " events)";
+        }
+        return title;
+    }
+
     /// What the status line needs to know about the editor's bound row, pre-resolved by the
     /// caller on the message thread (TrackId-backed; never names or row indices).
     struct BoundTrackStatus

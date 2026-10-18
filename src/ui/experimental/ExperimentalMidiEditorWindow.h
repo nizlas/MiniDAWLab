@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <vector>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -81,6 +82,19 @@ public:
     /// only when the editor is unbound. `mainTimelineViewport` is reserved for future sync; default roll zoom uses ~5 bars from session tempo/meter when the clip has no saved viewport.
     /// `boundTrackName` is the bound track's current name — the window titles itself
     /// `MIDI Editor — <name>` (Phase B.1; same convention for Instrument and MIDI tracks).
+    struct CohortMemberBind
+    {
+        TrackId trackId = kInvalidTrackId;
+        InstrumentMidiClip* clip = nullptr;
+        InstrumentTrackController* controller = nullptr;
+        ExperimentalInstrumentHost* auditionHost = nullptr;
+        int trackOrder = 0;
+    };
+
+    /// Members besides the clip `bindExternalPattern` already bound. Does not move the viewport.
+    void setOpenCohort(std::vector<CohortMemberBind> members);
+    void setActiveCohortMemberHandler(std::function<void(TrackId, std::uint64_t)> handler);
+
     void bindExternalPattern(ExperimentalMidiPattern* pattern,
                              InstrumentMidiClip* timelineClip,
                              InstrumentTrackController* instrumentTrackForClip,

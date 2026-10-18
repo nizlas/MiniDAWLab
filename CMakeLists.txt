@@ -147,6 +147,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/experimental/ExperimentalMidiPatternPlayerHostBinding.cpp
     src/ui/experimental/ExperimentalMidiImport.cpp
     src/ui/experimental/ExperimentalPianoRollView.cpp
+    src/ui/experimental/ExperimentalPianoRollCohort.cpp
     src/ui/experimental/ExperimentalMidiEditorWindow.cpp
 )
 
@@ -591,6 +592,11 @@ add_dependencies(InsertPresetFocusedTests PresetProbe_VST3)
 if (MSVC)
     target_compile_options(InsertPresetFocusedTests PRIVATE /wd4458)
 endif()
+
+# Cohort rules for the shared MIDI editor (time, z-order, clipboard, extend). No audio device.
+add_executable(MidiEditorCohortFocusedTests tests/selftest/MidiEditorCohortFocusedTestsMain.cpp)
+target_include_directories(MidiEditorCohortFocusedTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(MidiEditorCohortFocusedTests PRIVATE cxx_std_17)
 
 # -----------------------------------------------------------------------------
 # ExportLevelFocusedTests: export level / click diagnosis + level-meter regression. `--analyze <dir>`

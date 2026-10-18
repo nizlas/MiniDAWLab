@@ -443,6 +443,10 @@ public:
         instrumentTrackForClipBind_ = nullptr;
         boundTimelineClip_ = nullptr;
         persistentInstrumentClipIdForRebind_ = 0;
+        cohortBinds_.clear();
+        activeCohortMemberHandler_ = nullptr;
+        activeAuditionHost_ = nullptr;
+        releaseExtraAuditionPlayers();
         sessionForRoll_ = nullptr;
         transportForRoll_ = nullptr;
         deviceManagerForRoll_ = nullptr;
@@ -508,18 +512,22 @@ public:
         return externalPattern_ != nullptr ? *externalPattern_ : pattern_;
     }
 
+    [[nodiscard]] ExperimentalInstrumentHost& auditionHost() const noexcept
+    {
+        return activeAuditionHost_ != nullptr ? *activeAuditionHost_ : host_;
+    }
+
     [[nodiscard]] bool editorInstrumentGate() const noexcept
     {
         if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr)
         {
-            // Plugin state comes from the window's bound host: for an Instrument row that is the
-            // row's own host; for a `TrackKind::Midi` row it is the routed `MIDI To` destination's
-            // host (Phase B.1) — the source row must never be asked for a plugin it cannot own.
-            // Power/mute stay per-source, so muting a MIDI track also silences its audition.
+            // Plugin state comes from the active event's destination host: for an Instrument row
+            // that is the row's own host; for a `TrackKind::Midi` row it is the routed `MIDI To`
+            // destination. Power/mute stay per-source, so muting a MIDI track also silences its audition.
             const auto* tr = instrumentTrackForClipBind_;
-            return host_.hasInstrument() && tr->isPowerOn() && !tr->isMuted();
+            return auditionHost().hasInstrument() && tr->isPowerOn() && !tr->isMuted();
         }
-        return host_.hasInstrument();
+        return auditionHost().hasInstrument();
     }
 
     /// Resolves what the status line describes (TrackId-backed, message thread only): the bound
@@ -528,8 +536,8 @@ public:
     [[nodiscard]] midi_editor_text::BoundTrackStatus resolveBoundTrackStatus() const
     {
         midi_editor_text::BoundTrackStatus s;
-        s.instrumentLoaded = host_.hasInstrument();
-        s.instrumentName = host_.getInstrumentNameForUi();
+        s.instrumentLoaded = auditionHost().hasInstrument();
+        s.instrumentName = auditionHost().getInstrumentNameForUi();
         if (sessionForRoll_ == nullptr || instrumentTrackForClipBind_ == nullptr)
         {
             return s;
@@ -571,7 +579,7 @@ public:
     {
         const bool clipBound = externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr;
         const bool canPlayPattern = editorInstrumentGate();
-        const juce::String instrumentName = host_.getInstrumentNameForUi();
+        const juce::String instrumentName = auditionHost().getInstrumentNameForUi();
         const juce::String requiredKitForUi
             = clipBound && instrumentTrackForClipBind_ != nullptr
                   ? instrumentTrackForClipBind_->getRequiredKitName()
@@ -591,7 +599,7 @@ public:
         juce::String instPart;
         if (!clipBound)
         {
-            instPart = host_.hasInstrument()
+            instPart = auditionHost().hasInstrument()
                            ? (instrumentName.isNotEmpty() ? (juce::String("Instrument: ") + instrumentName)
                                                           : juce::String("Instrument: (loaded)"))
                            : juce::String("No instrument loaded");
@@ -954,10 +962,24 @@ private:
     juce::AudioDeviceManager* deviceManagerForRoll_ = nullptr;
     const TimelineViewportModel* mainTimelineViewportForRoll_ = nullptr;
 
+    void setOpenCohort(std::vector<ExperimentalMidiEditorWindow::CohortMemberBind> members);
+    void setActiveCohortMemberHandler(std::function<void(TrackId, InstrumentMidiClipId)> handler);
+    void adoptActiveMember(TrackId trackId, std::uint64_t clipId);
+    ExperimentalMidiPatternPlayer* playerForAuditionHost(ExperimentalInstrumentHost* host);
+    void releaseExtraAuditionPlayers() noexcept;
+    void releaseHeldAuditionPlayers() noexcept;
+    void releaseAllAuditionPlayers() noexcept;
+
     void rebuildPlayerAndRoll(std::optional<int> preserveVerticalPitchScrollTopMidi = std::nullopt)
     {
+        if (auto* oldRoll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            oldRoll->endActiveAuditionGestureOnMouseUp();
+        }
         // Replacing the player releases any active audition previews through the old instance's
         // destructor (Note Offs at the destination/channel captured at Note On).
+        releaseExtraAuditionPlayers();
+        activeAuditionHost_ = &host_;
         player_ = std::make_unique<ExperimentalMidiPatternPlayer>(host_);
         player_->setPlaybackAllowed([this] { return editorInstrumentGate(); });
         rebuildRollViewOnly();
@@ -994,6 +1016,12 @@ private:
 
     void rebuildRollViewOnly()
     {
+        std::vector<ExperimentalPianoRollView::TimelineClipboardNote> savedClipboard;
+        if (auto* oldRoll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            oldRoll->endActiveAuditionGestureOnMouseUp();
+            oldRoll->copyTimelineClipboard(savedClipboard);
+        }
         ExperimentalMidiPattern& ap = activePattern();
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "midi-editor: rebuild roll begin activePatternPtr=" + ptrToLog(&ap) + " externalPatternPtr="
@@ -1021,6 +1049,13 @@ private:
                                         deviceManagerForRoll_,
                                         instrumentTrackForClipBind_,
                                         mainTimelineViewportForRoll_);
+        if (!savedClipboard.empty())
+        {
+            roll->setTimelineClipboard(std::move(savedClipboard));
+        }
+        roll->onActiveCohortMemberChanged = [this](const TrackId trackId, const std::uint64_t clipId) {
+            adoptActiveMember(trackId, clipId);
+        };
         followPlayheadToggle_.setToggleState(
             boundTimelineClip_ != nullptr && boundTimelineClip_->midiRollFollowEnabled,
             juce::dontSendNotification);
@@ -1040,6 +1075,17 @@ private:
     ExperimentalMidiPattern pattern_;
     ExperimentalMidiPattern* externalPattern_ = nullptr;
     std::unique_ptr<ExperimentalMidiPatternPlayer> player_;
+    struct ExtraAuditionPlayer
+    {
+        ExperimentalInstrumentHost* host = nullptr;
+        std::unique_ptr<ExperimentalMidiPatternPlayer> player;
+    };
+    std::vector<ExtraAuditionPlayer> extraPlayers_;
+    std::vector<ExperimentalMidiEditorWindow::CohortMemberBind> cohortBinds_;
+    std::function<void(TrackId, InstrumentMidiClipId)> activeCohortMemberHandler_;
+    /// Destination used for status, the play gate, and piano-key audition. The window's `host_`
+    /// stays the host the window was constructed with; other destinations get `extraPlayers_`.
+    ExperimentalInstrumentHost* activeAuditionHost_ = nullptr;
 
     bool instrumentUiInitialized_ = false;
     bool lastPlayGate_ = false;
@@ -1102,6 +1148,182 @@ private:
     /// Transient "Saving project" indicator (configured lazily in `showSavingProjectToast`).
     juce::Label savingProjectToastLabel_;
 };
+
+void ExperimentalMidiEditorWindow::Body::releaseExtraAuditionPlayers() noexcept
+{
+    extraPlayers_.clear();
+}
+
+void ExperimentalMidiEditorWindow::Body::releaseHeldAuditionPlayers() noexcept
+{
+    if (player_ != nullptr)
+    {
+        player_->releaseHeldPreviewsForFocusLoss();
+    }
+    for (auto& extra : extraPlayers_)
+    {
+        if (extra.player != nullptr)
+        {
+            extra.player->releaseHeldPreviewsForFocusLoss();
+        }
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::releaseAllAuditionPlayers() noexcept
+{
+    if (player_ != nullptr)
+    {
+        player_->releaseAllActivePreviews();
+    }
+    for (auto& extra : extraPlayers_)
+    {
+        if (extra.player != nullptr)
+        {
+            extra.player->releaseAllActivePreviews();
+        }
+    }
+}
+
+ExperimentalMidiPatternPlayer* ExperimentalMidiEditorWindow::Body::playerForAuditionHost(
+    ExperimentalInstrumentHost* host)
+{
+    if (host == nullptr)
+    {
+        return nullptr;
+    }
+    if (host == &host_)
+    {
+        return player_.get();
+    }
+    for (auto& extra : extraPlayers_)
+    {
+        if (extra.host == host)
+        {
+            return extra.player.get();
+        }
+    }
+    auto created = std::make_unique<ExperimentalMidiPatternPlayer>(*host);
+    created->setPlaybackAllowed([this, host] {
+        if (activeAuditionHost_ == host)
+        {
+            return editorInstrumentGate();
+        }
+        return host->hasInstrument();
+    });
+    auto* raw = created.get();
+    extraPlayers_.push_back(ExtraAuditionPlayer{ host, std::move(created) });
+    return raw;
+}
+
+void ExperimentalMidiEditorWindow::Body::setActiveCohortMemberHandler(
+    std::function<void(TrackId, InstrumentMidiClipId)> handler)
+{
+    activeCohortMemberHandler_ = std::move(handler);
+}
+
+void ExperimentalMidiEditorWindow::Body::setOpenCohort(
+    std::vector<ExperimentalMidiEditorWindow::CohortMemberBind> members)
+{
+    cohortBinds_ = std::move(members);
+    std::vector<ExtraAuditionPlayer> keptPlayers;
+    for (auto& extra : extraPlayers_)
+    {
+        bool stillUsed = false;
+        for (const auto& bind : cohortBinds_)
+        {
+            if (bind.auditionHost == extra.host)
+            {
+                stillUsed = true;
+                break;
+            }
+        }
+        if (stillUsed)
+        {
+            keptPlayers.push_back(std::move(extra));
+        }
+    }
+    extraPlayers_ = std::move(keptPlayers);
+    auto* roll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    if (roll == nullptr)
+    {
+        return;
+    }
+    std::vector<ExperimentalPianoRollView::CohortMember> rows;
+    rows.reserve(cohortBinds_.size());
+    ExperimentalInstrumentHost* activeHost = nullptr;
+    bool sawActive = false;
+    for (const auto& bind : cohortBinds_)
+    {
+        ExperimentalPianoRollView::CohortMember row;
+        row.trackId = bind.trackId;
+        row.clipId = bind.clip != nullptr ? static_cast<std::uint64_t>(bind.clip->id) : 0;
+        row.trackOrder = bind.trackOrder;
+        row.clip = bind.clip;
+        row.controller = bind.controller;
+        row.auditionPlayer = playerForAuditionHost(bind.auditionHost);
+        row.active = bind.clip != nullptr && bind.clip == boundTimelineClip_;
+        if (row.active)
+        {
+            sawActive = true;
+            activeHost = bind.auditionHost;
+        }
+        rows.push_back(row);
+    }
+    activeAuditionHost_ = sawActive ? activeHost : &host_;
+    roll->onActiveCohortMemberChanged = [this](const TrackId trackId, const std::uint64_t clipId) {
+        adoptActiveMember(trackId, clipId);
+    };
+    roll->setCohort(std::move(rows));
+    roll->setAuditionPlayer(playerForAuditionHost(activeAuditionHost_));
+    applyInstrumentUiState();
+}
+
+void ExperimentalMidiEditorWindow::Body::adoptActiveMember(const TrackId trackId, const std::uint64_t clipId)
+{
+    const ExperimentalMidiEditorWindow::CohortMemberBind* found = nullptr;
+    for (const auto& bind : cohortBinds_)
+    {
+        if (bind.trackId == trackId && bind.clip != nullptr
+            && static_cast<std::uint64_t>(bind.clip->id) == clipId)
+        {
+            found = &bind;
+            break;
+        }
+    }
+    if (found == nullptr || found->clip == nullptr)
+    {
+        return;
+    }
+    if (found->controller != instrumentTrackForClipBind_)
+    {
+        if (instrumentTrackForClipBind_ != nullptr)
+        {
+            instrumentTrackForClipBind_->removeChangeListener(this);
+        }
+        instrumentTrackForClipBind_ = found->controller;
+        if (instrumentTrackForClipBind_ != nullptr)
+        {
+            instrumentTrackForClipBind_->addChangeListener(this);
+        }
+    }
+    boundTimelineClip_ = found->clip;
+    externalPattern_ = &found->clip->pattern;
+    persistentInstrumentClipIdForRebind_ = clipId;
+    activeAuditionHost_ = found->auditionHost != nullptr ? found->auditionHost : &host_;
+    if (auto* roll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        roll->setAuditionPlayer(playerForAuditionHost(activeAuditionHost_));
+    }
+    refreshTimelineSampleRateOnTrack();
+    applyInstrumentUiState();
+    refreshSelectedNoteVelocityFields();
+    refreshSelectedNoteLengthField();
+    refreshMidiChannelDiagnostics();
+    if (activeCohortMemberHandler_ != nullptr)
+    {
+        activeCohortMemberHandler_(trackId, static_cast<InstrumentMidiClipId>(clipId));
+    }
+}
 
 int ExperimentalMidiEditorWindow::Body::getSideStripDefaultWidth() const noexcept
 {
@@ -1496,6 +1718,17 @@ void ExperimentalMidiEditorWindow::Body::timerCallback()
 void ExperimentalMidiEditorWindow::Body::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     juce::ignoreUnused(source);
+    // A shared editor keeps the row mode the user already has. Switching the active event must
+    // not flip Piano/Drum labels and jump the vertical layout.
+    if (cohortBinds_.size() > 1u)
+    {
+        updateFitDrumsButtonState();
+        if (rowsBox_.getSelectedId() == 2)
+        {
+            pushRowsModeToRoll();
+        }
+        return;
+    }
     if (rowsBox_.getSelectedId() != 2)
     {
         // Drum names may arrive after the kit finishes loading while the editor already shows the
@@ -2164,10 +2397,7 @@ void ExperimentalMidiEditorWindow::closeButtonPressed()
         b->snapshotOpenClipViewportFromRoll();
         // Closing must never leave audition notes sounding (a held preview's Mouse Up may have
         // been consumed by the close button itself).
-        if (b->player_ != nullptr)
-        {
-            b->player_->releaseAllActivePreviews();
-        }
+        b->releaseAllAuditionPlayers();
     }
     setVisible(false);
 }
@@ -2187,10 +2417,7 @@ void ExperimentalMidiEditorWindow::activeWindowStatusChanged()
     // held previews; quick-click tails keep their scheduled Note Off.
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
-        if (b->player_ != nullptr)
-        {
-            b->player_->releaseHeldPreviewsForFocusLoss();
-        }
+        b->releaseHeldAuditionPlayers();
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(b->viewport_.getViewedComponent()))
         {
             rv->endActiveAuditionGestureOnMouseUp();
@@ -2227,6 +2454,23 @@ void ExperimentalMidiEditorWindow::setArrangementSnapToolbarSyncHandler(std::fun
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
         b->setArrangementSnapToolbarSyncHandler(std::move(fn));
+    }
+}
+
+void ExperimentalMidiEditorWindow::setOpenCohort(std::vector<CohortMemberBind> members)
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->setOpenCohort(std::move(members));
+    }
+}
+
+void ExperimentalMidiEditorWindow::setActiveCohortMemberHandler(
+    std::function<void(TrackId, InstrumentMidiClipId)> handler)
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->setActiveCohortMemberHandler(std::move(handler));
     }
 }
 

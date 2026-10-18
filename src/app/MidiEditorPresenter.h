@@ -67,6 +67,12 @@ public:
 
     void openMidiEditorForInstrumentClip(TrackId timelineInstrumentTrackId,
                                          InstrumentMidiClipId clipId);
+    /// Opens every listed MIDI event in the one editor. `activeClip` is the initial active member
+    /// when it is in the list. Audio events are not passed in. Does not merge the events.
+    void openMidiEditorForInstrumentClips(
+        TrackId activeTrack,
+        InstrumentMidiClipId activeClip,
+        const std::vector<std::pair<TrackId, InstrumentMidiClipId>>& members);
     void detachToScratchAfterMissingInstrumentClip(const juce::String& reasonForUser);
     void rebindAfterInstrumentMusicalUndo();
 
@@ -128,6 +134,23 @@ private:
     TimelineViewportModel& timelineViewport_;
     std::unique_ptr<ExperimentalMidiEditorWindow>& midiEditorWindow_;
     Callbacks callbacks_;
+    struct OpenCohortMember
+    {
+        TrackId trackId = kInvalidTrackId;
+        InstrumentMidiClipId clipId = 0;
+        int trackOrder = 0;
+        std::int64_t startSamples = 0;
+    };
+    std::vector<OpenCohortMember> openCohort_;
+    ExperimentalInstrumentHost* windowHost_ = nullptr;
+    /// While a track delete is tearing down this host, audition lookup must not hand it out.
+    ExperimentalInstrumentHost* suppressAuditionHost_ = nullptr;
+    void publishOpenCohortToWindow(ExperimentalInstrumentHost* suppressHost);
+    /// Drops members whose clip is gone. If the active member is gone, picks another. Detaches
+    /// when none remain. Returns false when the editor was detached.
+    bool reconcileOpenCohort(const juce::String& detachReasonIfEmpty);
+    [[nodiscard]] ExperimentalInstrumentHost* auditionHostForTrack(TrackId trackId) const;
+
     std::optional<TrackId> midiEditorOpenedForInstrumentTrackId_;
     /// Last known MIDI editor window bounds for the current project (loaded or user-moved).
     std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsMemo_;
