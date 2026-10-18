@@ -10,9 +10,20 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <cstdint>
 #include <functional>
 
 class PluginInsertHost;
+
+/// [Message thread] The Load preset / Save preset file chooser used by the editor toolbar and by
+/// the insert context menus. `instanceEpoch` is the instance the command was aimed at; the host
+/// checks it again when the dialog returns. `onFinished` runs when the dialog has closed.
+void launchInsertPresetFileChooser(PluginInsertHost& host,
+                                   TrackId trackId,
+                                   InsertSlotId slotId,
+                                   std::uint64_t instanceEpoch,
+                                   bool save,
+                                   std::function<void()> onFinished);
 
 /// Optional callbacks so plugin editor windows forward undo/redo to the same handlers as MainWindow.
 struct PluginEditorWindowHostShortcuts

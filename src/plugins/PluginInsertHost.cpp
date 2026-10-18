@@ -816,6 +816,40 @@ juce::Result PluginInsertHost::loadInsertPresetFromFile(const InsertInstanceToke
     {
         return juce::Result::fail(vst3_preset::messageFor(inspection.status));
     }
+    return applyPresetBytes(token, file, "Load preset");
+}
+
+void PluginInsertHost::rememberVst3ClassId(LiveInsertSlot& slot)
+{
+    slot.vst3ClassId.clear();
+    if (slot.instance == nullptr)
+    {
+        return;
+    }
+    // Called before this instance is published, so the audio callback does not own it yet.
+    // The menu compares the cached id and must not call getPreset itself.
+    Vst3PresetClientOp read;
+    slot.instance->getExtensions(read);
+    const auto inspection = vst3_preset::inspect(read.outgoing.getData(), read.outgoing.getSize());
+    if (read.sawClient && inspection.status == vst3_preset::Status::Ok)
+    {
+        slot.vst3ClassId = inspection.classId;
+    }
+}
+
+juce::Result PluginInsertHost::applyPresetBytes(const InsertInstanceToken token,
+                                               const juce::MemoryBlock& preset,
+                                               const juce::String& undoLabel)
+{
+    if (findToken(token) == nullptr)
+    {
+        return juce::Result::fail("That insert is no longer loaded. Nothing was changed.");
+    }
+    const auto inspection = vst3_preset::inspect(preset.getData(), preset.getSize());
+    if (inspection.status != vst3_preset::Status::Ok)
+    {
+        return juce::Result::fail(vst3_preset::messageFor(inspection.status));
+    }
 
     juce::Result applied = juce::Result::ok();
     PluginUndoStepSides sides;
@@ -849,7 +883,7 @@ juce::Result PluginInsertHost::loadInsertPresetFromFile(const InsertInstanceToke
 
         Vst3PresetClientOp write;
         write.write = true;
-        write.incoming = &file;
+        write.incoming = &preset;
         slot->instance->getExtensions(write);
         if (!write.writeOk)
         {
@@ -886,6 +920,7 @@ juce::Result PluginInsertHost::loadInsertPresetFromFile(const InsertInstanceToke
         slot->hostActive = hostActive;
         slot->hostBypassed = hostBypassed;
         ensureInsertRuntime(*slot);
+        slot->vst3ClassId = live.classId;
 
         juce::MemoryBlock afterBlob;
         slot->instance->getStateInformation(afterBlob);
@@ -911,9 +946,75 @@ juce::Result PluginInsertHost::loadInsertPresetFromFile(const InsertInstanceToke
     }
     if (recordUndo)
     {
-        recordPluginSlotUndo("Load preset", sides);
+        recordPluginSlotUndo(undoLabel, sides);
     }
     return juce::Result::ok();
+}
+
+juce::Result PluginInsertHost::copyInsertSettings(const InsertInstanceToken token)
+{
+    if (findToken(token) == nullptr)
+    {
+        return juce::Result::fail("That insert is no longer loaded. Nothing was copied.");
+    }
+
+    juce::MemoryBlock presetBytes;
+    juce::String classId;
+    juce::Result captured = juce::Result::ok();
+    const bool ran = withExclusiveInstanceAccess([&] {
+        LiveInsertSlot* const slot = findTokenMutable(token);
+        if (slot == nullptr || slot->instance == nullptr)
+        {
+            captured = juce::Result::fail("That insert is no longer loaded. Nothing was copied.");
+            return;
+        }
+        Vst3PresetClientOp read;
+        slot->instance->getExtensions(read);
+        const auto inspection = vst3_preset::inspect(read.outgoing.getData(), read.outgoing.getSize());
+        if (!read.sawClient || read.outgoing.isEmpty() || inspection.status != vst3_preset::Status::Ok)
+        {
+            captured = juce::Result::fail("This insert did not produce a VST3 preset. Nothing was copied.");
+            return;
+        }
+        presetBytes = read.outgoing;
+        classId = inspection.classId;
+        slot->vst3ClassId = classId;
+    });
+    if (!ran)
+    {
+        return juce::Result::fail(
+            "Could not access the plug-in safely because audio is still using it. Nothing was copied.");
+    }
+    if (!captured.wasOk())
+    {
+        return captured;
+    }
+    settingsClipboard_.classId = classId;
+    settingsClipboard_.preset = std::move(presetBytes);
+    return juce::Result::ok();
+}
+
+juce::Result PluginInsertHost::pasteInsertSettings(const InsertInstanceToken token)
+{
+    if (!settingsClipboard_.occupied())
+    {
+        return juce::Result::fail("There are no copied plug-in settings. Nothing was changed.");
+    }
+    return applyPresetBytes(token, settingsClipboard_.preset, "Paste plugin settings");
+}
+
+bool PluginInsertHost::canPasteInsertSettings(const TrackId trackId, const InsertSlotId slotId) const
+{
+    if (!settingsClipboard_.occupied())
+    {
+        return false;
+    }
+    const LiveInsertSlot* const slot = findLiveConst(trackId, slotId);
+    if (slot == nullptr || slot->instance == nullptr || slot->vst3ClassId.isEmpty())
+    {
+        return false;
+    }
+    return vst3_preset::sameClassId(slot->vst3ClassId, settingsClipboard_.classId);
 }
 
 void PluginInsertHost::pushPluginParameterUndoStep(const TrackId trackId,
@@ -1301,6 +1402,7 @@ juce::Result PluginInsertHost::addInsertFromVst3FileNoUndo(const TrackId trackId
     live.instance = std::move(inst);
     live.layoutOk = layoutOk;
     stampNewInstanceEpoch(live);
+    rememberVst3ClassId(live);
     ensureInsertRuntime(live);
 
     insertLiveSlotSorted(trackId, std::move(live));
@@ -1752,6 +1854,7 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
         live.instance = std::move(inst);
         live.layoutOk = layoutOk;
         stampNewInstanceEpoch(live);
+        rememberVst3ClassId(live);
         live.hostActive = desc.hostActive;
         live.hostBypassed = desc.hostBypassed;
         ensureInsertRuntime(live);
@@ -2760,6 +2863,7 @@ bool PluginInsertHost::installInsertInstanceForTests(const TrackId trackId,
     {
         return false;
     }
+    rememberVst3ClassId(slot);
     insertLiveSlotSorted(trackId, std::move(slot));
     rebuildAudioThreadMapAndPublish();
     return true;

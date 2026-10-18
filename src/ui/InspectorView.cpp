@@ -297,16 +297,30 @@ public:
         if (pendingContextMenu_)
         {
             pendingContextMenu_ = false;
+            const TrackId menuTrackId = trackId_;
+            const InsertSlotId menuSlotId = slotId_;
+            const std::uint64_t menuEpoch = owner_.pluginHost_.insertInstanceEpoch
+                                                ? owner_.pluginHost_.insertInstanceEpoch(menuTrackId, menuSlotId)
+                                                : 0;
+            const bool canCopy = owner_.pluginHost_.canCopySettings
+                                 && owner_.pluginHost_.canCopySettings(menuTrackId, menuSlotId);
+            const bool canPaste = owner_.pluginHost_.canPasteSettings
+                                  && owner_.pluginHost_.canPasteSettings(menuTrackId, menuSlotId);
             juce::PopupMenu menu;
             menu.addItem(2, hostActive_ ? "Active" : "Active", true, hostActive_);
             menu.addItem(3, "Bypass", hostActive_ && !unavailable_, hostBypassed_);
+            menu.addSeparator();
+            menu.addItem(4, "Copy settings", canCopy);
+            menu.addItem(5, "Paste settings", canPaste);
+            menu.addItem(6, "Load preset...", canCopy);
+            menu.addItem(7, "Save preset...", canCopy);
             menu.addSeparator();
             menu.addItem(1, "Remove insert");
             const auto screenPt = localPointToGlobal(e.getPosition());
             menu.showMenuAsync(
                 juce::PopupMenu::Options{}.withTargetScreenArea(
                     juce::Rectangle<int>(screenPt.x, screenPt.y, 1, 1)),
-                [safeThis = juce::Component::SafePointer<InsertSlotButton>(this)](int r) {
+                [safeThis = juce::Component::SafePointer<InsertSlotButton>(this), menuTrackId, menuSlotId, menuEpoch](int r) {
                     if (safeThis == nullptr)
                     {
                         return;
@@ -322,6 +336,22 @@ public:
                     else if (r == 3 && safeThis->hostActive_ && safeThis->owner_.pluginHost_.setHostBypassed)
                     {
                         safeThis->owner_.pluginHost_.setHostBypassed(safeThis->trackId_, safeThis->slotId_, !safeThis->hostBypassed_);
+                    }
+                    else if (r == 4 && safeThis->owner_.pluginHost_.copySettings)
+                    {
+                        safeThis->owner_.pluginHost_.copySettings(menuTrackId, menuSlotId, menuEpoch);
+                    }
+                    else if (r == 5 && safeThis->owner_.pluginHost_.pasteSettings)
+                    {
+                        safeThis->owner_.pluginHost_.pasteSettings(menuTrackId, menuSlotId, menuEpoch);
+                    }
+                    else if (r == 6 && safeThis->owner_.pluginHost_.loadPreset)
+                    {
+                        safeThis->owner_.pluginHost_.loadPreset(menuTrackId, menuSlotId, menuEpoch);
+                    }
+                    else if (r == 7 && safeThis->owner_.pluginHost_.savePreset)
+                    {
+                        safeThis->owner_.pluginHost_.savePreset(menuTrackId, menuSlotId, menuEpoch);
                     }
                 });
             repaint();

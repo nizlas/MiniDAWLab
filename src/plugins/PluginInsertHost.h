@@ -253,6 +253,28 @@ public:
     /// window changes nothing and records nothing.
     [[nodiscard]] juce::Result loadInsertPresetFromFile(InsertInstanceToken token, const juce::File& source);
 
+    /// [Message thread] Copy this instance's VST3 preset bytes and component class id into the
+    /// process-wide insert clipboard. The copy is the container `getPreset` returns, including
+    /// state that is not a parameter. It is not the system clipboard, not project state, and it
+    /// is not written to disk. A successful copy replaces the previous one. A failed copy leaves
+    /// that previous copy in place. Does not record undo and does not mark the project dirty.
+    /// The clipboard lasts until the process exits.
+    [[nodiscard]] juce::Result copyInsertSettings(InsertInstanceToken token);
+
+    /// [Message thread] Apply the insert clipboard to this instance through the same preset apply
+    /// as Load preset. The class id in the clipboard must match the class id in a preset this
+    /// instance produces; the plug-in name and path are not the check. Host Active / Bypass,
+    /// stage and chain position stay. A successful paste records one "Paste plugin settings"
+    /// undo step and marks the project dirty through the existing undo recorder. An empty
+    /// clipboard, a different class, a missing instance, or a missed exclusive-access window
+    /// changes nothing and records nothing.
+    [[nodiscard]] juce::Result pasteInsertSettings(InsertInstanceToken token);
+
+    /// [Message thread] Whether Paste settings can be offered for this slot. Compares the
+    /// clipboard's class id with the class id cached when the instance was placed. Does not
+    /// capture plug-in state and does not take exclusive access.
+    [[nodiscard]] bool canPasteInsertSettings(TrackId trackId, InsertSlotId slotId) const;
+
     /// [Message thread] Runs `fn` while the audio callback is drained and the read-ahead worker
     /// is paused, when the app has installed a hook. Tests with no device call `fn` directly.
     /// Used so reset() on reactivation cannot overlap processBlock.
@@ -465,6 +487,10 @@ private:
         bool hostBypassed = false;
         /// Bumped once per placed instance. Preset dialogs bind to this, not to the slot id alone.
         std::uint64_t instanceEpoch = 0;
+        /// Component class id from one `getPreset` when this instance was placed, before it was
+        /// published. The insert menu compares this with the clipboard. Empty when the instance
+        /// produced no preset. The apply path reads a fresh preset and does not trust this alone.
+        juce::String vst3ClassId;
         /// Mix state co-owned by every published map entry for this slot.
         std::shared_ptr<InsertSlotRuntime> runtime;
         /// Unavailable placeholder (see `importChain`): `instance == nullptr` and this descriptor
@@ -620,6 +646,25 @@ private:
     std::function<void(std::function<void()>)> exclusiveInstanceAccess_;
     std::function<void()> audibleQueueInvalidation_;
     std::uint64_t nextInstanceEpoch_ = 1;
+
+    /// In-memory .vstpreset plus the class id `inspect` read from it. One per host, which is one
+    /// per process. Not cleared by a project change.
+    struct SettingsClipboard
+    {
+        juce::String classId;
+        juce::MemoryBlock preset;
+
+        [[nodiscard]] bool occupied() const noexcept
+        {
+            return classId.isNotEmpty() && preset.getSize() > 0;
+        }
+    };
+    SettingsClipboard settingsClipboard_;
+
+    void rememberVst3ClassId(LiveInsertSlot& slot);
+    [[nodiscard]] juce::Result applyPresetBytes(InsertInstanceToken token,
+                                               const juce::MemoryBlock& preset,
+                                               const juce::String& undoLabel);
 
     void ensureInsertRuntime(LiveInsertSlot& slot);
     void recordHostAudibleUndo(const juce::String& label, TrackId trackId, const PluginTrackChain& before);

@@ -1,5 +1,5 @@
 // =============================================================================
-// InsertPresetFocusedTests — Load preset / Save preset for one insert slot
+// InsertPresetFocusedTests — Load / Save preset and Copy / Paste settings for one insert slot
 // =============================================================================
 //
 // Three layers, kept apart:
@@ -209,7 +209,7 @@ public:
                 const juce::MemoryBlock comp = standInBlob(self->gain, self->extra, self->controller);
                 juce::MemoryBlock cont;
                 cont.append(self->controller.getData(), self->controller.getSize());
-                return buildPreset(kClassId, comp, cont);
+                return buildPreset(self->classId, comp, cont);
             }
             bool setPreset(const juce::MemoryBlock& raw) const override
             {
@@ -252,6 +252,7 @@ public:
     float gain = 1.0f;
     juce::String extra { "default" };
     juce::MemoryBlock controller;
+    juce::String classId { kClassId };
     int processCalls = 0;
     mutable int getPresetCalls = 0;
     mutable int setPresetCalls = 0;
@@ -311,6 +312,41 @@ PluginInsertHost::InsertInstanceToken install(HostEnv& env, const TrackId track,
     const auto rows = env.host.getInsertRowsForTrack(track);
     expect(rows.size() == 1, "one insert on the track");
     return env.host.insertInstanceToken(track, rows.empty() ? kInvalidInsertSlotId : rows[0].slotId);
+}
+
+PluginInsertHost::InsertInstanceToken installAt(HostEnv& env,
+                                                const TrackId track,
+                                                const InsertStage stage,
+                                                const juce::String& classId,
+                                                StandIn*& out)
+{
+    auto owned = std::make_unique<StandIn>();
+    owned->classId = classId;
+    out = owned.get();
+    std::vector<InsertSlotId> before;
+    for (const auto& row : env.host.getInsertRowsForTrack(track))
+    {
+        before.push_back(row.slotId);
+    }
+    expect(env.host.installInsertInstanceForTests(track, stage, std::move(owned)), "stand-in installs");
+    InsertSlotId created = kInvalidInsertSlotId;
+    for (const auto& row : env.host.getInsertRowsForTrack(track))
+    {
+        bool seen = false;
+        for (const InsertSlotId id : before)
+        {
+            if (id == row.slotId)
+            {
+                seen = true;
+            }
+        }
+        if (!seen)
+        {
+            created = row.slotId;
+        }
+    }
+    expect(created != kInvalidInsertSlotId, "the new insert has its own slot id");
+    return env.host.insertInstanceToken(track, created);
 }
 
 void testContainer()
@@ -582,6 +618,192 @@ void testHostPolicy()
     original.deleteFile();
     choppedFile.deleteFile();
     preset.getSiblingFile("foreign.vstpreset").deleteFile();
+}
+
+void testSettingsClipboard()
+{
+    HostEnv env;
+    juce::SystemClipboard::copyTextToClipboard("dal-clipboard-sentinel");
+    StandIn* source = nullptr;
+    StandIn* sameTrackPre = nullptr;
+    StandIn* otherTrack = nullptr;
+    StandIn* otherClass = nullptr;
+    const auto sourceToken = installAt(env, 4, InsertStage::Post, kClassId, source);
+    const auto preToken = installAt(env, 4, InsertStage::Pre, kClassId, sameTrackPre);
+    const auto otherToken = installAt(env, 5, InsertStage::Pre, kClassId, otherTrack);
+    const auto foreignToken = installAt(env, 6, InsertStage::Post, kOtherClassId, otherClass);
+    expect(sourceToken.namesALiveInstance() && preToken.namesALiveInstance() && otherToken.namesALiveInstance()
+               && foreignToken.namesALiveInstance(),
+           "copy and paste address slots by token, with no active-track argument");
+    expect(env.host.getInsertRowsForTrack(4).size() == 2
+               && env.host.getInsertRowsForTrack(4)[0].stage == InsertStage::Pre
+               && env.host.getInsertRowsForTrack(4)[1].stage == InsertStage::Post,
+           "the source track holds a Pre insert and a Post insert");
+
+    source->getPresetCalls = 0;
+    sameTrackPre->getPresetCalls = 0;
+    otherTrack->getPresetCalls = 0;
+    otherClass->getPresetCalls = 0;
+    const int recordsAtStart = env.undo.records;
+    expect(!env.host.canPasteInsertSettings(preToken.trackId, preToken.slotId), "paste is off while the clipboard is empty");
+    expect(!env.host.pasteInsertSettings(preToken).wasOk(), "an empty clipboard is refused");
+    expect(sameTrackPre->extra == "default" && env.undo.records == recordsAtStart, "an empty paste changes nothing");
+    expect(sameTrackPre->getPresetCalls == 0 && otherTrack->getPresetCalls == 0 && otherClass->getPresetCalls == 0,
+           "the empty-clipboard check does not capture plug-in state");
+
+    source->gain = 0.3f;
+    source->extra = "copied-extra";
+    const char ctrlBytes[] = { 's', 'i', 'd', 'e', '\0', 'z' };
+    source->controller.append(ctrlBytes, (size_t)sizeof(ctrlBytes));
+    const juce::MemoryBlock controllerBytes = source->controller;
+    source->stateTouchesOutsideExclusive = 0;
+    const int recordsBeforeCopy = env.undo.records;
+    const int resetsBeforeCopy = env.queueResets;
+    expect(env.host.copyInsertSettings(sourceToken).wasOk(), "copy stores the insert's preset");
+    expect(env.undo.records == recordsBeforeCopy && env.queueResets == resetsBeforeCopy, "copy records no undo and does not mark a queue reset");
+    expect(source->stateTouchesOutsideExclusive == 0, "copy reads state only inside exclusive access");
+    expect(juce::SystemClipboard::getTextFromClipboard() == "dal-clipboard-sentinel",
+           "copy does not use the system clipboard");
+
+    source->extra = "mutated-after-copy";
+    source->gain = 0.9f;
+    sameTrackPre->getPresetCalls = 0;
+    otherTrack->getPresetCalls = 0;
+    otherClass->getPresetCalls = 0;
+    expect(env.host.canPasteInsertSettings(preToken.trackId, preToken.slotId), "paste is offered for the same class on another stage");
+    expect(env.host.canPasteInsertSettings(otherToken.trackId, otherToken.slotId), "paste is offered for the same class on another track");
+    expect(!env.host.canPasteInsertSettings(foreignToken.trackId, foreignToken.slotId), "paste is off for a different VST3 class");
+    expect(sameTrackPre->getPresetCalls == 0 && otherTrack->getPresetCalls == 0 && otherClass->getPresetCalls == 0,
+           "the menu compatibility check does not capture plug-in state");
+
+    env.host.setInsertHostBypassed(otherToken.trackId, otherToken.slotId, true);
+    env.host.setInsertHostActive(otherToken.trackId, otherToken.slotId, false);
+    otherTrack->extra = "replace-me";
+    otherTrack->stateTouchesOutsideExclusive = 0;
+    const int recordsBeforePaste = env.undo.records;
+    const int resetsBeforePaste = env.queueResets;
+    expect(env.host.pasteInsertSettings(otherToken).wasOk(), "paste applies the copied preset to the other track's Pre insert");
+    expect(otherTrack->extra == "copied-extra" && std::abs(otherTrack->gain - 0.3f) < 1.0e-6f, "paste restores the copied parameter and side state");
+    expect(otherTrack->controller == controllerBytes, "paste restores non-parameter state, including a null byte");
+    expect(source->extra == "mutated-after-copy", "paste does not change the source");
+    const auto pastedAudible = env.host.insertHostAudible(otherToken.trackId, otherToken.slotId);
+    expect(!pastedAudible.active && pastedAudible.bypassed, "paste keeps the target's host Active and Bypass");
+    expect(env.host.getInsertRowsForTrack(5).size() == 1 && env.host.getInsertRowsForTrack(5)[0].stage == InsertStage::Pre
+               && env.host.getInsertRowsForTrack(5)[0].slotId == otherToken.slotId,
+           "paste does not move the slot");
+    expect(env.undo.records == recordsBeforePaste + 1 && env.undo.labels[env.undo.labels.size() - 1] == "Paste plugin settings",
+           "a successful paste is one Paste plugin settings undo step");
+    expect(env.queueResets == resetsBeforePaste + 1, "paste discards queued read-ahead audio");
+    expect(otherTrack->stateTouchesOutsideExclusive == 0, "paste reads and writes state only inside exclusive access");
+
+    env.host.importChain(otherToken.trackId, env.undo.last.before);
+    expect(otherTrack->extra == "replace-me", "undo of paste restores the previous plug-in settings");
+    expect(!env.host.insertHostAudible(otherToken.trackId, otherToken.slotId).active
+               && env.host.insertHostAudible(otherToken.trackId, otherToken.slotId).bypassed,
+           "undo of paste keeps the target's host flags");
+    env.host.importChain(otherToken.trackId, env.undo.last.after);
+    expect(otherTrack->extra == "copied-extra", "redo of paste applies the copied settings again");
+
+    const PluginTrackChain pasted = env.host.exportChain(otherToken.trackId);
+    expect(!pasted.slots.empty() && parseStandIn(pasted.slots[0].opaqueState).extra == "copied-extra",
+           "the project blob after paste is the copied plug-in state");
+    ProjectFileV1 project;
+    project.version = ProjectFileV1::kCurrentVersion;
+    project.timelineSampleRate = kRate;
+    project.deviceSampleRateAtSave = kRate;
+    ProjectFileTrackV1 track;
+    track.id = otherToken.trackId;
+    track.kind = "audio";
+    ProjectFileInsertV1 row;
+    row.slotId = pasted.slots[0].slotId;
+    row.stage = pasted.slots[0].stage;
+    row.pluginVst3Path = pasted.slots[0].vst3AbsolutePath;
+    row.pluginIdentifier = pasted.slots[0].pluginIdentifier;
+    row.hostActive = pasted.slots[0].hostActive;
+    row.hostBypassed = pasted.slots[0].hostBypassed;
+    row.pluginStateBase64 = juce::Base64::toBase64(pasted.slots[0].opaqueState.getData(), pasted.slots[0].opaqueState.getSize());
+    track.inserts.push_back(row);
+    project.tracks.push_back(track);
+    const juce::File proj = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-insert-paste-project.dalproj");
+    expect(writeProjectFile(proj, project).wasOk(), "project file records the pasted state");
+    ProjectFileV1 back;
+    const ProjectFileInsertV1* reopened = nullptr;
+    if (readProjectFile(proj, back).wasOk())
+    {
+        for (const auto& tr : back.tracks)
+        {
+            if (tr.id == otherToken.trackId && !tr.inserts.empty())
+            {
+                reopened = &tr.inserts[0];
+            }
+        }
+    }
+    juce::MemoryOutputStream decoded;
+    expect(reopened != nullptr && juce::Base64::convertFromBase64(decoded, reopened->pluginStateBase64),
+           "project file reads the pasted insert back");
+    const juce::MemoryBlock decodedState(decoded.getData(), decoded.getDataSize());
+    expect(parseStandIn(decodedState).extra == "copied-extra" && reopened != nullptr && !reopened->hostActive && reopened->hostBypassed,
+           "a reopened project keeps the pasted settings and the target's host flags");
+    proj.deleteFile();
+
+    expect(env.host.pasteInsertSettings(preToken).wasOk(), "the same clipboard also pastes onto the source track's Pre insert");
+    expect(sameTrackPre->extra == "copied-extra" && std::abs(sameTrackPre->gain - 0.3f) < 1.0e-6f,
+           "paste between Pre and Post on one track uses the copied state");
+
+    const int recordsBeforeForeign = env.undo.records;
+    const juce::String foreignExtra = otherClass->extra;
+    otherClass->setPresetCalls = 0;
+    expect(!env.host.pasteInsertSettings(foreignToken).wasOk(), "a different VST3 class is refused");
+    expect(otherClass->extra == foreignExtra && otherClass->setPresetCalls == 0 && env.undo.records == recordsBeforeForeign,
+           "a refused paste leaves the instance, dirty and undo unchanged");
+
+    auto staleEpoch = otherToken;
+    staleEpoch.instanceEpoch += 1;
+    const int recordsBeforeStale = env.undo.records;
+    expect(!env.host.pasteInsertSettings(staleEpoch).wasOk(), "a replaced instance epoch is refused");
+    expect(otherTrack->extra == "copied-extra" && env.undo.records == recordsBeforeStale,
+           "a stale paste does not write the new instance");
+
+    source->extra = "should-not-replace-clipboard";
+    env.blockAccess = true;
+    const int recordsBeforeBusyCopy = env.undo.records;
+    expect(!env.host.copyInsertSettings(sourceToken).wasOk(), "a busy worker blocks the copy");
+    expect(env.pauseDepth == 0 && env.undo.records == recordsBeforeBusyCopy, "a failed copy holds no pause and records nothing");
+    env.blockAccess = false;
+
+    StandIn* afterBusy = nullptr;
+    const auto afterBusyToken = installAt(env, 7, InsertStage::Post, kClassId, afterBusy);
+    afterBusy->extra = "before-kept-clipboard";
+    expect(env.host.pasteInsertSettings(afterBusyToken).wasOk(), "a failed copy leaves the previous clipboard");
+    expect(afterBusy->extra == "copied-extra", "the paste after a failed copy is still the earlier copy");
+
+    afterBusy->extra = "untouched";
+    const int recordsBeforeBusyPaste = env.undo.records;
+    env.blockAccess = true;
+    expect(!env.host.pasteInsertSettings(afterBusyToken).wasOk(), "a busy worker blocks the paste");
+    expect(afterBusy->extra == "untouched" && env.undo.records == recordsBeforeBusyPaste && env.pauseDepth == 0,
+           "a failed paste leaves state, dirty and undo unchanged");
+    env.blockAccess = false;
+
+    env.host.removeInsert(sourceToken.trackId, sourceToken.slotId);
+    StandIn* survivor = nullptr;
+    const auto survivorToken = installAt(env, 8, InsertStage::Post, kClassId, survivor);
+    survivor->extra = "waiting";
+    expect(env.host.pasteInsertSettings(survivorToken).wasOk(), "the clipboard survives removal of the source insert");
+    expect(survivor->extra == "copied-extra", "paste after the source is gone still restores the original copy");
+    expect(!env.host.pasteInsertSettings(sourceToken).wasOk(), "the removed source token cannot receive the paste");
+    expect(survivor->extra == "copied-extra", "a stale source token does not redirect the paste");
+
+    const auto removedTarget = survivorToken;
+    env.host.removeInsert(survivorToken.trackId, survivorToken.slotId);
+    StandIn* replacement = nullptr;
+    const auto replacementToken = installAt(env, 8, InsertStage::Post, kClassId, replacement);
+    replacement->extra = "replacement";
+    replacement->setPresetCalls = 0;
+    const int recordsBeforeReplacement = env.undo.records;
+    expect(!env.host.pasteInsertSettings(removedTarget).wasOk(), "a token captured before the slot was replaced is refused");
+    expect(replacement->extra == "replacement" && replacement->setPresetCalls == 0 && env.undo.records == recordsBeforeReplacement,
+           "the replacement instance does not receive the old menu's paste");
 }
 
 juce::MemoryBlock wrapperState(juce::AudioPluginInstance& instance)
@@ -934,6 +1156,85 @@ void testRealWrapper(const juce::File& bundle)
     expect(rereadCont.getSize() == 0 && sameBlock(rereadCont, sourceController),
            "the real wrapper does not keep the injected controller bytes");
 
+    expect(!host.canPasteInsertSettings(other, otherToken.slotId), "wrapper paste is off before any copy");
+    if (!instance->getParameters().isEmpty())
+    {
+        instance->getParameters()[0]->setValueNotifyingHost(0.42f);
+    }
+    instance->processBlock(buffer, midi);
+    const juce::MemoryBlock copiedComponent = wrapperChild(wrapperState(*instance), "IComponent");
+    const int recordsBeforeWrapperCopy = undo.records;
+    expect(host.copyInsertSettings(token).wasOk(), "wrapper copy captures the probe, including the side string");
+    expect(undo.records == recordsBeforeWrapperCopy, "wrapper copy records no undo");
+    expect(host.canPasteInsertSettings(other, otherToken.slotId),
+           "wrapper paste is offered for the same class on the other track's Pre insert");
+
+    if (!instance->getParameters().isEmpty())
+    {
+        instance->getParameters()[0]->setValueNotifyingHost(0.11f);
+    }
+    instance->processBlock(buffer, midi);
+    const juce::MemoryBlock mutatedSource = wrapperChild(wrapperState(*instance), "IComponent");
+    expect(!sameBlock(mutatedSource, copiedComponent), "changing the source after copy changes its processor state");
+    if (!second->getParameters().isEmpty())
+    {
+        second->getParameters()[0]->setValueNotifyingHost(0.05f);
+    }
+    second->processBlock(buffer, midi);
+    host.setInsertHostBypassed(other, otherToken.slotId, true);
+    const int recordsBeforeWrapperPaste = undo.records;
+    expect(host.pasteInsertSettings(otherToken).wasOk(), "wrapper paste applies the copy to that Pre insert");
+    expect(undo.records == recordsBeforeWrapperPaste + 1
+               && undo.labels[undo.labels.size() - 1] == "Paste plugin settings",
+           "wrapper paste is one Paste plugin settings undo step");
+    expect(sameBlock(wrapperChild(wrapperState(*second), "IComponent"), copiedComponent),
+           "wrapper paste restores the copied processor state, including the side string");
+    expect(sameBlock(wrapperChild(wrapperState(*instance), "IComponent"), mutatedSource),
+           "wrapper paste does not change the source");
+    expect(host.insertHostAudible(other, otherToken.slotId).active
+               && host.insertHostAudible(other, otherToken.slotId).bypassed,
+           "wrapper paste keeps the target Active and Bypassed");
+    expect(!second->getParameters().isEmpty() && std::abs(second->getParameters()[0]->getValue() - 0.42f) < 1.0e-4f,
+           "wrapper paste refreshes the host gain parameter");
+    host.importChain(other, undo.last.before);
+    expect(!sameBlock(wrapperChild(wrapperState(*second), "IComponent"), copiedComponent),
+           "undo of wrapper paste restores the previous plug-in settings");
+    host.importChain(other, undo.last.after);
+    expect(sameBlock(wrapperChild(wrapperState(*second), "IComponent"), copiedComponent),
+           "redo of wrapper paste applies the copied settings again");
+
+    const juce::File pasteProject = preset.getSiblingFile("dal-preset-paste.dalproj");
+    expect(session.saveProjectToFile(transport, pasteProject, kRate, &host).wasOk(), "save writes the pasted probe state");
+    if (!juce::File::createFileWithoutCheckingPath(storedPath).hasFileExtension(".vst3"))
+    {
+        std::printf("[SKIP] live reopen of a pasted preset was not verified. Stored path is \"%s\".\n",
+                    storedPath.toRawUTF8());
+    }
+    else
+    {
+        Session reopenedPaste;
+        Transport transportPaste;
+        PluginInsertHost hostPaste;
+        hostPaste.prepareForDevice(kRate, 256, 2);
+        juce::StringArray skippedPaste;
+        juce::String notePaste;
+        expect(reopenedPaste.loadProjectFromFile(transportPaste, pasteProject, kRate, skippedPaste, notePaste, &hostPaste).wasOk(),
+               "reopen loads the pasted probe project");
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(800);
+        auto* restoredPaste = hostPaste.liveInstanceAtChainIndexForDiagnostics(other, 0);
+        const auto restoredPasteRows = hostPaste.getInsertRowsForTrack(other);
+        expect(restoredPaste != nullptr && !restoredPasteRows.empty() && !restoredPasteRows[0].unavailable,
+               "reopen instantiates the pasted Pre insert");
+        if (restoredPaste != nullptr)
+        {
+            expect(sameBlock(wrapperChild(wrapperState(*restoredPaste), "IComponent"), copiedComponent),
+                   "reopen restores the pasted processor state, including the side string");
+        }
+        expect(!restoredPasteRows.empty() && restoredPasteRows[0].hostActive && restoredPasteRows[0].hostBypassed,
+               "reopen keeps the pasted insert's host Active and Bypass");
+    }
+    pasteProject.deleteFile();
+
     preset.deleteFile();
     injectedFile.deleteFile();
     foreignFile.deleteFile();
@@ -947,6 +1248,7 @@ int main(int argc, char** argv)
     juce::ScopedJuceInitialiser_GUI juce;
     testContainer();
     testHostPolicy();
+    testSettingsClipboard();
     juce::File probe;
     for (int i = 1; i + 1 < argc; ++i)
     {

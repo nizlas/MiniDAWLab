@@ -5,6 +5,7 @@
 
 #include "ui/InspectorPanControl.h"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -44,6 +45,16 @@ struct InspectorPluginHost
     std::function<void(TrackId, InsertSlotId, int)> requestReorderInStage;
     std::function<void(TrackId, InsertSlotId, bool active)> setHostActive;
     std::function<void(TrackId, InsertSlotId, bool bypassed)> setHostBypassed;
+    /// Epoch of the instance in the slot when the menu is built. Zero when the slot has no processor.
+    std::function<std::uint64_t(TrackId, InsertSlotId)> insertInstanceEpoch;
+    /// Copy / Load / Save can run. Paste is separate: it also needs a compatible clipboard.
+    std::function<bool(TrackId, InsertSlotId)> canCopySettings;
+    std::function<bool(TrackId, InsertSlotId)> canPasteSettings;
+    /// `epoch` is the instance the menu was opened for. The host refuses a slot that was replaced.
+    std::function<void(TrackId, InsertSlotId, std::uint64_t epoch)> copySettings;
+    std::function<void(TrackId, InsertSlotId, std::uint64_t epoch)> pasteSettings;
+    std::function<void(TrackId, InsertSlotId, std::uint64_t epoch)> loadPreset;
+    std::function<void(TrackId, InsertSlotId, std::uint64_t epoch)> savePreset;
 };
 
 // P2: the former InspectorProxyHost / InspectorSecondaryHost sections moved to the track-header

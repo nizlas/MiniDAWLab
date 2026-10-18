@@ -972,7 +972,7 @@ void MixerChannelStrip::refreshInserts(const InsertStage stage, const std::vecto
         b.setTooltip(row.displayName + (row.unavailable ? " (plug-in could not be loaded; the slot keeps its saved state)" : juce::String())
                      + (row.hostActive ? juce::String() : " — Active off")
                      + (row.hostBypassed ? " — Bypassed" : juce::String())
-                     + " — click: open editor; right-click: Active / Bypass / move / remove");
+                     + " — click: open editor; right-click: Active / Bypass / copy / paste / preset / move / remove");
         juce::Colour rowFace = row.unavailable || !row.hostActive ? face.darker(0.45f) : face;
         b.setColour(juce::TextButton::buttonColourId, rowFace);
         b.setColour(juce::TextButton::buttonOnColourId, face);
@@ -1008,6 +1008,16 @@ void MixerChannelStrip::showInsertRowMenu(const InsertStage stage, const int row
                                 && ui.lastRows[static_cast<size_t>(rowIndex)].unavailable;
     menu.addItem(6, "Active", bindings_.inserts.setHostActive != nullptr, rowActive);
     menu.addItem(7, "Bypass", bindings_.inserts.setHostBypassed != nullptr && rowActive && !rowUnavailable, rowBypassed);
+    const std::uint64_t epoch = bindings_.inserts.insertInstanceEpoch
+                                    ? bindings_.inserts.insertInstanceEpoch(trackId_, sid)
+                                    : 0;
+    const bool canCopy = bindings_.inserts.canCopySettings && bindings_.inserts.canCopySettings(trackId_, sid);
+    const bool canPaste = bindings_.inserts.canPasteSettings && bindings_.inserts.canPasteSettings(trackId_, sid);
+    menu.addSeparator();
+    menu.addItem(8, "Copy settings", canCopy);
+    menu.addItem(9, "Paste settings", canPaste);
+    menu.addItem(10, "Load preset...", canCopy);
+    menu.addItem(11, "Save preset...", canCopy);
     menu.addSeparator();
     menu.addItem(2, "Move up", bindings_.inserts.requestReorderInStage != nullptr && rowIndex > 0);
     menu.addItem(3, "Move down", bindings_.inserts.requestReorderInStage != nullptr && rowIndex + 1 < countInStage);
@@ -1016,9 +1026,14 @@ void MixerChannelStrip::showInsertRowMenu(const InsertStage stage, const int row
     menu.addItem(5, "Remove insert", bindings_.inserts.requestRemove != nullptr);
     juce::Component::SafePointer<MixerChannelStrip> self(this);
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(ui.rows[static_cast<size_t>(rowIndex)].get()),
-                       [self, stage, sid](const int result) {
+                       [self, stage, sid, epoch](const int result) {
                            if (self == nullptr || result <= 0)
                            {
+                               return;
+                           }
+                           if (result >= 8 && result <= 11)
+                           {
+                               self->applyCapturedInsertSettings(sid, epoch, result);
                                return;
                            }
                            // Re-resolve the row by its slot id: the list may have changed while the menu was open.
@@ -1032,6 +1047,42 @@ void MixerChannelStrip::showInsertRowMenu(const InsertStage stage, const int row
                                }
                            }
                        });
+}
+
+void MixerChannelStrip::applyCapturedInsertSettings(const InsertSlotId sid,
+                                                   const std::uint64_t epoch,
+                                                   const int actionId)
+{
+    const TrackId tid = trackId_;
+    switch (actionId)
+    {
+    case 8:
+        if (bindings_.inserts.copySettings)
+        {
+            bindings_.inserts.copySettings(tid, sid, epoch);
+        }
+        break;
+    case 9:
+        if (bindings_.inserts.pasteSettings)
+        {
+            bindings_.inserts.pasteSettings(tid, sid, epoch);
+        }
+        break;
+    case 10:
+        if (bindings_.inserts.loadPreset)
+        {
+            bindings_.inserts.loadPreset(tid, sid, epoch);
+        }
+        break;
+    case 11:
+        if (bindings_.inserts.savePreset)
+        {
+            bindings_.inserts.savePreset(tid, sid, epoch);
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 bool MixerChannelStrip::performInsertRowAction(const InsertStage stage, const int rowIndex, const int actionId)

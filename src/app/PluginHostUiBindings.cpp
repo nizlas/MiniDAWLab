@@ -2,9 +2,30 @@
 
 #include "app/Vst3PluginPickerCoordinator.h"
 #include "plugins/InsertSlotId.h"
+#include "plugins/PluginEditorWindows.h"
 #include "plugins/PluginInsertHost.h"
 #include "ui/InspectorView.h"
 #include "ui/TrackLanesView.h"
+
+namespace
+{
+PluginInsertHost::InsertInstanceToken tokenFor(const TrackId trackId, const InsertSlotId slotId, const std::uint64_t epoch)
+{
+    PluginInsertHost::InsertInstanceToken token;
+    token.trackId = trackId;
+    token.slotId = slotId;
+    token.instanceEpoch = epoch;
+    return token;
+}
+
+void showSettingsError(const juce::String& title, const juce::Result& result)
+{
+    if (!result.wasOk())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, title, result.getErrorMessage());
+    }
+}
+} // namespace
 
 InspectorPluginHost PluginHostUiBindings::makeInsertSeam(PluginInsertHost& pluginHost,
                                                          Vst3PluginPickerCoordinator& picker,
@@ -50,6 +71,25 @@ InspectorPluginHost PluginHostUiBindings::makeInsertSeam(PluginInsertHost& plugi
         },
         [host](const TrackId tid, const InsertSlotId sid, const bool bypassed) {
             host->setInsertHostBypassed(tid, sid, bypassed);
+        },
+        [host](const TrackId tid, const InsertSlotId sid) {
+            return host->insertInstanceToken(tid, sid).instanceEpoch;
+        },
+        [host](const TrackId tid, const InsertSlotId sid) {
+            return host->insertInstanceToken(tid, sid).namesALiveInstance();
+        },
+        [host](const TrackId tid, const InsertSlotId sid) { return host->canPasteInsertSettings(tid, sid); },
+        [host](const TrackId tid, const InsertSlotId sid, const std::uint64_t epoch) {
+            showSettingsError("Copy settings", host->copyInsertSettings(tokenFor(tid, sid, epoch)));
+        },
+        [host](const TrackId tid, const InsertSlotId sid, const std::uint64_t epoch) {
+            showSettingsError("Paste settings", host->pasteInsertSettings(tokenFor(tid, sid, epoch)));
+        },
+        [host](const TrackId tid, const InsertSlotId sid, const std::uint64_t epoch) {
+            launchInsertPresetFileChooser(*host, tid, sid, epoch, false, {});
+        },
+        [host](const TrackId tid, const InsertSlotId sid, const std::uint64_t epoch) {
+            launchInsertPresetFileChooser(*host, tid, sid, epoch, true, {});
         }
     };
 }

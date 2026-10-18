@@ -232,6 +232,7 @@ private:
     void refreshInserts(InsertStage stage, const std::vector<InspectorInsertRow>& rows);
     void layoutInsertList(InsertStageUi& ui);
     void showInsertRowMenu(InsertStage stage, int row, const juce::MouseEvent& e);
+    void applyCapturedInsertSettings(InsertSlotId slotId, std::uint64_t instanceEpoch, int actionId);
     [[nodiscard]] InsertStageUi& stageUi(InsertStage stage) noexcept { return stage == InsertStage::Pre ? preInserts_ : postInserts_; }
     [[nodiscard]] const InsertStageUi& stageUi(InsertStage stage) const noexcept { return stage == InsertStage::Pre ? preInserts_ : postInserts_; }
     void refreshSends(const Track& track, const SessionSnapshot& snap);

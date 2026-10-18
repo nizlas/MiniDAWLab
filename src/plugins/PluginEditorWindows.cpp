@@ -302,50 +302,12 @@ namespace
             }
             dialogBusy_ = true;
             refreshPresetButtons();
-            const int flags = save
-                                  ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting
-                                     | juce::FileBrowserComponent::canSelectFiles)
-                                  : (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles);
-            const juce::File start = save ? juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-                                               .getChildFile("Preset.vstpreset")
-                                         : juce::File{};
-            chooser_ = std::make_shared<juce::FileChooser>(save ? "Save preset" : "Load preset", start, "*.vstpreset");
             const juce::Component::SafePointer<InsertEditorShell> safe(this);
-            chooser_->launchAsync(flags, [safe, token, save, chooser = chooser_](const juce::FileChooser& fc) {
-                juce::ignoreUnused(chooser);
+            launchInsertPresetFileChooser(host_, trackId_, slotId_, token.instanceEpoch, save, [safe] {
                 if (safe != nullptr)
                 {
                     safe->dialogBusy_ = false;
                     safe->refreshPresetButtons();
-                }
-                juce::File file = fc.getResult();
-                if (safe == nullptr || file == juce::File{})
-                {
-                    return;
-                }
-                if (save && !file.hasFileExtension("vstpreset"))
-                {
-                    const juce::File withExt = file.withFileExtension("vstpreset");
-                    if (withExt.existsAsFile())
-                    {
-                        juce::AlertWindow::showMessageBoxAsync(
-                            juce::AlertWindow::WarningIcon,
-                            "Save preset",
-                            "A preset with that name already exists. Choose it in the dialog to replace it.");
-                        return;
-                    }
-                    file = withExt;
-                }
-                const juce::Result result = save ? safe->host_.saveInsertPresetToFile(token, file)
-                                                 : safe->host_.loadInsertPresetFromFile(token, file);
-                if (!result.wasOk())
-                {
-                    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                          save ? "Save preset" : "Load preset",
-                                                          result.getErrorMessage());
-                }
-                if (safe != nullptr)
-                {
                     safe->repaint();
                 }
             });
@@ -357,7 +319,6 @@ namespace
         std::unique_ptr<juce::AudioProcessorEditor> editor_;
         juce::TextButton loadButton_;
         juce::TextButton saveButton_;
-        std::shared_ptr<juce::FileChooser> chooser_;
         bool editorResizable_ = false;
         bool guard_ = false;
         bool dialogBusy_ = false;
@@ -376,6 +337,72 @@ namespace
         shell->setMouseCursor(juce::MouseCursor::NormalCursor);
     }
 } // namespace
+
+void launchInsertPresetFileChooser(PluginInsertHost& host,
+                                   const TrackId trackId,
+                                   const InsertSlotId slotId,
+                                   const std::uint64_t instanceEpoch,
+                                   const bool save,
+                                   std::function<void()> onFinished)
+{
+    PluginInsertHost::InsertInstanceToken token;
+    token.trackId = trackId;
+    token.slotId = slotId;
+    token.instanceEpoch = instanceEpoch;
+    if (!token.namesALiveInstance())
+    {
+        if (onFinished)
+        {
+            onFinished();
+        }
+        return;
+    }
+    const int flags = save ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting
+                              | juce::FileBrowserComponent::canSelectFiles)
+                           : (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles);
+    const juce::File start = save ? juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                                       .getChildFile("Preset.vstpreset")
+                                 : juce::File{};
+    const auto chooser = std::make_shared<juce::FileChooser>(save ? "Save preset" : "Load preset", start, "*.vstpreset");
+    chooser->launchAsync(flags, [token, save, chooser, host = &host, onFinished](const juce::FileChooser& fc) {
+        juce::ignoreUnused(chooser);
+        juce::File file = fc.getResult();
+        if (file != juce::File{})
+        {
+            if (save && !file.hasFileExtension("vstpreset"))
+            {
+                const juce::File withExt = file.withFileExtension("vstpreset");
+                if (withExt.existsAsFile())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Save preset",
+                        "A preset with that name already exists. Choose it in the dialog to replace it.");
+                    file = juce::File{};
+                }
+                else
+                {
+                    file = withExt;
+                }
+            }
+            if (file != juce::File{})
+            {
+                const juce::Result result = save ? host->saveInsertPresetToFile(token, file)
+                                                 : host->loadInsertPresetFromFile(token, file);
+                if (!result.wasOk())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                          save ? "Save preset" : "Load preset",
+                                                          result.getErrorMessage());
+                }
+            }
+        }
+        if (onFinished)
+        {
+            onFinished();
+        }
+    });
+}
 
 PluginEditorWindow::PluginEditorWindow(PluginInsertHost& host,
                                        const TrackId trackId,
