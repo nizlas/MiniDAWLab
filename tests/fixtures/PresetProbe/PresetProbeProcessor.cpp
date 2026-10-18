@@ -67,9 +67,12 @@ public:
         }
         const float g = stream.readFloat();
         side_ = stream.readString();
+        // setValue on the parameter base updates the processor value and does not
+        // notify the host. AudioParameterFloat hides that method; calling it through
+        // the base keeps the host's own parameter stale until the wrapper refreshes it.
         if (gain_ != nullptr)
         {
-            gain_->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, g));
+            static_cast<juce::AudioProcessorParameter*>(gain_)->setValue(juce::jlimit(0.0f, 1.0f, g));
         }
     }
 

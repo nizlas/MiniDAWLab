@@ -696,10 +696,29 @@ namespace
         }
     };
 
-    /// JUCE 8.0.4's setPreset applies the Steinberg container but does not refresh the wrapper's
-    /// AudioProcessorParameter objects (that refresh lives in setStateInformation). Re-applying the
-    /// wrapper blob the plug-in just produced is how the generic editor and the project file see
-    /// the same state. Returns false when the blob cannot be passed through the int-sized API.
+    /// Copy the plug-in's post-preset state onto the host parameters.
+    ///
+    /// The blob is captured here, after setPreset has returned, by getStateInformation. It is the
+    /// wrapper XML of the IComponent stream the plug-in exposes now (and IEditController only when
+    /// that getState returns kResultTrue). It is not a copy taken before setPreset.
+    ///
+    /// JUCE 8.0.4's setStateFromPresetFile is const and only calls PresetFile::loadPreset.
+    /// resetParameters, which copies the edit controller's normalised values onto the host
+    /// AudioProcessorParameter, is private. The deprecated VST3PluginFormat::setStateFromVSTPresetFile
+    /// is the same call. ExtensionsVisitor has no parameter-refresh entry.
+    ///
+    /// A JUCE edit controller's setComponentState requests kParamValuesChanged. On the message
+    /// thread ComponentRestarter runs that restart before setPreset returns, so a JUCE plug-in can
+    /// already show the new host parameters. A controller that does not request the restart leaves
+    /// those host parameters stale. setStateInformation is the only public call that reaches
+    /// resetParameters, and it also writes the component stream again. There is no existing path
+    /// that refreshes the host parameters without that second IComponent::setState. A wrapper
+    /// change is out of scope.
+    ///
+    /// A plug-in that starts asynchronous work inside setState therefore sees two calls. DAL cannot
+    /// collapse them. A setState that is not idempotent, or that cancels an in-flight load on the
+    /// second call, can still change or glitch.
+    /// Returns false when the blob cannot be passed through the int-sized API.
     [[nodiscard]] bool syncWrapperParametersFromCurrentState(juce::AudioPluginInstance& instance)
     {
         juce::MemoryBlock blob;

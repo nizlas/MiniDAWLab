@@ -404,7 +404,9 @@ void testHostPolicy()
     expect(token.trackId == 2 && otherToken.trackId == 9, "tokens keep the track they were opened for");
     first->gain = 0.2f;
     first->extra = "from-first";
-    first->controller.append("ctrl-a", 6);
+    const char ctrlBytes[] = { 'c', 't', 'r', 'l', '\0', 'a' };
+    first->controller.append(ctrlBytes, (size_t)sizeof(ctrlBytes));
+    const juce::MemoryBlock controllerBytes = first->controller;
     other->gain = 0.8f;
     other->extra = "leave-me";
     env.host.setInsertHostActive(token.trackId, token.slotId, false);
@@ -450,7 +452,8 @@ void testHostPolicy()
     const int recordsBeforeLoad = env.undo.records;
     expect(env.host.loadInsertPresetFromFile(otherToken, preset).wasOk(), "load applies to the chosen insert");
     expect(other->extra == "from-first" && std::abs(other->gain - 0.2f) < 1.0e-6f, "the other track received the preset state");
-    expect(other->controller.toString() == "ctrl-a", "controller state was applied, not only the parameter-sized blob");
+    expect(other->controller.getSize() == controllerBytes.getSize() && other->controller == controllerBytes,
+           "controller state was applied in full, including a null byte");
     expect(first->extra == "dirty-before-load", "the track the dialog was not aimed at is unchanged");
     expect(env.undo.records == recordsBeforeLoad + 1 && env.undo.labels[env.undo.labels.size() - 1] == "Load preset",
            "a successful load is one Load preset undo step");
@@ -621,6 +624,25 @@ juce::MemoryBlock expectedProbePayload()
     return { stream.getData(), stream.getDataSize() };
 }
 
+struct DirectPresetVisit final : juce::ExtensionsVisitor
+{
+    const juce::MemoryBlock* incoming = nullptr;
+    bool writeOk = false;
+    juce::MemoryBlock outgoing;
+
+    void visitVST3Client(const VST3Client& client) override
+    {
+        if (incoming != nullptr)
+        {
+            writeOk = client.setPreset(*incoming);
+        }
+        else
+        {
+            outgoing = client.getPreset();
+        }
+    }
+};
+
 bool startsWithBlock(const juce::MemoryBlock& block, const juce::MemoryBlock& prefix)
 {
     if (prefix.getSize() == 0 || block.getSize() < prefix.getSize())
@@ -711,6 +733,13 @@ void testRealWrapper(const juce::File& bundle)
     {
         return;
     }
+    if (!second->getParameters().isEmpty())
+    {
+        second->getParameters()[0]->setValueNotifyingHost(0.10f);
+    }
+    second->processBlock(buffer, midi);
+    expect(!startsWithBlock(wrapperChild(wrapperState(*second), "IComponent"), probePayload),
+           "the load target holds a different processor state than the preset");
     const int recordsBefore = undo.records;
     expect(host.loadInsertPresetFromFile(otherToken, preset).wasOk(), "wrapper load applies the preset to that slot");
     expect(undo.records == recordsBefore + 1, "wrapper load records one undo step");
@@ -831,7 +860,82 @@ void testRealWrapper(const juce::File& bundle)
                "reopen keeps the other insert's Bypass on a live instance");
     }
 
+    // Bare setPreset, then the same blob DAL captures for the second apply.
+    // The 0.85 host value is written first so a blob taken before setPreset could not match.
+    if (!second->getParameters().isEmpty())
+    {
+        second->getParameters()[0]->setValueNotifyingHost(0.85f);
+    }
+    second->processBlock(buffer, midi);
+    const juce::MemoryBlock beforeBare = wrapperState(*second);
+    expect(!startsWithBlock(wrapperChild(beforeBare, "IComponent"), probePayload),
+           "before the bare setPreset the processor is not the loaded preset");
+    DirectPresetVisit bare;
+    bare.incoming = &file;
+    second->getExtensions(bare);
+    expect(bare.writeOk, "bare setPreset accepts the preset the wrapper just wrote");
+    const float hostAfterBare = second->getParameters().isEmpty() ? -1.0f : second->getParameters()[0]->getValue();
+    std::printf("host parameter immediately after bare setPreset: %.6f\n", hostAfterBare);
+    const juce::MemoryBlock capturedAfterSetPreset = wrapperState(*second);
+    const juce::MemoryBlock capturedComponent = wrapperChild(capturedAfterSetPreset, "IComponent");
+    const juce::MemoryBlock capturedController = wrapperChild(capturedAfterSetPreset, "IEditController");
+    expect(sameBlock(capturedComponent, sourceComponent),
+           "the blob captured after setPreset is the newly loaded processor state");
+    expect(capturedComponent.getSize() == sourceComponent.getSize()
+               && capturedController.getSize() == sourceController.getSize()
+               && sameBlock(capturedController, sourceController),
+           "that blob's controller bytes match the preset, length included");
+    expect(!sameBlock(capturedAfterSetPreset, beforeBare),
+           "the captured blob is not the pre-preset wrapper state");
+    second->setStateInformation(capturedAfterSetPreset.getData(), (int)capturedAfterSetPreset.getSize());
+    const float hostAfterSecond = second->getParameters().isEmpty() ? -1.0f : second->getParameters()[0]->getValue();
+    std::printf("host parameter after setStateInformation of that blob: %.6f\n", hostAfterSecond);
+    expect(std::abs(hostAfterBare - 0.25f) < 1.0e-4f,
+           "message-thread setPreset already refreshed the host parameter via the edit controller restart");
+    expect(std::abs(hostAfterSecond - 0.25f) < 1.0e-4f
+               && sameBlock(wrapperChild(wrapperState(*second), "IComponent"), sourceComponent),
+           "the second apply keeps the loaded preset and does not restore the previous parameter");
+
+    // JUCE 8.0.4's edit controller does not implement IEditController::getState (kNotImplemented).
+    // PresetFile still writes a zero-length Cont. A juce_add_plugin cannot supply a distinct
+    // controller stream. Inject one and check the real wrapper drops it while keeping Comp.
+    juce::MemoryBlock injectedCont;
+    const unsigned char contBytes[] = { 'C', 'o', 'n', 't', 0x00, 'Z', 0x7f };
+    injectedCont.append(contBytes, sizeof(contBytes));
+    expect(injectedCont.getSize() == sizeof(contBytes)
+               && static_cast<const unsigned char*>(injectedCont.getData())[4] == 0
+               && !(injectedCont == sourceComponent),
+           "the injected controller state is non-empty, contains a null, and is not the processor state");
+    if (!second->getParameters().isEmpty())
+    {
+        second->getParameters()[0]->setValueNotifyingHost(0.10f);
+    }
+    second->processBlock(buffer, midi);
+    const juce::MemoryBlock injected = buildPreset(inspection.classId, sourceComponent, injectedCont);
+    const juce::File injectedFile = preset.getSiblingFile("dal-preset-probe-cont.vstpreset");
+    injectedFile.replaceWithData(injected.getData(), injected.getSize());
+    const int recordsBeforeInjected = undo.records;
+    expect(host.loadInsertPresetFromFile(otherToken, injectedFile).wasOk(),
+           "production load accepts a preset whose controller chunk the probe did not write");
+    expect(undo.records == recordsBeforeInjected + 1, "that load still records one undo step");
+    const juce::MemoryBlock afterInjected = wrapperState(*second);
+    expect(sameBlock(wrapperChild(afterInjected, "IComponent"), sourceComponent),
+           "the injected preset keeps the processor state, including the side string");
+    expect(!second->getParameters().isEmpty() && std::abs(second->getParameters()[0]->getValue() - 0.25f) < 1.0e-4f,
+           "the injected preset keeps the gain parameter");
+    DirectPresetVisit reread;
+    second->getExtensions(reread);
+    juce::MemoryBlock rereadCont;
+    (void)vst3_preset::copyChunk(reread.outgoing.getData(), reread.outgoing.getSize(), "Cont", rereadCont);
+    std::printf("controller payload after Save/Load of an injected Cont: %u bytes (injected %u). "
+                "JUCE 8.0.4 EditController::getState returns kNotImplemented, so a juce_add_plugin "
+                "cannot round-trip a distinct controller state.\n",
+                (unsigned)rereadCont.getSize(), (unsigned)injectedCont.getSize());
+    expect(rereadCont.getSize() == 0 && sameBlock(rereadCont, sourceController),
+           "the real wrapper does not keep the injected controller bytes");
+
     preset.deleteFile();
+    injectedFile.deleteFile();
     foreignFile.deleteFile();
     choppedFile.deleteFile();
     project.deleteFile();

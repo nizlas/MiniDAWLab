@@ -143,6 +143,11 @@ public:
     {
         pauseAckTimeoutMs_.store(juce::jmax(1, timeoutMs), std::memory_order_relaxed);
     }
+    /// [Test only] Current pause depth. A timed-out pauseWorkerAndWait leaves this unchanged.
+    [[nodiscard]] int pauseDepthForTests() const noexcept
+    {
+        return pauseDepth_.load(std::memory_order_acquire);
+    }
     /// [Test only] While set, the worker does not claim a row it has not started. The callback
     /// therefore sees an uncommitted prime and keeps the row on the direct path. Production
     /// never sets this.
