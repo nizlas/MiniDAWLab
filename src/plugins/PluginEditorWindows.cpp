@@ -20,8 +20,8 @@ namespace
 
     [[nodiscard]] int presetToolbarMinWidth()
     {
-        return 8 + kButton + 6 + kButton + 8 + presetButtonWidth("Load preset…") + 6
-               + presetButtonWidth("Save preset…") + 8;
+        return 8 + kButton + 6 + kButton + 8 + presetButtonWidth("Load preset...") + 6
+               + presetButtonWidth("Save preset...") + 8;
     }
 
     [[nodiscard]] bool dispatchHostUndoRedoFromPluginWindowKey(const juce::KeyPress& key,
@@ -80,11 +80,13 @@ namespace
             editorResizable_ = editor_->isResizable();
             addAndMakeVisible(editor_.get());
             editor_->addComponentListener(this);
+            // juce::String(const char*) is ASCII (CharPointer_ASCII). U+2026 in a
+            // narrow literal is three bytes above 127 and paints as broken glyphs.
             configurePresetButton(loadButton_,
-                                  "Load preset…",
+                                  "Load preset...",
                                   "Load a .vstpreset into this insert. The plug-in's own state is replaced. Host Active and Bypass stay as they are.");
             configurePresetButton(saveButton_,
-                                  "Save preset…",
+                                  "Save preset...",
                                   "Save this insert's plug-in state as a .vstpreset. The project is not modified. Host Active and Bypass are not stored in the file.");
             loadButton_.onClick = [this] { beginLoadPreset(); };
             saveButton_.onClick = [this] { beginSavePreset(); };

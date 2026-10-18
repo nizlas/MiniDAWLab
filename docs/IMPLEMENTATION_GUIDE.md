@@ -214,6 +214,11 @@ However:
 - prefer readable ownership and lifetime models
 - prefer explicitness over hidden magic
 
+### UI glyphs and UI strings
+
+- Draw a graphical icon, or reuse one from a shared component such as `track_strip_glyphs`. Do not stand in for an icon with a text symbol.
+- A `juce::String` built from a `const char*` is ASCII. JUCE does not treat bytes above 127 in that literal as Unicode, so a character such as U+2026 paints as broken glyphs. A non-ASCII character is written with an explicit UTF-8 construction (`juce::CharPointer_UTF8` or a `char8_t` literal). A button ellipsis is three ASCII dots: `...`.
+
 The goal is not “minimal C++ sophistication”.  
 The goal is modern, clear, learnable, and robust code.
 
