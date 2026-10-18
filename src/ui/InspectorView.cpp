@@ -180,13 +180,19 @@ public:
                      InsertSlotId slotId,
                      InsertStage stage,
                      int displayIndex,
-                     juce::String displayName)
+                     juce::String displayName,
+                     bool hostActive,
+                     bool hostBypassed,
+                     bool unavailable)
         : owner_(owner)
         , trackId_(trackId)
         , slotId_(slotId)
         , stage_(stage)
         , displayIndex_(displayIndex)
         , displayName_(std::move(displayName))
+        , hostActive_(hostActive)
+        , hostBypassed_(hostBypassed)
+        , unavailable_(unavailable)
     {
         setOpaque(false);
         setHelpText(juce::String(displayIndex_) + "  " + displayName_);
@@ -216,20 +222,40 @@ public:
         g.setColour(outline.withMultipliedAlpha(hovered_ ? 1.0f : 0.75f));
         g.drawRoundedRectangle(bounds, kCorner, 1.f);
 
+        if (hostBypassed_)
+        {
+            g.setColour(juce::Colour(0xffc6a42a));
+            g.fillRect(bounds.getX() + 1.0f, bounds.getY() + 3.0f, 3.0f, bounds.getHeight() - 6.0f);
+        }
         const juce::Font font(juce::FontOptions(12.0f));
         const juce::String line = juce::String(displayIndex_) + "  " + displayName_;
         const float pad = 8.f;
         const float textL = bounds.getX() + pad;
-        const float maxW = juce::jmax(4.f, bounds.getWidth() - 2.f * pad);
+        const float maxW = juce::jmax(4.f, bounds.getWidth() - 2.f * pad - 40.f);
         const juce::String elided = elideTextToFitWidth(line, font, maxW);
-        g.setColour(findColour(juce::Label::textColourId));
+        auto text = findColour(juce::Label::textColourId);
+        if (!hostActive_ || unavailable_)
+        {
+            text = text.withMultipliedAlpha(0.45f);
+        }
+        g.setColour(text);
         g.setFont(font);
         g.drawText(elided, juce::Rectangle<float>(textL, bounds.getY(), maxW, bounds.getHeight()),
                    juce::Justification::centredLeft, true);
+        g.setColour(hostActive_ ? juce::Colour(0xff2d9d53) : juce::Colour(0xff5a5858));
+        g.fillEllipse(bounds.getRight() - 34.0f, bounds.getCentreY() - 4.0f, 8.0f, 8.0f);
+        g.setColour(hostBypassed_ ? juce::Colour(0xffc6a42a) : juce::Colour(0xff5a5858).withMultipliedAlpha(hostActive_ ? 1.0f : 0.45f));
+        g.drawEllipse(bounds.getRight() - 18.0f, bounds.getCentreY() - 4.0f, 8.0f, 8.0f, 1.4f);
     }
 
     void mouseDown(const juce::MouseEvent& e) override
     {
+        if (!e.mods.isPopupMenu() && hitHostControl(e.getPosition()))
+        {
+            armedForLeftClick_ = false;
+            pendingContextMenu_ = false;
+            return;
+        }
         if (e.mods.isPopupMenu())
         {
             pendingContextMenu_ = true;
@@ -272,17 +298,31 @@ public:
         {
             pendingContextMenu_ = false;
             juce::PopupMenu menu;
+            menu.addItem(2, hostActive_ ? "Active" : "Active", true, hostActive_);
+            menu.addItem(3, "Bypass", hostActive_ && !unavailable_, hostBypassed_);
+            menu.addSeparator();
             menu.addItem(1, "Remove insert");
             const auto screenPt = localPointToGlobal(e.getPosition());
             menu.showMenuAsync(
                 juce::PopupMenu::Options{}.withTargetScreenArea(
                     juce::Rectangle<int>(screenPt.x, screenPt.y, 1, 1)),
                 [safeThis = juce::Component::SafePointer<InsertSlotButton>(this)](int r) {
-                    if (safeThis == nullptr || r != 1)
+                    if (safeThis == nullptr)
                     {
                         return;
                     }
-                    safeThis->performRemoveFromContextMenu();
+                    if (r == 1)
+                    {
+                        safeThis->performRemoveFromContextMenu();
+                    }
+                    else if (r == 2 && safeThis->owner_.pluginHost_.setHostActive)
+                    {
+                        safeThis->owner_.pluginHost_.setHostActive(safeThis->trackId_, safeThis->slotId_, !safeThis->hostActive_);
+                    }
+                    else if (r == 3 && safeThis->hostActive_ && safeThis->owner_.pluginHost_.setHostBypassed)
+                    {
+                        safeThis->owner_.pluginHost_.setHostBypassed(safeThis->trackId_, safeThis->slotId_, !safeThis->hostBypassed_);
+                    }
                 });
             repaint();
             return;
@@ -294,8 +334,24 @@ public:
         }
         const bool openEditor
             = armedForLeftClick_ && !dragLiftIssued_ && e.mouseWasClicked() && !e.mods.isPopupMenu();
+        const bool hostClick = e.mouseWasClicked() && !e.mods.isPopupMenu() && hitHostControl(e.getPosition());
         armedForLeftClick_ = false;
         repaint();
+        if (hostClick)
+        {
+            if (e.getPosition().x >= getWidth() - 26)
+            {
+                if (hostActive_ && !unavailable_ && owner_.pluginHost_.setHostBypassed)
+                {
+                    owner_.pluginHost_.setHostBypassed(trackId_, slotId_, !hostBypassed_);
+                }
+            }
+            else if (owner_.pluginHost_.setHostActive)
+            {
+                owner_.pluginHost_.setHostActive(trackId_, slotId_, !hostActive_);
+            }
+            return;
+        }
         if (openEditor)
         {
             owner_.requestEditForSlot(slotId_);
@@ -355,6 +411,11 @@ public:
         owner_.requestRemoveForSlot(slotId_);
     }
 
+    [[nodiscard]] bool hitHostControl(juce::Point<int> p) const noexcept
+    {
+        return p.x >= getWidth() - 40;
+    }
+
 private:
     InspectorView& owner_;
     TrackId trackId_ = kInvalidTrackId;
@@ -362,6 +423,9 @@ private:
     InsertStage stage_ = InsertStage::Post;
     int displayIndex_ = 1;
     juce::String displayName_;
+    bool hostActive_ = true;
+    bool hostBypassed_ = false;
+    bool unavailable_ = false;
 
     bool dragLiftIssued_ = false;
     bool armedForLeftClick_ = false;
@@ -1172,7 +1236,10 @@ void InspectorView::rebuildInsertRowStrips(const TrackId active, const std::vect
                                                       sid,
                                                       InsertStage::Pre,
                                                       preIndex++,
-                                                      r.displayName);
+                                                      r.displayName,
+                                                      r.hostActive,
+                                                      r.hostBypassed,
+                                                      r.unavailable);
         addAndMakeVisible(*strip);
         preRowStrips_.push_back(std::move(strip));
     }
@@ -1190,7 +1257,10 @@ void InspectorView::rebuildInsertRowStrips(const TrackId active, const std::vect
                                                       sid,
                                                       InsertStage::Post,
                                                       postIndex++,
-                                                      r.displayName);
+                                                      r.displayName,
+                                                      r.hostActive,
+                                                      r.hostBypassed,
+                                                      r.unavailable);
         addAndMakeVisible(*strip);
         postRowStrips_.push_back(std::move(strip));
     }
@@ -1559,7 +1629,8 @@ void InspectorView::syncInsertsForActiveTrack(const TrackId active)
         && std::equal(rows.begin(), rows.end(), lastShownInsertRows_.begin(),
                       [](const InspectorInsertRow& a, const InspectorInsertRow& b) {
                           return a.slotId == b.slotId && a.stage == b.stage
-                                 && a.displayName == b.displayName;
+                                 && a.displayName == b.displayName && a.hostActive == b.hostActive
+                                 && a.hostBypassed == b.hostBypassed;
                       });
 
     if (!sameRows)

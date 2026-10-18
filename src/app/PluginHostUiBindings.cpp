@@ -24,6 +24,8 @@ InspectorPluginHost PluginHostUiBindings::makeInsertSeam(PluginInsertHost& plugi
                 ir.stage = rv.stage;
                 ir.displayName = rv.displayName;
                 ir.unavailable = rv.unavailable;
+                ir.hostActive = rv.hostActive;
+                ir.hostBypassed = rv.hostBypassed;
                 rows.push_back(std::move(ir));
             }
             return rows;
@@ -42,6 +44,12 @@ InspectorPluginHost PluginHostUiBindings::makeInsertSeam(PluginInsertHost& plugi
         },
         [host](const TrackId tid, const InsertSlotId sid, const int gapIndex) {
             host->reorderInsertWithinStage(tid, sid, gapIndex);
+        },
+        [host](const TrackId tid, const InsertSlotId sid, const bool active) {
+            host->setInsertHostActive(tid, sid, active);
+        },
+        [host](const TrackId tid, const InsertSlotId sid, const bool bypassed) {
+            host->setInsertHostBypassed(tid, sid, bypassed);
         }
     };
 }

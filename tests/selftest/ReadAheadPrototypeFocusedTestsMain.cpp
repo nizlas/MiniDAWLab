@@ -1659,6 +1659,45 @@ void testChainRemovalWaitsForBlockedWorker()
 }
 
 // =============================================================================================
+void testHostBypassWhileWorkerInsidePlugin()
+{
+    std::printf("\n-- host bypass while the worker is inside processBlock: no second entry, queue discarded --\n");
+    readahead::setConfiguredReadAheadDepth(kDepth);
+    Fixture on(0);
+    readahead::setConfiguredReadAheadDepth(0);
+    readahead::ReadAheadRenderer* const ra = on.h.engine.experimentalReadAhead();
+    on.h.pluginHost.setAudibleQueueInvalidation([ra] {
+        if (ra != nullptr)
+        {
+            ra->requestFullReset();
+        }
+    });
+    expect(parkWorkerInsideProbe(on), "worker parked inside the probe's processBlock");
+    const int overlapsBefore = gOverlaps.load();
+    const auto rows = on.h.pluginHost.getInsertRowsForTrack(on.h.audioTids[1]);
+    expect(!rows.empty(), "owned row has an insert");
+    if (!rows.empty())
+    {
+        on.h.pluginHost.setInsertHostBypassed(on.h.audioTids[1], rows[0].slotId, true);
+    }
+    (void)on.h.runCallbackBlocks(1);
+    expect(gOverlaps.load() == overlapsBefore, "callback did not enter the instance the worker is inside");
+    expect(ra->countersSnapshot().discardResets > 0, "the queued wet mix was discarded");
+    const auto audible = rows.empty() ? PluginInsertHost::InsertHostAudible{}
+                                      : on.h.pluginHost.insertHostAudible(on.h.audioTids[1], rows[0].slotId);
+    expect(audible.active && audible.bypassed, "bypass is stored while the worker was still inside the plug-in");
+    on.pre->setHoldInProcessBlock(false);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (on.pre->isHeldInProcessBlock() && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    (void)on.h.runCallbackBlocks(1);
+    expect(gOverlaps.load() == overlapsBefore, "releasing the worker still did not overlap");
+}
+
+// =============================================================================================
 void testDeviceStopWaitsForBlockedWorker()
 {
     std::printf("\n-- device stop under a BLOCKED worker: row teardown waits before releaseResources --\n");
@@ -2286,6 +2325,7 @@ int main(int argc, char** argv)
     testWorkerThreadSmoke();
     testWorkerPauseAckTimeoutContract();
     testChainRemovalWaitsForBlockedWorker();
+    testHostBypassWhileWorkerInsidePlugin();
     testDeviceStopWaitsForBlockedWorker();
 
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);

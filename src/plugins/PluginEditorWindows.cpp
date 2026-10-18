@@ -5,9 +5,13 @@
 #include "plugins/PluginEditorWindows.h"
 
 #include "plugins/PluginInsertHost.h"
+#include "ui/TrackStripButtonGlyphs.h"
 
 namespace
 {
+    constexpr int kToolbarH = 28;
+    constexpr int kButton = 22;
+
     [[nodiscard]] bool dispatchHostUndoRedoFromPluginWindowKey(const juce::KeyPress& key,
                                                                const PluginEditorWindowHostShortcuts& sh)
     {
@@ -43,6 +47,201 @@ namespace
         }
         return false;
     }
+
+    /// Host Active / Bypass bar. The plug-in editor is a child below it and keeps its own size.
+    class InsertEditorShell final : public juce::Component,
+                                    public juce::SettableTooltipClient,
+                                    private juce::ComponentListener,
+                                    private juce::Timer
+    {
+    public:
+        InsertEditorShell(PluginInsertHost& host,
+                          const TrackId trackId,
+                          const InsertSlotId slotId,
+                          std::unique_ptr<juce::AudioProcessorEditor> editor)
+            : host_(host)
+            , trackId_(trackId)
+            , slotId_(slotId)
+            , editor_(std::move(editor))
+        {
+            jassert(editor_ != nullptr);
+            editorResizable_ = editor_->isResizable();
+            addAndMakeVisible(editor_.get());
+            editor_->addComponentListener(this);
+            const int w = juce::jmax(160, editor_->getWidth());
+            const int h = juce::jmax(40, editor_->getHeight());
+            setSize(w, h + kToolbarH);
+            startTimerHz(15);
+        }
+
+        ~InsertEditorShell() override
+        {
+            if (editor_ != nullptr)
+            {
+                editor_->removeComponentListener(this);
+            }
+        }
+
+        void paint(juce::Graphics& g) override
+        {
+            g.setColour(juce::Colour(0xff26292d));
+            g.fillRect(0, 0, getWidth(), kToolbarH);
+            g.setColour(juce::Colour(0xff3a3d42));
+            g.drawHorizontalLine(kToolbarH - 1, 0.0f, static_cast<float>(getWidth()));
+
+            const auto audible = host_.insertHostAudible(trackId_, slotId_);
+            paintButton(g, activeBounds(), true, audible.active, audible.active, audible.available);
+            const bool bypassShown = audible.bypassed;
+            const bool bypassEnabled = audible.available && audible.active;
+            paintButton(g, bypassBounds(), false, bypassShown, bypassEnabled, audible.available);
+        }
+
+        void resized() override
+        {
+            if (guard_ || editor_ == nullptr)
+            {
+                return;
+            }
+            const juce::ScopedValueSetter<bool> guard(guard_, true);
+            if (editorResizable_)
+            {
+                editor_->setBounds(0, kToolbarH, getWidth(), juce::jmax(1, getHeight() - kToolbarH));
+            }
+            else if (editor_->getX() != 0 || editor_->getY() != kToolbarH)
+            {
+                editor_->setTopLeftPosition(0, kToolbarH);
+            }
+        }
+
+        void mouseMove(const juce::MouseEvent& e) override
+        {
+            if (activeBounds().contains(e.getPosition()))
+            {
+                setTooltip("Active. Off sends this insert's input onward and stops processing it after a short fade. The plug-in stays loaded.");
+            }
+            else if (bypassBounds().contains(e.getPosition()))
+            {
+                setTooltip("Bypass. You hear the signal just before this insert while the effect keeps processing. Disabled while Active is off; the Bypass choice is kept.");
+            }
+            else
+            {
+                setTooltip({});
+            }
+        }
+
+        void mouseUp(const juce::MouseEvent& e) override
+        {
+            const auto audible = host_.insertHostAudible(trackId_, slotId_);
+            if (!audible.available || !e.mouseWasClicked())
+            {
+                return;
+            }
+            if (activeBounds().contains(e.getPosition()))
+            {
+                host_.setInsertHostActive(trackId_, slotId_, !audible.active);
+                repaint();
+                return;
+            }
+            if (audible.active && bypassBounds().contains(e.getPosition()))
+            {
+                host_.setInsertHostBypassed(trackId_, slotId_, !audible.bypassed);
+                repaint();
+            }
+        }
+
+    private:
+        void timerCallback() override { repaint(); }
+
+        void componentMovedOrResized(juce::Component& component, bool, bool wasResized) override
+        {
+            if (&component != editor_.get() || !wasResized || guard_)
+            {
+                return;
+            }
+            const juce::ScopedValueSetter<bool> guard(guard_, true);
+            const int w = juce::jmax(160, component.getWidth());
+            const int h = component.getHeight() + kToolbarH;
+            if (getWidth() != w || getHeight() != h)
+            {
+                setSize(w, h);
+            }
+            if (component.getX() != 0 || component.getY() != kToolbarH)
+            {
+                component.setTopLeftPosition(0, kToolbarH);
+            }
+        }
+
+        [[nodiscard]] juce::Rectangle<int> activeBounds() const noexcept
+        {
+            return { 8, (kToolbarH - kButton) / 2, kButton, kButton };
+        }
+
+        [[nodiscard]] juce::Rectangle<int> bypassBounds() const noexcept
+        {
+            return { 8 + kButton + 6, (kToolbarH - kButton) / 2, kButton, kButton };
+        }
+
+        void paintButton(juce::Graphics& g,
+                         juce::Rectangle<int> bounds,
+                         const bool power,
+                         const bool on,
+                         const bool enabled,
+                         const bool available) const
+        {
+            juce::Colour fill = juce::Colour(track_strip_glyphs::kNeutralFaceArgb);
+            juce::Colour edge = juce::Colour(track_strip_glyphs::kCtlNeutralEdgeArgb);
+            if (!available || !enabled)
+            {
+                fill = juce::Colour(track_strip_glyphs::kDisabledFaceArgb);
+            }
+            else if (power && on)
+            {
+                fill = juce::Colour(track_strip_glyphs::kPowerOnArgb);
+            }
+            else if (!power && on)
+            {
+                fill = juce::Colour(track_strip_glyphs::kMuteOnArgb);
+            }
+            // Active off keeps the Bypass choice visible: the button stays disabled, with an amber edge.
+            if (!power && on)
+            {
+                edge = juce::Colour(track_strip_glyphs::kMuteOnArgb);
+            }
+            const auto body = bounds.toFloat();
+            track_strip_glyphs::drawStandardStripButtonFace(g, body, fill, edge, false);
+            const auto glyph = track_strip_glyphs::nonLetterGlyphAreaFromSquareBodyPx(bounds);
+            const auto colour = juce::Colour((!available || !enabled) ? track_strip_glyphs::kGlyphDisabledArgb
+                                                                      : track_strip_glyphs::kGlyphLightArgb);
+            if (power)
+            {
+                track_strip_glyphs::drawPowerGlyphInSquare(g, glyph, colour);
+            }
+            else
+            {
+                track_strip_glyphs::drawBypassGlyphInSquare(g, glyph, colour);
+            }
+        }
+
+        PluginInsertHost& host_;
+        TrackId trackId_ = kInvalidTrackId;
+        InsertSlotId slotId_ = kInvalidInsertSlotId;
+        std::unique_ptr<juce::AudioProcessorEditor> editor_;
+        bool editorResizable_ = false;
+        bool guard_ = false;
+    };
+
+    void installShell(juce::DocumentWindow& window,
+                      PluginInsertHost& host,
+                      const TrackId trackId,
+                      const InsertSlotId slotId,
+                      std::unique_ptr<juce::AudioProcessorEditor> editor)
+    {
+        const bool resizable = editor != nullptr && editor->isResizable();
+        auto* shell = new InsertEditorShell(host, trackId, slotId, std::move(editor));
+        window.setContentOwned(shell, true);
+        window.setResizable(resizable, false);
+        shell->setMouseCursor(juce::MouseCursor::NormalCursor);
+    }
 } // namespace
 
 PluginEditorWindow::PluginEditorWindow(PluginInsertHost& host,
@@ -52,8 +251,7 @@ PluginEditorWindow::PluginEditorWindow(PluginInsertHost& host,
                                        std::unique_ptr<juce::AudioProcessorEditor> editor,
                                        PluginEditorWindowHostShortcuts hostShortcuts)
     : DocumentWindow(proc.getName().isNotEmpty() ? proc.getName() : "Plugin",
-                     juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
-                         juce::ResizableWindow::backgroundColourId),
+                     juce::Colour(0xff26292d),
                      DocumentWindow::closeButton)
     , host_(host)
     , trackId_(trackId)
@@ -62,13 +260,7 @@ PluginEditorWindow::PluginEditorWindow(PluginInsertHost& host,
 {
     juce::ignoreUnused(proc);
     setUsingNativeTitleBar(true);
-    setContentOwned(editor.release(), true);
-    if (auto* c = getContentComponent())
-    {
-        const int tw = juce::jmax(200, c->getWidth());
-        const int th = juce::jmax(120, c->getHeight());
-        centreWithSize(tw + 20, th + 20);
-    }
+    installShell(*this, host, trackId, insertSlotId, std::move(editor));
     setVisible(true);
 }
 
@@ -102,8 +294,7 @@ PluginParamsWindow::PluginParamsWindow(PluginInsertHost& host,
                                        std::unique_ptr<juce::AudioProcessorEditor> editor,
                                        PluginEditorWindowHostShortcuts hostShortcuts)
     : DocumentWindow((proc.getName().isNotEmpty() ? proc.getName() : "Plugin") + " — parameters",
-                     juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
-                         juce::ResizableWindow::backgroundColourId),
+                     juce::Colour(0xff26292d),
                      DocumentWindow::closeButton)
     , host_(host)
     , trackId_(trackId)
@@ -112,13 +303,7 @@ PluginParamsWindow::PluginParamsWindow(PluginInsertHost& host,
 {
     juce::ignoreUnused(proc);
     setUsingNativeTitleBar(true);
-    setContentOwned(editor.release(), true);
-    if (auto* c = getContentComponent())
-    {
-        const int tw = juce::jmax(320, c->getWidth());
-        const int th = juce::jmax(200, c->getHeight());
-        centreWithSize(tw + 20, th + 40);
-    }
+    installShell(*this, host, trackId, insertSlotId, std::move(editor));
     setVisible(true);
 }
 

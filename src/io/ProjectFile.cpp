@@ -298,6 +298,17 @@ namespace
                     {
                         io->setProperty("pluginStateBase64", in.pluginStateBase64);
                     }
+                    if (fileVersion >= 32)
+                    {
+                        if (!in.hostActive)
+                        {
+                            io->setProperty("active", false);
+                        }
+                        if (in.hostBypassed)
+                        {
+                            io->setProperty("bypassed", true);
+                        }
+                    }
                     insertVars.add(juce::var(io.get()));
                 }
                 to->setProperty("inserts", juce::var(insertVars));
@@ -404,6 +415,15 @@ namespace
             }
             ins.pluginIdentifier = iv.getProperty("pluginIdentifier", {}).toString();
             ins.pluginStateBase64 = iv.getProperty("pluginStateBase64", {}).toString();
+            // v32 keys. Absent means the historical behaviour: Active on, Bypass off.
+            if (iv.hasProperty("active"))
+            {
+                ins.hostActive = static_cast<bool>(iv.getProperty("active", {}));
+            }
+            if (iv.hasProperty("bypassed"))
+            {
+                ins.hostBypassed = static_cast<bool>(iv.getProperty("bypassed", {}));
+            }
             trk.inserts.push_back(std::move(ins));
         }
         return juce::Result::ok();

@@ -142,6 +142,25 @@ inline void drawPowerGlyphInSquare(juce::Graphics& g, juce::Rectangle<float> ico
     g.strokePath(stem, juce::PathStrokeType(stroke, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
 }
 
+/// Circle with a diagonal slash — host Bypass, distinct from the power glyph.
+inline void drawBypassGlyphInSquare(juce::Graphics& g, juce::Rectangle<float> icon, const juce::Colour glyphColour)
+{
+    const float side = juce::jmin(icon.getWidth(), icon.getHeight());
+    if (side <= 4.0f)
+    {
+        return;
+    }
+    icon = juce::Rectangle<float>(icon.getCentreX() - side * 0.5f, icon.getCentreY() - side * 0.5f, side, side);
+    const float stroke = juce::jlimit(1.5f, 2.2f, side * 0.12f);
+    g.setColour(glyphColour);
+    const float r = side * 0.32f;
+    g.drawEllipse(icon.getCentreX() - r, icon.getCentreY() - r, r * 2.0f, r * 2.0f, stroke);
+    juce::Path slash;
+    slash.startNewSubPath(icon.getX() + side * 0.22f, icon.getBottom() - side * 0.22f);
+    slash.lineTo(icon.getRight() - side * 0.22f, icon.getY() + side * 0.22f);
+    g.strokePath(slash, juce::PathStrokeType(stroke, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+}
+
 /// Three vertical white keys + two black keys; separators / black keys as near-black strokes.
 inline void drawInstrumentPianoGlyphCubaseSimple(juce::Graphics& g, const juce::Rectangle<float> glyphArea)
 {

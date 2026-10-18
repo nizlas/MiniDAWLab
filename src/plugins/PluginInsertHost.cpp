@@ -16,6 +16,178 @@
 #include <map>
 #include <vector>
 
+void InsertSlotRuntime::prepare(const double sampleRate, const int maxBlock) noexcept
+{
+    sampleRate_.store(sampleRate > 0.0 ? static_cast<float>(sampleRate) : 48000.0f, std::memory_order_relaxed);
+    const int n = juce::jmax(1, maxBlock);
+    if (dry_.getNumSamples() < n || dry_.getNumChannels() < 2)
+    {
+        dry_.setSize(2, n, false, false, true);
+    }
+    if (wet_.getNumSamples() < n || wet_.getNumChannels() < 2)
+    {
+        wet_.setSize(2, n, false, false, true);
+    }
+    if (static_cast<int>(delay_[0].size()) < kMaxDelaySamples)
+    {
+        delay_[0].assign(static_cast<size_t>(kMaxDelaySamples), 0.0f);
+        delay_[1].assign(static_cast<size_t>(kMaxDelaySamples), 0.0f);
+        delayWrite_ = 0;
+    }
+}
+
+void InsertSlotRuntime::setTarget(const Target target) noexcept
+{
+    target_.store(static_cast<int>(target), std::memory_order_relaxed);
+}
+
+InsertSlotRuntime::Target InsertSlotRuntime::target() const noexcept
+{
+    return static_cast<Target>(target_.load(std::memory_order_relaxed));
+}
+
+void InsertSlotRuntime::setLatencySamples(const int latencySamples) noexcept
+{
+    const int capped = juce::jlimit(0, kMaxDelaySamples - 1, latencySamples);
+    latencySamples_.store(capped, std::memory_order_relaxed);
+}
+
+void InsertSlotRuntime::resetDelay() noexcept
+{
+    std::fill(delay_[0].begin(), delay_[0].end(), 0.0f);
+    std::fill(delay_[1].begin(), delay_[1].end(), 0.0f);
+    delayWrite_ = 0;
+}
+
+void InsertSlotRuntime::clockDryBlock(const float* const* dry, const int numSamples, const int numChannels) noexcept
+{
+    if (dry == nullptr || delay_[0].empty())
+    {
+        return;
+    }
+    const int cap = static_cast<int>(delay_[0].size());
+    const int channels = juce::jmin(numChannels, 2);
+    for (int i = 0; i < numSamples; ++i)
+    {
+        for (int c = 0; c < channels; ++c)
+        {
+            const float* row = dry[c];
+            delay_[static_cast<size_t>(c)][static_cast<size_t>(delayWrite_)] = row != nullptr ? row[i] : 0.0f;
+        }
+        if (++delayWrite_ >= cap)
+        {
+            delayWrite_ = 0;
+        }
+    }
+}
+
+void InsertSlotRuntime::process(juce::AudioProcessor& processor,
+                                juce::AudioBuffer<float>& view,
+                                juce::MidiBuffer& midi) noexcept
+{
+    const int n = view.getNumSamples();
+    const int chs = juce::jmin(2, view.getNumChannels());
+    if (n <= 0 || chs <= 0 || view.getReadPointer(0) == nullptr)
+    {
+        return;
+    }
+    // Buffers are sized on the message thread. If a block is larger than that, fall back to the
+    // unmixed processBlock rather than allocating here.
+    if (dry_.getNumSamples() < n || wet_.getNumSamples() < n || delay_[0].empty())
+    {
+        processor.processBlock(view, midi);
+        return;
+    }
+
+    const int tgt = target_.load(std::memory_order_relaxed);
+    const float desired = tgt == static_cast<int>(Target::Wet) ? 1.0f : 0.0f;
+    if (rampDest_ != tgt)
+    {
+        const float sr = sampleRate_.load(std::memory_order_relaxed);
+        const int ramp = juce::jmax(1, static_cast<int>(std::lround(static_cast<double>(sr) * (static_cast<double>(kRampMs) / 1000.0))));
+        rampFrom_ = wetGain_;
+        rampTo_ = desired;
+        rampTotal_ = ramp;
+        rampLeft_ = ramp;
+        rampDest_ = tgt;
+    }
+
+    const bool settledWet = rampLeft_ == 0 && tgt == static_cast<int>(Target::Wet);
+    const bool settledInactive = rampLeft_ == 0 && tgt == static_cast<int>(Target::Inactive);
+    if (settledInactive)
+    {
+        wetGain_ = 0.0f;
+        return;
+    }
+
+    const int latency = latencySamples_.load(std::memory_order_relaxed);
+    if (settledWet)
+    {
+        if (latency > 0)
+        {
+            clockDryBlock(view.getArrayOfReadPointers(), n, chs);
+        }
+        processor.processBlock(view, midi);
+        wetGain_ = 1.0f;
+        return;
+    }
+
+    for (int c = 0; c < chs; ++c)
+    {
+        dry_.copyFrom(c, 0, view, c, 0, n);
+    }
+    processor.processBlock(view, midi);
+    for (int c = 0; c < chs; ++c)
+    {
+        wet_.copyFrom(c, 0, view, c, 0, n);
+    }
+
+    // Inactive ends on the undelayed input (this insert's latency leaves the chain). Host bypass
+    // keeps the dry copy delayed so it lines up with the wet path inside this slot.
+    const bool undelayedDry = tgt == static_cast<int>(Target::Inactive);
+    const int cap = static_cast<int>(delay_[0].size());
+    int rampLeft = rampLeft_;
+    float g = wetGain_;
+    for (int i = 0; i < n; ++i)
+    {
+        if (rampLeft > 0)
+        {
+            const int done = rampTotal_ - rampLeft;
+            const float t = rampTotal_ <= 1 ? 1.0f
+                                            : static_cast<float>(done + 1) / static_cast<float>(rampTotal_);
+            g = rampFrom_ + (rampTo_ - rampFrom_) * juce::jlimit(0.0f, 1.0f, t);
+            --rampLeft;
+        }
+        else
+        {
+            g = desired;
+        }
+        for (int c = 0; c < chs; ++c)
+        {
+            const float in = dry_.getSample(c, i);
+            float dryS = in;
+            if (!undelayedDry && latency > 0 && cap > 0)
+            {
+                delay_[static_cast<size_t>(c)][static_cast<size_t>(delayWrite_)] = in;
+                int read = delayWrite_ - latency;
+                if (read < 0)
+                {
+                    read += cap;
+                }
+                dryS = delay_[static_cast<size_t>(c)][static_cast<size_t>(read)];
+            }
+            const float wetS = wet_.getSample(c, i);
+            view.setSample(c, i, dryS * (1.0f - g) + wetS * g);
+        }
+        if (!undelayedDry && latency > 0 && cap > 0 && ++delayWrite_ >= cap)
+        {
+            delayWrite_ = 0;
+        }
+    }
+    rampLeft_ = rampLeft;
+    wetGain_ = g;
+}
+
 namespace
 {
     [[nodiscard]] juce::PluginDescription pickPrimaryDescription(const juce::File& vst3File,
@@ -257,6 +429,157 @@ void PluginInsertHost::recordPluginSlotUndo(const juce::String& label, const Plu
     }
 }
 
+void PluginInsertHost::ensureInsertRuntime(LiveInsertSlot& slot)
+{
+    if (slot.instance == nullptr)
+    {
+        return;
+    }
+    if (slot.runtime == nullptr)
+    {
+        slot.runtime = std::make_shared<InsertSlotRuntime>();
+    }
+    slot.runtime->prepare(effectiveSr(sampleRate_), effectiveBs(blockSize_));
+    slot.runtime->setLatencySamples(slot.instance->getLatencySamples());
+    if (!slot.hostActive)
+    {
+        slot.runtime->setTarget(InsertSlotRuntime::Target::Inactive);
+    }
+    else if (slot.hostBypassed)
+    {
+        slot.runtime->setTarget(InsertSlotRuntime::Target::HostBypass);
+    }
+    else
+    {
+        slot.runtime->setTarget(InsertSlotRuntime::Target::Wet);
+    }
+}
+
+void PluginInsertHost::recordHostAudibleUndo(const juce::String& label,
+                                             const TrackId trackId,
+                                             const PluginTrackChain& before)
+{
+    const PluginTrackChain after = exportChain(trackId);
+    if (before.chainEquals(after))
+    {
+        return;
+    }
+    PluginUndoStepSides sides;
+    sides.trackId = trackId;
+    sides.before = before;
+    sides.after = after;
+    recordPluginSlotUndo(label, sides);
+    if (audibleQueueInvalidation_)
+    {
+        audibleQueueInvalidation_();
+    }
+}
+
+void PluginInsertHost::setInsertHostActive(const TrackId trackId, const InsertSlotId slotId, const bool active)
+{
+    LiveInsertSlot* const slot = findLiveMutable(trackId, slotId);
+    if (slot == nullptr || slot->hostActive == active)
+    {
+        return;
+    }
+    if (slot->isUnavailablePlaceholder())
+    {
+        const PluginTrackChain before = exportChain(trackId);
+        slot->hostActive = active;
+        slot->unavailableDescriptor.hostActive = active;
+        recordHostAudibleUndo("Insert active", trackId, before);
+        return;
+    }
+    if (slot->instance == nullptr)
+    {
+        return;
+    }
+    ensureInsertRuntime(*slot);
+    if (!active)
+    {
+        const PluginTrackChain before = exportChain(trackId);
+        slot->hostActive = false;
+        slot->runtime->setLatencySamples(slot->instance->getLatencySamples());
+        slot->runtime->setTarget(InsertSlotRuntime::Target::Inactive);
+        recordHostAudibleUndo("Insert active", trackId, before);
+        return;
+    }
+
+    // Reactivation: drain first, then reset, so a frozen tail cannot overlap processBlock and
+    // cannot come back as the first wet block.
+    bool applied = false;
+    PluginTrackChain before;
+    const auto apply = [&] {
+        before = exportChain(trackId);
+        slot->instance->reset();
+        slot->runtime->resetDelay();
+        slot->runtime->setLatencySamples(slot->instance->getLatencySamples());
+        slot->hostActive = true;
+        slot->runtime->setTarget(slot->hostBypassed ? InsertSlotRuntime::Target::HostBypass
+                                                    : InsertSlotRuntime::Target::Wet);
+        applied = true;
+    };
+    if (exclusiveInstanceAccess_)
+    {
+        exclusiveInstanceAccess_(apply);
+    }
+    else
+    {
+        apply();
+    }
+    if (!applied)
+    {
+        return;
+    }
+    recordHostAudibleUndo("Insert active", trackId, before);
+}
+
+void PluginInsertHost::setInsertHostBypassed(const TrackId trackId, const InsertSlotId slotId, const bool bypassed)
+{
+    LiveInsertSlot* const slot = findLiveMutable(trackId, slotId);
+    if (slot == nullptr || slot->hostBypassed == bypassed)
+    {
+        return;
+    }
+    const PluginTrackChain before = exportChain(trackId);
+    slot->hostBypassed = bypassed;
+    if (slot->isUnavailablePlaceholder())
+    {
+        slot->unavailableDescriptor.hostBypassed = bypassed;
+        recordHostAudibleUndo("Insert bypass", trackId, before);
+        return;
+    }
+    if (slot->instance == nullptr || slot->runtime == nullptr)
+    {
+        ensureInsertRuntime(*slot);
+    }
+    if (slot->runtime != nullptr && slot->instance != nullptr)
+    {
+        slot->runtime->setLatencySamples(slot->instance->getLatencySamples());
+        if (slot->hostActive)
+        {
+            slot->runtime->setTarget(bypassed ? InsertSlotRuntime::Target::HostBypass
+                                              : InsertSlotRuntime::Target::Wet);
+        }
+    }
+    recordHostAudibleUndo("Insert bypass", trackId, before);
+}
+
+PluginInsertHost::InsertHostAudible PluginInsertHost::insertHostAudible(const TrackId trackId,
+                                                                        const InsertSlotId slotId) const
+{
+    InsertHostAudible audible;
+    const LiveInsertSlot* const slot = findLiveConst(trackId, slotId);
+    if (slot == nullptr)
+    {
+        return audible;
+    }
+    audible.active = slot->hostActive;
+    audible.bypassed = slot->hostBypassed;
+    audible.available = slot->instance != nullptr && slot->layoutOk;
+    return audible;
+}
+
 void PluginInsertHost::pushPluginParameterUndoStep(const TrackId trackId,
                                                    const InsertSlotId slotId,
                                                    const juce::MemoryBlock& baselineOpaqueState)
@@ -381,11 +704,20 @@ bool PluginInsertHost::tryInPlaceParameterStateRestore(const TrackId trackId,
         }
     }
 
+    bool audibleChanged = false;
     for (size_t i = 0; i < v.size(); ++i)
     {
         LiveInsertSlot& live = v[i];
         const PluginInsertDescriptor& desc = targetChain.slots[i];
 
+        const bool wasActive = live.hostActive;
+        const bool wasBypassed = live.hostBypassed;
+        live.hostActive = desc.hostActive;
+        live.hostBypassed = desc.hostBypassed;
+        if (wasActive != desc.hostActive || wasBypassed != desc.hostBypassed)
+        {
+            audibleChanged = true;
+        }
         if (desc.opaqueState.getSize() > 0)
         {
             live.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
@@ -406,9 +738,49 @@ bool PluginInsertHost::tryInPlaceParameterStateRestore(const TrackId trackId,
         {
             st->second = postRestore;
         }
+        ensureInsertRuntime(live);
+        if (!live.hostActive)
+        {
+            live.runtime->setTarget(InsertSlotRuntime::Target::Inactive);
+        }
+        else if (!wasActive)
+        {
+            // The instance was not processing. reset() drops a frozen tail before it runs again.
+            // tryInPlace runs on the message thread from undo/import; the caller has already
+            // drained when a device is running (undo is refused while recording, and the
+            // exclusive hook is used by the button path). Here the instance was inactive, so
+            // the processing thread is not inside this slot once the ramp has finished. reset
+            // is still guarded by the exclusive hook when one is installed.
+            bool resetDone = false;
+            const auto resetSlot = [&] {
+                live.instance->reset();
+                live.runtime->resetDelay();
+                resetDone = true;
+            };
+            if (exclusiveInstanceAccess_)
+            {
+                exclusiveInstanceAccess_(resetSlot);
+            }
+            else
+            {
+                resetSlot();
+            }
+            juce::ignoreUnused(resetDone);
+            live.runtime->setTarget(live.hostBypassed ? InsertSlotRuntime::Target::HostBypass
+                                                      : InsertSlotRuntime::Target::Wet);
+        }
+        else
+        {
+            live.runtime->setTarget(live.hostBypassed ? InsertSlotRuntime::Target::HostBypass
+                                                      : InsertSlotRuntime::Target::Wet);
+        }
     }
 
     rebuildAudioThreadMapAndPublish();
+    if (audibleChanged && audibleQueueInvalidation_)
+    {
+        audibleQueueInvalidation_();
+    }
     return true;
 }
 
@@ -585,6 +957,7 @@ juce::Result PluginInsertHost::addInsertFromVst3FileNoUndo(const TrackId trackId
     live.stage = stage;
     live.instance = std::move(inst);
     live.layoutOk = layoutOk;
+    ensureInsertRuntime(live);
 
     insertLiveSlotSorted(trackId, std::move(live));
     rebuildAudioThreadMapAndPublish();
@@ -876,6 +1249,8 @@ PluginTrackChain PluginInsertHost::exportChain(const TrackId trackId) const
             d.slotId = live.slotId;
             d.stage = live.stage;
             d.occupied = true;
+            d.hostActive = live.hostActive;
+            d.hostBypassed = live.hostBypassed;
             out.slots.push_back(std::move(d));
             continue;
         }
@@ -890,6 +1265,8 @@ PluginTrackChain PluginInsertHost::exportChain(const TrackId trackId) const
         const juce::PluginDescription pd = live.instance->getPluginDescription();
         d.vst3AbsolutePath = pd.fileOrIdentifier;
         d.pluginIdentifier = pd.createIdentifierString();
+        d.hostActive = live.hostActive;
+        d.hostBypassed = live.hostBypassed;
         live.instance->getStateInformation(d.opaqueState);
         out.slots.push_back(std::move(d));
     }
@@ -926,6 +1303,10 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
         placeholder.unavailableDescriptor = desc;
         placeholder.unavailableDescriptor.slotId = placeholder.slotId;
         placeholder.unavailableDescriptor.occupied = true;
+        placeholder.hostActive = desc.hostActive;
+        placeholder.hostBypassed = desc.hostBypassed;
+        placeholder.unavailableDescriptor.hostActive = desc.hostActive;
+        placeholder.unavailableDescriptor.hostBypassed = desc.hostBypassed;
         juce::Logger::writeToLog("[plugin] insert kept as unavailable placeholder: track "
                                  + juce::String((juce::int64)trackId) + " slot "
                                  + juce::String((juce::int64)placeholder.slotId) + " ("
@@ -1026,6 +1407,17 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
         live.stage = desc.stage;
         live.instance = std::move(inst);
         live.layoutOk = layoutOk;
+        live.hostActive = desc.hostActive;
+        live.hostBypassed = desc.hostBypassed;
+        ensureInsertRuntime(live);
+        if (!live.hostActive && live.runtime != nullptr)
+        {
+            live.runtime->setTarget(InsertSlotRuntime::Target::Inactive);
+        }
+        else if (live.hostBypassed && live.runtime != nullptr)
+        {
+            live.runtime->setTarget(InsertSlotRuntime::Target::HostBypass);
+        }
         built.push_back(std::move(live));
     }
 
@@ -1063,19 +1455,28 @@ std::vector<InsertRowView> PluginInsertHost::getInsertRowsForTrack(const TrackId
     {
         if (live.isUnavailablePlaceholder())
         {
-            rows.push_back(InsertRowView{ live.slotId,
-                                          live.stage,
-                                          unavailableInsertDisplayName(live.unavailableDescriptor)
-                                              + " (unavailable)",
-                                          true });
+            InsertRowView row;
+            row.slotId = live.slotId;
+            row.stage = live.stage;
+            row.displayName = unavailableInsertDisplayName(live.unavailableDescriptor) + " (unavailable)";
+            row.unavailable = true;
+            row.hostActive = live.hostActive;
+            row.hostBypassed = live.hostBypassed;
+            rows.push_back(std::move(row));
             continue;
         }
         if (live.instance == nullptr)
         {
             continue;
         }
-        rows.push_back(
-            InsertRowView{ live.slotId, live.stage, live.instance->getName(), false });
+        InsertRowView row;
+        row.slotId = live.slotId;
+        row.stage = live.stage;
+        row.displayName = live.instance->getName();
+        row.unavailable = false;
+        row.hostActive = live.hostActive;
+        row.hostBypassed = live.hostBypassed;
+        rows.push_back(std::move(row));
     }
     return rows;
 }
@@ -1307,6 +1708,7 @@ void PluginInsertHost::rebuildAudioThreadMapAndPublish()
             sp.processor = live.instance.get();
             sp.layoutOk = live.layoutOk;
             sp.stage = live.stage;
+            sp.runtime = live.runtime;
             // Message thread: name the instance for the opt-in profiler (bounded table; −1 when full).
             sp.profileSlot = audio_profiler::AudioThreadProfiler::get().registerInstance(
                 audio_profiler::Category::InsertPlugin, kv.first, live.slotId,
@@ -1566,6 +1968,7 @@ void PluginInsertHost::prepareForDevice(const double sampleRate, const int block
                 }
             }
             logPluginInstanceLayout("device", *live.instance);
+            ensureInsertRuntime(live);
         }
     }
     rebuildAudioThreadMapAndPublish();
@@ -1817,7 +2220,14 @@ void PluginInsertHost::audioThread_processEntryChain(const PluginAudioThreadMap:
         laneInsertSlotIndex_[lane].store(slotIndex, std::memory_order_relaxed);
         laneInsertStage_[lane].store(static_cast<int>(stage), std::memory_order_relaxed);
         const std::int64_t tProf = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
-        sp.processor->processBlock(view, midiScratch);
+        if (sp.runtime != nullptr)
+        {
+            sp.runtime->process(*sp.processor, view, midiScratch);
+        }
+        else
+        {
+            sp.processor->processBlock(view, midiScratch);
+        }
         if (prof)
         {
             profiler.audioThread_addInstance(sp.profileSlot, audio_profiler::Category::InsertPlugin, tProf);
@@ -1992,6 +2402,7 @@ bool PluginInsertHost::installInsertInstanceForTests(const TrackId trackId,
     slot.stage = stage;
     slot.instance = std::move(instance);
     slot.layoutOk = tryPrepareStereoInsert(*slot.instance, sampleRate_, blockSize_);
+    ensureInsertRuntime(slot);
     if (!slot.layoutOk)
     {
         return false;

@@ -480,6 +480,48 @@ if (MSVC)
 endif()
 
 # -----------------------------------------------------------------------------
+# InsertAudibleFocusedTests: host Active / Bypass mix, ramp, two-slot isolation,
+# undo / duplicate / v31-v32 project keys, and the built DAL plug-ins' VST3 bypass.
+# -----------------------------------------------------------------------------
+juce_add_console_app(InsertAudibleFocusedTests PRODUCT_NAME "InsertAudibleFocusedTests")
+target_sources(InsertAudibleFocusedTests PRIVATE
+    tests/selftest/InsertAudibleFocusedTestsMain.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp)
+target_include_directories(InsertAudibleFocusedTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(InsertAudibleFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(InsertAudibleFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(InsertAudibleFocusedTests PRIVATE /wd4458)
+endif()
+
+# -----------------------------------------------------------------------------
 # ExportLevelFocusedTests: export level / click diagnosis + level-meter regression. `--analyze <dir>`
 # measures the WAV/MP3 files written by `MiniDAWLab.exe --stability-export-levels` (JUCE WAV reader
 # + JUCE MP3 decoder to float, 4x oversampled peak estimate, edge transients, MP3-vs-WAV alignment).

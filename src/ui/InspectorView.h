@@ -25,6 +25,9 @@ struct InspectorInsertRow
     /// The slot's plug-in could not be instantiated (bundle missing / failed); the display name
     /// already carries the "(unavailable)" suffix — the flag lets a view colour the row.
     bool unavailable = false;
+    /// Host Active / Bypass for this slot (same values the plug-in window toolbar edits).
+    bool hostActive = true;
+    bool hostBypassed = false;
 };
 
 /// [Message thread] Optional plugin-insert actions for the active track (wired from Main).
@@ -39,6 +42,8 @@ struct InspectorPluginHost
     std::function<void(TrackId, InsertSlotId, InsertStage, int)> requestMoveToStageAtGap;
     /// `gapIndexInStage` is the visual gap in [0, stageCount] before removal (see PluginInsertHost::reorderInsertWithinStage).
     std::function<void(TrackId, InsertSlotId, int)> requestReorderInStage;
+    std::function<void(TrackId, InsertSlotId, bool active)> setHostActive;
+    std::function<void(TrackId, InsertSlotId, bool bypassed)> setHostBypassed;
 };
 
 // P2: the former InspectorProxyHost / InspectorSecondaryHost sections moved to the track-header

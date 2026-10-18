@@ -63,7 +63,9 @@ namespace
         }
         for (size_t i = 0; i < a.size(); ++i)
         {
-            if (a[i].slotId != b[i].slotId || a[i].stage != b[i].stage || a[i].displayName != b[i].displayName || a[i].unavailable != b[i].unavailable)
+            if (a[i].slotId != b[i].slotId || a[i].stage != b[i].stage || a[i].displayName != b[i].displayName
+                || a[i].unavailable != b[i].unavailable || a[i].hostActive != b[i].hostActive
+                || a[i].hostBypassed != b[i].hostBypassed)
             {
                 return false;
             }
@@ -968,11 +970,16 @@ void MixerChannelStrip::refreshInserts(const InsertStage stage, const std::vecto
         b.slotId = row.slotId;
         b.setButtonText(row.displayName);
         b.setTooltip(row.displayName + (row.unavailable ? " (plug-in could not be loaded; the slot keeps its saved state)" : juce::String())
-                     + " — click: open editor; right-click: move / stage / remove");
-        b.setColour(juce::TextButton::buttonColourId, row.unavailable ? face.darker(0.35f) : face);
+                     + (row.hostActive ? juce::String() : " — Active off")
+                     + (row.hostBypassed ? " — Bypassed" : juce::String())
+                     + " — click: open editor; right-click: Active / Bypass / move / remove");
+        juce::Colour rowFace = row.unavailable || !row.hostActive ? face.darker(0.45f) : face;
+        b.setColour(juce::TextButton::buttonColourId, rowFace);
         b.setColour(juce::TextButton::buttonOnColourId, face);
         b.setColour(juce::TextButton::textColourOffId, juce::Colour(row.unavailable ? kInsertUnavailableTextArgb : kInsertRowTextArgb));
-        b.setColour(juce::ComboBox::outlineColourId, row.unavailable ? juce::Colour(kInsertUnavailableOutlineArgb) : face.darker(0.4f));
+        b.setColour(juce::ComboBox::outlineColourId,
+                    row.hostBypassed ? juce::Colour(0xffc6a42a)
+                                     : (row.unavailable ? juce::Colour(kInsertUnavailableOutlineArgb) : face.darker(0.4f)));
     }
     layoutInsertList(ui);
     repaint();
@@ -993,6 +1000,14 @@ void MixerChannelStrip::showInsertRowMenu(const InsertStage stage, const int row
     const int countInStage = static_cast<int>(ui.rows.size());
     juce::PopupMenu menu;
     menu.addItem(1, "Open editor", bindings_.inserts.requestEdit != nullptr);
+    const bool rowActive = rowIndex >= 0 && rowIndex < static_cast<int>(ui.lastRows.size())
+                           && ui.lastRows[static_cast<size_t>(rowIndex)].hostActive;
+    const bool rowBypassed = rowIndex >= 0 && rowIndex < static_cast<int>(ui.lastRows.size())
+                             && ui.lastRows[static_cast<size_t>(rowIndex)].hostBypassed;
+    const bool rowUnavailable = rowIndex >= 0 && rowIndex < static_cast<int>(ui.lastRows.size())
+                                && ui.lastRows[static_cast<size_t>(rowIndex)].unavailable;
+    menu.addItem(6, "Active", bindings_.inserts.setHostActive != nullptr, rowActive);
+    menu.addItem(7, "Bypass", bindings_.inserts.setHostBypassed != nullptr && rowActive && !rowUnavailable, rowBypassed);
     menu.addSeparator();
     menu.addItem(2, "Move up", bindings_.inserts.requestReorderInStage != nullptr && rowIndex > 0);
     menu.addItem(3, "Move down", bindings_.inserts.requestReorderInStage != nullptr && rowIndex + 1 < countInStage);
@@ -1037,6 +1052,21 @@ bool MixerChannelStrip::performInsertRowAction(const InsertStage stage, const in
     {
     case 1:
         if (bindings_.inserts.requestEdit) { bindings_.inserts.requestEdit(tid, sid); return true; }
+        return false;
+    case 6:
+        if (bindings_.inserts.setHostActive && rowIndex < static_cast<int>(ui.lastRows.size()))
+        {
+            bindings_.inserts.setHostActive(tid, sid, !ui.lastRows[static_cast<size_t>(rowIndex)].hostActive);
+            return true;
+        }
+        return false;
+    case 7:
+        if (bindings_.inserts.setHostBypassed && rowIndex < static_cast<int>(ui.lastRows.size())
+            && ui.lastRows[static_cast<size_t>(rowIndex)].hostActive)
+        {
+            bindings_.inserts.setHostBypassed(tid, sid, !ui.lastRows[static_cast<size_t>(rowIndex)].hostBypassed);
+            return true;
+        }
         return false;
     case 2:
         // Gap index before removal: moving up one row = the gap above the previous row.

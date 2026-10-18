@@ -231,6 +231,35 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
         // late-apply; docs/READAHEAD_PROTOTYPE.md §6/§8).
         enginePtr->pauseReadAheadWorkerAfterChainPublish();
     });
+    // Host Active/Bypass. Reactivation reset()s the instance only after the callback has left
+    // and the read-ahead worker has acknowledged a pause. Bypass and Active-off do not reset;
+    // they discard the read-ahead queue so a segment rendered with the previous wet mix is not
+    // played back (docs/READAHEAD_PROTOTYPE.md §6).
+    pluginInsertHost_->setExclusiveInstanceAccess([enginePtr = playbackEngine.get()](std::function<void()> fn) {
+        if (!enginePtr->waitForAudioCallbackExit(250.0))
+        {
+            juce::Logger::writeToLog("[plugin] insert reactivation: audio callback did not drain; left unchanged");
+            return;
+        }
+        if (readahead::ReadAheadRenderer* const ra = enginePtr->experimentalReadAhead())
+        {
+            if (!ra->pauseWorkerAndWait())
+            {
+                juce::Logger::writeToLog("[plugin] insert reactivation: read-ahead worker did not pause; left unchanged");
+                return;
+            }
+            fn();
+            ra->resumeWorker();
+            return;
+        }
+        fn();
+    });
+    pluginInsertHost_->setAudibleQueueInvalidation([enginePtr = playbackEngine.get()] {
+        if (readahead::ReadAheadRenderer* const ra = enginePtr->experimentalReadAhead())
+        {
+            ra->requestFullReset();
+        }
+    });
 
     // JUCE: open audio before we register the engine. Restore saved `audio-device.xml` if present
     // (Stage 2); else pick defaults. Prefer **1 input, 2 outputs**; fall back to output-only.

@@ -52,6 +52,12 @@ struct ProjectFileInsertV1
     juce::String pluginVst3Path;
     juce::String pluginIdentifier;
     juce::String pluginStateBase64;
+    /// v32: host Active. Omitted when true. Absent (every pre-v32 insert) loads as true — the
+    /// insert keeps processing, which is what those projects did. Not the plug-in's bypass.
+    bool hostActive = true;
+    /// v32: host Bypass. Omitted when false. Absent loads as false. Independent of any bypass
+    /// parameter stored inside `pluginStateBase64`.
+    bool hostBypassed = false;
 };
 
 /// v15: one additive send row (`tap` written as `"postChannelStrip"`).
@@ -478,7 +484,10 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 31;
+    /// **32** adds optional `tracks[].inserts[].active` (default true) and `bypassed` (default
+    /// false): the host's own insert Active and Bypass, not the plug-in's VST3 bypass parameter.
+    /// Absent keys keep the previous sound (processing on, host bypass off).
+    static constexpr int kCurrentVersion = 32;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

@@ -22,6 +22,7 @@
 // See `docs/PHASE_PLAN.md` Phase 8 and `docs/ARCHITECTURE_PRINCIPLES.md` Plugin host section.
 // =============================================================================
 
+#include "plugins/InsertSlotRuntime.h"
 #include "plugins/PluginEditorWindows.h"
 #include "plugins/PluginTrackSlot.h"
 
@@ -45,6 +46,10 @@ struct InsertRowView
     /// position and keeps the saved identity + state (see `PluginInsertHost::importChain`); it is
     /// silent in the audio path and has no editor until the user removes it or the plugin returns.
     bool unavailable = false;
+    /// Host Active / Bypass (see `InsertSlotRuntime`). Both survive on an unavailable row; the row
+    /// still does not process until the plug-in can be instantiated.
+    bool hostActive = true;
+    bool hostBypassed = false;
 };
 
 /// A complete, block-start transport description for hosted effect processors.
@@ -96,6 +101,9 @@ struct PluginAudioThreadMap
         InsertStage stage = InsertStage::Post;
         /// Opt-in audio profiler instance index (`diagnostics/AudioThreadProfiler.h`); −1 = none.
         int profileSlot = -1;
+        /// Host mix for this slot. Shared with the message-thread slot so a republished map keeps
+        /// the ramp and the delay line. Null only if a slot was published without one.
+        std::shared_ptr<InsertSlotRuntime> runtime;
     };
 
     struct Entry
@@ -189,6 +197,43 @@ public:
 
     void openNativeEditor(TrackId trackId);
     void openNativeEditor(TrackId trackId, InsertSlotId slotId);
+
+    /// [Message thread] Host Active for one slot. Off passes the buffer through and, once the
+    /// 10 ms ramp has finished, stops calling processBlock. The instance, its parameters and the
+    /// slot stay. Turning it back on reset()s the instance first (no frozen tail) and does not
+    /// rescan or rebuild it. A stored Bypass choice is kept and shown, but it does not process
+    /// while Active is off. One undo step. Marks dirty through the existing undo recorder.
+    void setInsertHostActive(TrackId trackId, InsertSlotId slotId, bool active);
+
+    /// [Message thread] Host Bypass for one slot. While Active, processBlock keeps running and
+    /// the chain hears this slot's input (latency-aligned inside the slot, up to the runtime
+    /// cap). Does not write the plug-in's own bypass parameter. One undo step.
+    void setInsertHostBypassed(TrackId trackId, InsertSlotId slotId, bool bypassed);
+
+    /// [Message thread] Current host choices. `available` is false for an unknown id or a row
+    /// with no processor (unavailable placeholder).
+    struct InsertHostAudible
+    {
+        bool active = true;
+        bool bypassed = false;
+        bool available = false;
+    };
+    [[nodiscard]] InsertHostAudible insertHostAudible(TrackId trackId, InsertSlotId slotId) const;
+
+    /// [Message thread] Runs `fn` while the audio callback is drained and the read-ahead worker
+    /// is paused, when the app has installed a hook. Tests with no device call `fn` directly.
+    /// Used so reset() on reactivation cannot overlap processBlock.
+    void setExclusiveInstanceAccess(std::function<void(std::function<void()>)> hook) noexcept
+    {
+        exclusiveInstanceAccess_ = std::move(hook);
+    }
+
+    /// [Message thread] Fired after a host Active/Bypass change so the read-ahead queue for the
+    /// old wet mix can be discarded. Wired to `ReadAheadRenderer::requestFullReset`.
+    void setAudibleQueueInvalidation(std::function<void()> hook) noexcept
+    {
+        audibleQueueInvalidation_ = std::move(hook);
+    }
     void openGenericParamsEditor(TrackId trackId);
     void openGenericParamsEditor(TrackId trackId, InsertSlotId slotId);
     void editorWindowClosing(TrackId trackId, InsertSlotId slotId, bool wasGenericEditor);
@@ -381,6 +426,12 @@ private:
         InsertStage stage = InsertStage::Post;
         std::unique_ptr<juce::AudioPluginInstance> instance;
         bool layoutOk = false;
+        /// Host Active / Bypass. Kept on an unavailable placeholder as well (also copied onto
+        /// `unavailableDescriptor` so export/import round-trips them).
+        bool hostActive = true;
+        bool hostBypassed = false;
+        /// Mix state co-owned by every published map entry for this slot.
+        std::shared_ptr<InsertSlotRuntime> runtime;
         /// Unavailable placeholder (see `importChain`): `instance == nullptr` and this descriptor
         /// (`occupied == true`) carries the saved path / identifier / opaque state untouched so
         /// `exportChain` can re-emit it. Default (`occupied == false`) for live rows.
@@ -509,6 +560,11 @@ private:
 
     void* undoContext_ = nullptr;
     PluginUndoRecorder undoRecorder_ = nullptr;
+    std::function<void(std::function<void()>)> exclusiveInstanceAccess_;
+    std::function<void()> audibleQueueInvalidation_;
+
+    void ensureInsertRuntime(LiveInsertSlot& slot);
+    void recordHostAudibleUndo(const juce::String& label, TrackId trackId, const PluginTrackChain& before);
 
     void recordPluginSlotUndo(const juce::String& label, const PluginUndoStepSides& sides);
 };

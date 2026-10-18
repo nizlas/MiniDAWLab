@@ -29,12 +29,19 @@ struct PluginInsertDescriptor
     juce::String vst3AbsolutePath;
     juce::String pluginIdentifier;
     juce::MemoryBlock opaqueState;
+    /// Host Active: the insert is processed. Absent in older projects, and the default for a new
+    /// insert, is true. This is not a plug-in parameter.
+    bool hostActive = true;
+    /// Host Bypass: while Active, the slot still processes but the chain hears the signal that
+    /// entered this insert. Default false. Independent of the plug-in's own VST3 bypass parameter.
+    bool hostBypassed = false;
 
     [[nodiscard]] bool descriptorEquals(const PluginInsertDescriptor& o) const noexcept
     {
         return slotId == o.slotId && stage == o.stage && occupied == o.occupied
                && vst3AbsolutePath == o.vst3AbsolutePath && pluginIdentifier == o.pluginIdentifier
-               && opaqueState == o.opaqueState;
+               && opaqueState == o.opaqueState && hostActive == o.hostActive
+               && hostBypassed == o.hostBypassed;
     }
 };
 

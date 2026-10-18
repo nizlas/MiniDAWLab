@@ -203,6 +203,11 @@ Cycle is supported, on the engine's own segmentation rules — no separate DSP p
   Lifetime is handled by publish-before-destroy plus a worker pause window (§8); ownership
   itself survives the edit (the queued old-chain segments play out, the worker continues
   with the newly published map — remaining instances keep contiguous streams).
+* **Host Active and host Bypass are not late-applied.** Those toggles call
+  `requestFullReset`, so the next callback discards the queued wet segments instead of
+  playing them. A worker already inside `processBlock` finishes that call; the row stays
+  silent (`Abandoning`) until the call returns, and the callback does not enter the same
+  instance. Turning Active back on also pauses the worker before `reset()`.
 
 ## 7. Queue miss, recovery, and leaving the mode
 

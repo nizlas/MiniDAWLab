@@ -2778,6 +2778,8 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                 ins.stage = d.stage;
                 ins.pluginVst3Path = d.vst3AbsolutePath;
                 ins.pluginIdentifier = d.pluginIdentifier;
+                ins.hostActive = d.hostActive;
+                ins.hostBypassed = d.hostBypassed;
                 if (d.opaqueState.getSize() > 0)
                 {
                     ins.pluginStateBase64 = juce::Base64::toBase64(
@@ -3348,6 +3350,8 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                 d.occupied = true;
                 d.vst3AbsolutePath = ins.pluginVst3Path;
                 d.pluginIdentifier = ins.pluginIdentifier;
+                d.hostActive = ins.hostActive;
+                d.hostBypassed = ins.hostBypassed;
                 if (ins.pluginStateBase64.isNotEmpty())
                 {
                     juce::MemoryOutputStream mos;
