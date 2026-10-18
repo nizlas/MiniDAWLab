@@ -19,7 +19,6 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -582,53 +581,53 @@ void testHostPolicy()
     preset.getSiblingFile("foreign.vstpreset").deleteFile();
 }
 
-bool bytesContain(const void* data, const std::size_t size, const char* text)
-{
-    if (data == nullptr || text == nullptr)
-    {
-        return false;
-    }
-    const auto n = std::strlen(text);
-    if (n == 0 || size < n)
-    {
-        return false;
-    }
-    const auto* begin = static_cast<const char*>(data);
-    return std::search(begin, begin + size, text, text + n) != begin + size;
-}
-
-bool blockContains(const juce::MemoryBlock& block, const char* text)
-{
-    return bytesContain(block.getData(), block.getSize(), text);
-}
-
-/// The processor blob is magic + a float + a string. A C-string conversion stops on the
-/// float's zero bytes, so the side string has to be searched in the raw component bytes.
-bool stateContains(const juce::MemoryBlock& blob, const char* text)
-{
-    if (blockContains(blob, text))
-    {
-        return true;
-    }
-    const std::unique_ptr<juce::XmlElement> xml = juce::AudioProcessor::getXmlFromBinary(blob.getData(), (int)blob.getSize());
-    if (xml == nullptr)
-    {
-        return false;
-    }
-    if (auto* comp = xml->getChildByName("IComponent"))
-    {
-        juce::MemoryBlock raw;
-        raw.fromBase64Encoding(comp->getAllSubText().trim());
-        return blockContains(raw, text);
-    }
-    return false;
-}
-
-bool componentContains(juce::AudioPluginInstance& instance, const char* text)
+juce::MemoryBlock wrapperState(juce::AudioPluginInstance& instance)
 {
     juce::MemoryBlock blob;
     instance.getStateInformation(blob);
-    return stateContains(blob, text);
+    return blob;
+}
+
+/// Bytes of one child in the JUCE VST3 host blob (`IComponent` or `IEditController`).
+/// Empty when that child is absent. Comparison is the whole decoded block.
+juce::MemoryBlock wrapperChild(const juce::MemoryBlock& blob, const char* xmlName)
+{
+    juce::MemoryBlock raw;
+    const std::unique_ptr<juce::XmlElement> xml = juce::AudioProcessor::getXmlFromBinary(blob.getData(), (int)blob.getSize());
+    if (xml == nullptr || xmlName == nullptr)
+    {
+        return raw;
+    }
+    if (auto* node = xml->getChildByName(xmlName))
+    {
+        raw.fromBase64Encoding(node->getAllSubText().trim());
+    }
+    return raw;
+}
+
+bool sameBlock(const juce::MemoryBlock& a, const juce::MemoryBlock& b)
+{
+    return a == b;
+}
+
+/// Processor bytes PresetProbe writes for gain 0.25 after one processBlock.
+/// The hosted component state starts with this and may continue with the wrapper's private trailer.
+juce::MemoryBlock expectedProbePayload()
+{
+    juce::MemoryOutputStream stream;
+    stream.write("DALPRB1", 7);
+    stream.writeFloat(0.25f);
+    stream.writeString("side-state:" + juce::String(0.25f, 3));
+    return { stream.getData(), stream.getDataSize() };
+}
+
+bool startsWithBlock(const juce::MemoryBlock& block, const juce::MemoryBlock& prefix)
+{
+    if (prefix.getSize() == 0 || block.getSize() < prefix.getSize())
+    {
+        return false;
+    }
+    return std::memcmp(block.getData(), prefix.getData(), prefix.getSize()) == 0;
 }
 
 void testRealWrapper(const juce::File& bundle)
@@ -670,7 +669,12 @@ void testRealWrapper(const juce::File& bundle)
     buffer.clear();
     juce::MidiBuffer midi;
     instance->processBlock(buffer, midi);
-    expect(componentContains(*instance, "side-state:0.250"), "probe component state includes the non-parameter side string");
+    const juce::MemoryBlock sourceWrapper = wrapperState(*instance);
+    const juce::MemoryBlock sourceComponent = wrapperChild(sourceWrapper, "IComponent");
+    const juce::MemoryBlock sourceController = wrapperChild(sourceWrapper, "IEditController");
+    const juce::MemoryBlock probePayload = expectedProbePayload();
+    expect(startsWithBlock(sourceComponent, probePayload),
+           "probe component state begins with the gain and the non-parameter side string");
 
     host.setInsertHostBypassed(track, token.slotId, true);
     const TrackId other = session.findCanonicalMasterTrackId();
@@ -684,12 +688,14 @@ void testRealWrapper(const juce::File& bundle)
     expect(preset.loadFileAsData(file), "wrapper preset can be read back");
     const auto inspection = vst3_preset::inspect(file.getData(), file.getSize());
     expect(inspection.status == vst3_preset::Status::Ok, "wrapper output passes the container check");
-    expect(blockContains(file, "side-state:0.250"), "wrapper preset stores the side string inside the container");
-    expect(!blockContains(file, "hostBypassed") && !blockContains(file, "hostActive"),
-           "wrapper preset does not store host Bypass");
     juce::MemoryBlock comp;
-    expect(vst3_preset::copyChunk(file.getData(), file.getSize(), "Comp", comp) && comp.getSize() > 0,
-           "wrapper preset has a processor chunk");
+    juce::MemoryBlock cont;
+    expect(vst3_preset::copyChunk(file.getData(), file.getSize(), "Comp", comp) && sameBlock(comp, sourceComponent),
+           "wrapper preset's processor chunk is the component state");
+    // PresetFile still writes a Cont entry when IEditController::getState returns
+    // kNotImplemented. The host blob then has no IEditController child. Both payloads are empty.
+    (void)vst3_preset::copyChunk(file.getData(), file.getSize(), "Cont", cont);
+    expect(sameBlock(cont, sourceController), "wrapper preset's controller chunk is the controller state");
 
     expect(host.addInsertFromVst3File(other, InsertStage::Pre, bundle).wasOk(),
            "second probe is a Pre insert on the master track");
@@ -712,10 +718,12 @@ void testRealWrapper(const juce::File& bundle)
     expect(host.insertHostAudible(track, token.slotId).bypassed, "the source insert's Bypass is untouched");
     expect(!host.insertHostAudible(other, otherToken.slotId).bypassed && host.insertHostAudible(other, otherToken.slotId).active,
            "the loaded insert's host Active and Bypass stay at its own values");
-    expect(second != nullptr && !second->getParameters().isEmpty() && std::abs(second->getParameters()[0]->getValue() - 0.25f) < 1.0e-4f,
+    const juce::MemoryBlock loadedWrapper = wrapperState(*second);
+    expect(sameBlock(wrapperChild(loadedWrapper, "IComponent"), sourceComponent)
+               && sameBlock(wrapperChild(loadedWrapper, "IEditController"), sourceController),
+           "wrapper load restores the whole component and controller state");
+    expect(!second->getParameters().isEmpty() && std::abs(second->getParameters()[0]->getValue() - 0.25f) < 1.0e-4f,
            "wrapper load restores the gain parameter");
-    expect(componentContains(*second, "side-state:0.250"),
-           "wrapper load restores the side string, not only the parameter list");
     expect(host.getInsertRowsForTrack(other)[0].slotId == otherToken.slotId
                && host.getInsertRowsForTrack(other)[0].stage == InsertStage::Pre,
            "wrapper load keeps the Pre slot where it was");
@@ -725,10 +733,9 @@ void testRealWrapper(const juce::File& bundle)
     raw[8] = raw[8] == '0' ? '1' : '0';
     const juce::File foreignFile = preset.getSiblingFile("dal-preset-probe-foreign.vstpreset");
     foreignFile.replaceWithData(foreign.getData(), foreign.getSize());
-    const float gainBefore = second->getParameters()[0]->getValue();
     const int recordsBeforeForeign = undo.records;
     expect(!host.loadInsertPresetFromFile(otherToken, foreignFile).wasOk(), "wrapper refuses a different class id");
-    expect(std::abs(second->getParameters()[0]->getValue() - gainBefore) < 1.0e-5f && undo.records == recordsBeforeForeign,
+    expect(sameBlock(wrapperState(*second), loadedWrapper) && undo.records == recordsBeforeForeign,
            "a refused wrapper preset leaves the instance and undo unchanged");
 
     auto chopped = file;
@@ -736,43 +743,93 @@ void testRealWrapper(const juce::File& bundle)
     const juce::File choppedFile = preset.getSiblingFile("dal-preset-probe-chopped.vstpreset");
     choppedFile.replaceWithData(chopped.getData(), chopped.getSize());
     expect(!host.loadInsertPresetFromFile(otherToken, choppedFile).wasOk(), "wrapper refuses a truncated preset");
-    expect(componentContains(*second, "side-state:0.250"), "a truncated preset leaves the side string in place");
+    expect(sameBlock(wrapperState(*second), loadedWrapper), "a truncated preset leaves the wrapper state unchanged");
 
+    const PluginTrackChain savedMaster = host.exportChain(other);
+    const PluginTrackChain savedSource = host.exportChain(track);
+    const juce::String storedPath = savedMaster.slots.empty() ? juce::String() : savedMaster.slots[0].vst3AbsolutePath;
     const juce::File project = preset.getSiblingFile("dal-preset-probe.dalproj");
     expect(session.saveProjectToFile(transport, project, kRate, &host).wasOk(), "Save writes the loaded probe state");
-    Session reopened;
-    Transport transport2;
-    PluginInsertHost host2;
-    host2.prepareForDevice(kRate, 256, 2);
-    juce::StringArray skipped;
-    juce::String note;
-    expect(reopened.loadProjectFromFile(transport2, project, kRate, skipped, note, &host2).wasOk(), "reopen loads the project");
-    // Production load posts the insert restore to the message thread, the same way Save/reopen does.
-    juce::MessageManager::getInstance()->runDispatchLoopUntil(800);
-    const PluginTrackChain restoredChain = host2.exportChain(other);
-    expect(!restoredChain.slots.empty() && stateContains(restoredChain.slots[0].opaqueState, "side-state:0.250"),
-           "reopen still holds the loaded processor state, including the side string");
-    auto* restored = host2.liveInstanceAtChainIndexForDiagnostics(other, 0);
-    if (restored != nullptr && !restored->getParameters().isEmpty())
+    ProjectFileV1 savedProject;
+    const ProjectFileInsertV1* savedMasterInsert = nullptr;
+    const ProjectFileInsertV1* savedSourceInsert = nullptr;
+    if (readProjectFile(project, savedProject).wasOk())
     {
-        expect(std::abs(restored->getParameters()[0]->getValue() - 0.25f) < 1.0e-3f, "reopen restores the gain");
-        expect(componentContains(*restored, "side-state:0.250"), "reopen restores the side string on the live instance");
+        for (const auto& tr : savedProject.tracks)
+        {
+            if (tr.inserts.empty())
+            {
+                continue;
+            }
+            if (tr.id == other)
+            {
+                savedMasterInsert = &tr.inserts[0];
+            }
+            if (tr.id == track)
+            {
+                savedSourceInsert = &tr.inserts[0];
+            }
+        }
+    }
+    auto decodedEquals = [](const ProjectFileInsertV1* row, const juce::MemoryBlock& expected) {
+        if (row == nullptr)
+        {
+            return false;
+        }
+        juce::MemoryOutputStream decoded;
+        if (!juce::Base64::convertFromBase64(decoded, row->pluginStateBase64))
+        {
+            return false;
+        }
+        const juce::MemoryBlock got(decoded.getData(), decoded.getDataSize());
+        return sameBlock(got, expected);
+    };
+    expect(savedMaster.slots.size() == 1 && decodedEquals(savedMasterInsert, savedMaster.slots[0].opaqueState),
+           "the project file's master insert state matches the live wrapper blob");
+    expect(savedSource.slots.size() == 1 && decodedEquals(savedSourceInsert, savedSource.slots[0].opaqueState),
+           "the project file's source insert state matches the live wrapper blob");
+    expect(savedMasterInsert != nullptr && savedMasterInsert->hostActive && !savedMasterInsert->hostBypassed,
+           "the project file keeps the loaded insert Active and not Bypassed");
+    expect(savedSourceInsert != nullptr && savedSourceInsert->hostBypassed,
+           "the project file keeps the source insert's Bypass");
+
+    // JUCE 8.0.4's instance description on Linux is the .so inside the bundle. That path is not a
+    // .vst3 file, so production load cannot instantiate it. A placeholder is not a restored plugin.
+    // The bundle passed to this test is already the .vst3 directory; the host replaces it on export.
+    if (!juce::File::createFileWithoutCheckingPath(storedPath).hasFileExtension(".vst3"))
+    {
+        std::printf("[SKIP] live project reopen was not verified. Stored path is \"%s\", not a .vst3 bundle. "
+                    "Left for the Windows test.\n",
+                    storedPath.toRawUTF8());
     }
     else
     {
-        // JUCE 8.0.4 on Linux stores PluginDescription::fileOrIdentifier as the .so inside the
-        // bundle. VST3PluginFormat::fileMightContainThisPluginType then rejects that path, so
-        // production load keeps the slot as an unavailable placeholder. The state above is still
-        // the blob Save wrote. A .vst3 bundle path (Windows) is what the local reopen checks.
-        const auto rowsNow = host2.getInsertRowsForTrack(other);
-        expect(!rowsNow.empty() && rowsNow[0].unavailable,
-               "when the stored path is the inner binary, reopen keeps the slot and its state");
+        Session reopened;
+        Transport transport2;
+        PluginInsertHost host2;
+        host2.prepareForDevice(kRate, 256, 2);
+        juce::StringArray skipped;
+        juce::String note;
+        expect(reopened.loadProjectFromFile(transport2, project, kRate, skipped, note, &host2).wasOk(),
+               "reopen loads the project");
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(800);
+        auto* restored = host2.liveInstanceAtChainIndexForDiagnostics(other, 0);
+        const auto restoredRows = host2.getInsertRowsForTrack(other);
+        expect(restored != nullptr && !restoredRows.empty() && !restoredRows[0].unavailable,
+               "reopen instantiates the Pre insert");
+        if (restored != nullptr)
+        {
+            const juce::MemoryBlock restoredWrapper = wrapperState(*restored);
+            expect(sameBlock(wrapperChild(restoredWrapper, "IComponent"), sourceComponent)
+                       && sameBlock(wrapperChild(restoredWrapper, "IEditController"), sourceController),
+                   "reopen restores the whole component and controller state");
+        }
+        expect(!restoredRows.empty() && restoredRows[0].hostActive && !restoredRows[0].hostBypassed,
+               "reopen keeps host Active on and Bypass off");
+        const auto sourceRows = host2.getInsertRowsForTrack(track);
+        expect(!sourceRows.empty() && !sourceRows[0].unavailable && sourceRows[0].hostBypassed,
+               "reopen keeps the other insert's Bypass on a live instance");
     }
-    const auto restoredRows = host2.getInsertRowsForTrack(other);
-    expect(!restoredRows.empty() && !restoredRows[0].hostBypassed && restoredRows[0].hostActive,
-           "reopen keeps host Active on and Bypass off");
-    const auto sourceRows = host2.getInsertRowsForTrack(track);
-    expect(!sourceRows.empty() && sourceRows[0].hostBypassed, "reopen keeps the other insert's Bypass");
 
     preset.deleteFile();
     foreignFile.deleteFile();
