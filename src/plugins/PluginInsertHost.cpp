@@ -7,6 +7,7 @@
 #include "diagnostics/AudioThreadProfiler.h"
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "plugins/PluginEditorWindows.h"
+#include "plugins/Vst3PresetFile.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -580,6 +581,341 @@ PluginInsertHost::InsertHostAudible PluginInsertHost::insertHostAudible(const Tr
     return audible;
 }
 
+bool PluginInsertHost::withExclusiveInstanceAccess(const std::function<void()>& fn)
+{
+    if (!exclusiveInstanceAccess_)
+    {
+        fn();
+        return true;
+    }
+    bool ran = false;
+    exclusiveInstanceAccess_([&] {
+        ran = true;
+        fn();
+    });
+    return ran;
+}
+
+void PluginInsertHost::stampNewInstanceEpoch(LiveInsertSlot& slot) noexcept
+{
+    slot.instanceEpoch = nextInstanceEpoch_++;
+}
+
+const PluginInsertHost::LiveInsertSlot* PluginInsertHost::findToken(const InsertInstanceToken& token) const noexcept
+{
+    if (!token.namesALiveInstance())
+    {
+        return nullptr;
+    }
+    const LiveInsertSlot* const slot = findLiveConst(token.trackId, token.slotId);
+    if (slot == nullptr || slot->instance == nullptr || slot->instanceEpoch != token.instanceEpoch)
+    {
+        return nullptr;
+    }
+    return slot;
+}
+
+PluginInsertHost::LiveInsertSlot* PluginInsertHost::findTokenMutable(const InsertInstanceToken& token) noexcept
+{
+    return const_cast<LiveInsertSlot*>(findToken(token));
+}
+
+void PluginInsertHost::rememberHostAppliedState(const TrackId trackId,
+                                                const InsertSlotId slotId,
+                                                const juce::MemoryBlock& state)
+{
+    const EditorKey key{ trackId, slotId };
+    lastHostAppliedState_[key] = state;
+    if (const auto open = editorOpenState_.find(key); open != editorOpenState_.end())
+    {
+        open->second = state;
+    }
+}
+
+void PluginInsertHost::restoreSlotOpaqueState(const TrackId trackId,
+                                              LiveInsertSlot& slot,
+                                              const PluginTrackChain& chain)
+{
+    if (slot.instance == nullptr)
+    {
+        return;
+    }
+    for (const auto& desc : chain.slots)
+    {
+        if (desc.slotId != slot.slotId || desc.opaqueState.getSize() == 0
+            || desc.opaqueState.getSize() > (size_t)std::numeric_limits<int>::max())
+        {
+            continue;
+        }
+        slot.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+        rememberHostAppliedState(trackId, slot.slotId, desc.opaqueState);
+        ensureInsertRuntime(slot);
+        break;
+    }
+}
+
+PluginInsertHost::InsertInstanceToken PluginInsertHost::insertInstanceToken(const TrackId trackId,
+                                                                            const InsertSlotId slotId) const
+{
+    InsertInstanceToken token;
+    const LiveInsertSlot* const slot = findLiveConst(trackId, slotId);
+    if (slot == nullptr || slot->instance == nullptr || slot->instanceEpoch == 0)
+    {
+        return token;
+    }
+    token.trackId = trackId;
+    token.slotId = slotId;
+    token.instanceEpoch = slot->instanceEpoch;
+    return token;
+}
+
+namespace
+{
+    struct Vst3PresetClientOp final : juce::ExtensionsVisitor
+    {
+        bool write = false;
+        const juce::MemoryBlock* incoming = nullptr;
+        juce::MemoryBlock outgoing;
+        bool sawClient = false;
+        bool writeOk = false;
+
+        void visitVST3Client(const VST3Client& client) override
+        {
+            sawClient = true;
+            if (write)
+            {
+                if (incoming != nullptr)
+                {
+                    writeOk = client.setPreset(*incoming);
+                }
+            }
+            else
+            {
+                outgoing = client.getPreset();
+            }
+        }
+    };
+
+    /// Copy the plug-in's post-preset state onto the host parameters.
+    ///
+    /// The blob is captured here, after setPreset has returned, by getStateInformation. It is the
+    /// wrapper XML of the IComponent stream the plug-in exposes now (and IEditController only when
+    /// that getState returns kResultTrue). It is not a copy taken before setPreset.
+    ///
+    /// JUCE 8.0.4's setStateFromPresetFile is const and only calls PresetFile::loadPreset.
+    /// resetParameters, which copies the edit controller's normalised values onto the host
+    /// AudioProcessorParameter, is private. The deprecated VST3PluginFormat::setStateFromVSTPresetFile
+    /// is the same call. ExtensionsVisitor has no parameter-refresh entry.
+    ///
+    /// A JUCE edit controller's setComponentState requests kParamValuesChanged. On the message
+    /// thread ComponentRestarter runs that restart before setPreset returns, so a JUCE plug-in can
+    /// already show the new host parameters. A controller that does not request the restart leaves
+    /// those host parameters stale. setStateInformation is the only public call that reaches
+    /// resetParameters, and it also writes the component stream again. There is no existing path
+    /// that refreshes the host parameters without that second IComponent::setState. A wrapper
+    /// change is out of scope.
+    ///
+    /// A plug-in that starts asynchronous work inside setState therefore sees two calls. DAL cannot
+    /// collapse them. A setState that is not idempotent, or that cancels an in-flight load on the
+    /// second call, can still change or glitch.
+    /// Returns false when the blob cannot be passed through the int-sized API.
+    [[nodiscard]] bool syncWrapperParametersFromCurrentState(juce::AudioPluginInstance& instance)
+    {
+        juce::MemoryBlock blob;
+        instance.getStateInformation(blob);
+        if (blob.getSize() == 0 || blob.getSize() > (size_t)std::numeric_limits<int>::max())
+        {
+            return false;
+        }
+        instance.setStateInformation(blob.getData(), (int)blob.getSize());
+        return true;
+    }
+} // namespace
+
+juce::Result PluginInsertHost::saveInsertPresetToFile(const InsertInstanceToken token, const juce::File& destination)
+{
+    if (findToken(token) == nullptr)
+    {
+        return juce::Result::fail("That insert is no longer loaded. Nothing was written.");
+    }
+    if (destination == juce::File{} || destination.isDirectory() || !destination.getParentDirectory().isDirectory())
+    {
+        return juce::Result::fail("Could not write the preset. The existing file was left unchanged.");
+    }
+
+    juce::MemoryBlock presetBytes;
+    juce::Result captured = juce::Result::ok();
+    const bool ran = withExclusiveInstanceAccess([&] {
+        LiveInsertSlot* const slot = findTokenMutable(token);
+        if (slot == nullptr || slot->instance == nullptr)
+        {
+            captured = juce::Result::fail("That insert is no longer loaded. Nothing was written.");
+            return;
+        }
+        // getPreset asks the VST3 wrapper for processor and controller state. It must not run
+        // on the audio callback or beside processBlock; the exclusive window is that guarantee.
+        Vst3PresetClientOp read;
+        slot->instance->getExtensions(read);
+        const auto inspection = vst3_preset::inspect(read.outgoing.getData(), read.outgoing.getSize());
+        if (!read.sawClient || read.outgoing.isEmpty() || inspection.status != vst3_preset::Status::Ok)
+        {
+            captured = juce::Result::fail("This insert did not produce a VST3 preset. Nothing was written.");
+            return;
+        }
+        presetBytes = std::move(read.outgoing);
+    });
+    if (!ran)
+    {
+        return juce::Result::fail("Could not access the plug-in safely because audio is still using it. Nothing was written.");
+    }
+    if (!captured.wasOk())
+    {
+        return captured;
+    }
+
+    // Replace through a temporary file in the same directory. A failed write deletes the
+    // temporary and leaves the previous preset untouched. This does not touch the project file.
+    juce::TemporaryFile temp(destination);
+    if (!temp.getFile().replaceWithData(presetBytes.getData(), presetBytes.getSize()))
+    {
+        return juce::Result::fail("Could not write the preset. The existing file was left unchanged.");
+    }
+    if (!temp.overwriteTargetFileWithTemporary())
+    {
+        return juce::Result::fail("Could not replace the preset. The existing file was left unchanged.");
+    }
+    return juce::Result::ok();
+}
+
+juce::Result PluginInsertHost::loadInsertPresetFromFile(const InsertInstanceToken token, const juce::File& source)
+{
+    if (findToken(token) == nullptr)
+    {
+        return juce::Result::fail("That insert is no longer loaded. Nothing was changed.");
+    }
+    if (!source.existsAsFile())
+    {
+        return juce::Result::fail("The preset file could not be read. Nothing was changed.");
+    }
+    const juce::int64 fileBytes = source.getSize();
+    if (fileBytes < 0)
+    {
+        return juce::Result::fail("The preset file could not be read. Nothing was changed.");
+    }
+    if ((std::uint64_t)fileBytes > vst3_preset::kMaxPresetFileBytes)
+    {
+        return juce::Result::fail(vst3_preset::messageFor(vst3_preset::Status::TooLarge));
+    }
+    juce::MemoryBlock file;
+    if (!source.loadFileAsData(file))
+    {
+        return juce::Result::fail("The preset file could not be read. Nothing was changed.");
+    }
+    const auto inspection = vst3_preset::inspect(file.getData(), file.getSize());
+    if (inspection.status != vst3_preset::Status::Ok)
+    {
+        return juce::Result::fail(vst3_preset::messageFor(inspection.status));
+    }
+
+    juce::Result applied = juce::Result::ok();
+    PluginUndoStepSides sides;
+    bool recordUndo = false;
+    const bool ran = withExclusiveInstanceAccess([&] {
+        LiveInsertSlot* const slot = findTokenMutable(token);
+        if (slot == nullptr || slot->instance == nullptr)
+        {
+            applied = juce::Result::fail("That insert is no longer loaded. Nothing was changed.");
+            return;
+        }
+        const bool hostActive = slot->hostActive;
+        const bool hostBypassed = slot->hostBypassed;
+        const PluginTrackChain before = exportChain(token.trackId);
+
+        Vst3PresetClientOp identity;
+        slot->instance->getExtensions(identity);
+        const auto live = vst3_preset::inspect(identity.outgoing.getData(), identity.outgoing.getSize());
+        if (!identity.sawClient || live.status != vst3_preset::Status::Ok)
+        {
+            applied = juce::Result::fail(
+                "This insert has no VST3 class identity a preset can be checked against. Nothing was changed.");
+            return;
+        }
+        // The preset header names the processor class. The display name and the file path do not.
+        if (!vst3_preset::sameClassId(live.classId, inspection.classId))
+        {
+            applied = juce::Result::fail("This preset is for a different plug-in. Nothing was changed.");
+            return;
+        }
+
+        Vst3PresetClientOp write;
+        write.write = true;
+        write.incoming = &file;
+        slot->instance->getExtensions(write);
+        if (!write.writeOk)
+        {
+            // PresetFile can apply processor state and then fail on the controller. Put the
+            // previous wrapper blob back. setStateInformation does not report whether the
+            // plug-in kept it, so this is a best effort, not a transaction.
+            restoreSlotOpaqueState(token.trackId, *slot, before);
+            slot->hostActive = hostActive;
+            slot->hostBypassed = hostBypassed;
+            if (audibleQueueInvalidation_)
+            {
+                audibleQueueInvalidation_();
+            }
+            applied = juce::Result::fail(
+                "The plug-in did not accept this preset. DAL put the previous settings back; "
+                "a plug-in that ignores that restore can still sound different until it is loaded again.");
+            return;
+        }
+
+        if (!syncWrapperParametersFromCurrentState(*slot->instance))
+        {
+            restoreSlotOpaqueState(token.trackId, *slot, before);
+            slot->hostActive = hostActive;
+            slot->hostBypassed = hostBypassed;
+            applied = juce::Result::fail("The plug-in state could not be stored for the project. Nothing was kept.");
+            return;
+        }
+        if (slot->instance->getMainBusNumInputChannels() != 2 || slot->instance->getMainBusNumOutputChannels() != 2)
+        {
+            slot->instance->prepareToPlay(effectiveSr(sampleRate_), effectiveBs(blockSize_));
+        }
+        slot->layoutOk = slot->instance->getMainBusNumInputChannels() == 2
+                         && slot->instance->getMainBusNumOutputChannels() == 2;
+        slot->hostActive = hostActive;
+        slot->hostBypassed = hostBypassed;
+        ensureInsertRuntime(*slot);
+
+        juce::MemoryBlock afterBlob;
+        slot->instance->getStateInformation(afterBlob);
+        rememberHostAppliedState(token.trackId, token.slotId, afterBlob);
+        if (audibleQueueInvalidation_)
+        {
+            audibleQueueInvalidation_();
+        }
+
+        sides.trackId = token.trackId;
+        sides.before = before;
+        sides.after = exportChain(token.trackId);
+        recordUndo = true;
+    });
+    if (!ran)
+    {
+        return juce::Result::fail(
+            "Could not access the plug-in safely because audio is still using it. Nothing was changed.");
+    }
+    if (!applied.wasOk())
+    {
+        return applied;
+    }
+    if (recordUndo)
+    {
+        recordPluginSlotUndo("Load preset", sides);
+    }
+    return juce::Result::ok();
+}
+
 void PluginInsertHost::pushPluginParameterUndoStep(const TrackId trackId,
                                                    const InsertSlotId slotId,
                                                    const juce::MemoryBlock& baselineOpaqueState)
@@ -642,12 +978,12 @@ void PluginInsertHost::flushOpenEditorParameterUndoSteps()
     }
 }
 
-bool PluginInsertHost::tryInPlaceParameterStateRestore(const TrackId trackId,
-                                                      const PluginTrackChain& targetChain)
+PluginInsertHost::InPlaceRestore PluginInsertHost::tryInPlaceParameterStateRestore(const TrackId trackId,
+                                                                                      const PluginTrackChain& targetChain)
 {
     if (trackId == kInvalidTrackId)
     {
-        return false;
+        return InPlaceRestore::DifferentChain;
     }
 
     const auto itLive = chains_.find(trackId);
@@ -657,20 +993,20 @@ bool PluginInsertHost::tryInPlaceParameterStateRestore(const TrackId trackId,
     {
         if (!hasLive)
         {
-            return true;
+            return InPlaceRestore::Applied;
         }
-        return false;
+        return InPlaceRestore::DifferentChain;
     }
 
     if (!hasLive)
     {
-        return false;
+        return InPlaceRestore::DifferentChain;
     }
 
     std::vector<LiveInsertSlot>& v = itLive->second;
     if (v.size() != targetChain.slots.size())
     {
-        return false;
+        return InPlaceRestore::DifferentChain;
     }
 
     for (size_t i = 0; i < v.size(); ++i)
@@ -679,109 +1015,116 @@ bool PluginInsertHost::tryInPlaceParameterStateRestore(const TrackId trackId,
         const PluginInsertDescriptor& desc = targetChain.slots[i];
         if (!desc.occupied)
         {
-            return false;
+            return InPlaceRestore::DifferentChain;
         }
         if (live.instance == nullptr)
         {
-            return false;
+            return InPlaceRestore::DifferentChain;
         }
         if (live.slotId != desc.slotId)
         {
-            return false;
+            return InPlaceRestore::DifferentChain;
         }
         if (live.stage != desc.stage)
         {
-            return false;
+            return InPlaceRestore::DifferentChain;
         }
         if (desc.vst3AbsolutePath != live.instance->getPluginDescription().fileOrIdentifier)
         {
-            return false;
+            return InPlaceRestore::DifferentChain;
         }
         const juce::String liveId = live.instance->getPluginDescription().createIdentifierString();
         if (desc.pluginIdentifier.isNotEmpty() && liveId != desc.pluginIdentifier)
         {
-            return false;
+            return InPlaceRestore::DifferentChain;
         }
     }
 
-    bool audibleChanged = false;
-    for (size_t i = 0; i < v.size(); ++i)
-    {
-        LiveInsertSlot& live = v[i];
-        const PluginInsertDescriptor& desc = targetChain.slots[i];
+    // Undo / redo of plug-in state (including a loaded preset) must not call setStateInformation
+    // while this instance is inside processBlock, and must not leave a pause held if the worker
+    // never acknowledges. A busy window leaves the live chain untouched; importChain must not
+    // treat that as "rebuild the chain".
+    bool applied = false;
+    const auto mutate = [&] {
+        bool audibleChanged = false;
+        bool stateWritten = false;
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            LiveInsertSlot& live = v[i];
+            const PluginInsertDescriptor& desc = targetChain.slots[i];
 
-        const bool wasActive = live.hostActive;
-        const bool wasBypassed = live.hostBypassed;
-        live.hostActive = desc.hostActive;
-        live.hostBypassed = desc.hostBypassed;
-        if (wasActive != desc.hostActive || wasBypassed != desc.hostBypassed)
-        {
-            audibleChanged = true;
-        }
-        if (desc.opaqueState.getSize() > 0)
-        {
-            live.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
-            if (live.instance->getMainBusNumInputChannels() != 2
-                || live.instance->getMainBusNumOutputChannels() != 2)
+            const bool wasActive = live.hostActive;
+            const bool wasBypassed = live.hostBypassed;
+            live.hostActive = desc.hostActive;
+            live.hostBypassed = desc.hostBypassed;
+            if (wasActive != desc.hostActive || wasBypassed != desc.hostBypassed)
             {
-                live.instance->prepareToPlay(effectiveSr(sampleRate_), effectiveBs(blockSize_));
+                audibleChanged = true;
             }
-            live.layoutOk = live.instance->getMainBusNumInputChannels() == 2
-                            && live.instance->getMainBusNumOutputChannels() == 2;
-        }
-
-        const EditorKey ek{ trackId, live.slotId };
-        juce::MemoryBlock postRestore;
-        live.instance->getStateInformation(postRestore);
-        lastHostAppliedState_[ek] = postRestore;
-        if (auto st = editorOpenState_.find(ek); st != editorOpenState_.end())
-        {
-            st->second = postRestore;
-        }
-        ensureInsertRuntime(live);
-        if (!live.hostActive)
-        {
-            live.runtime->setTarget(InsertSlotRuntime::Target::Inactive);
-        }
-        else if (!wasActive)
-        {
-            // The instance was not processing. reset() drops a frozen tail before it runs again.
-            // tryInPlace runs on the message thread from undo/import; the caller has already
-            // drained when a device is running (undo is refused while recording, and the
-            // exclusive hook is used by the button path). Here the instance was inactive, so
-            // the processing thread is not inside this slot once the ramp has finished. reset
-            // is still guarded by the exclusive hook when one is installed.
-            bool resetDone = false;
-            const auto resetSlot = [&] {
-                live.instance->reset();
-                live.runtime->resetDelay();
-                resetDone = true;
-            };
-            if (exclusiveInstanceAccess_)
+            if (desc.opaqueState.getSize() > 0 && desc.opaqueState.getSize() <= (size_t)std::numeric_limits<int>::max())
             {
-                exclusiveInstanceAccess_(resetSlot);
+                live.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+                stateWritten = true;
+                if (live.instance->getMainBusNumInputChannels() != 2
+                    || live.instance->getMainBusNumOutputChannels() != 2)
+                {
+                    live.instance->prepareToPlay(effectiveSr(sampleRate_), effectiveBs(blockSize_));
+                }
+                live.layoutOk = live.instance->getMainBusNumInputChannels() == 2
+                                && live.instance->getMainBusNumOutputChannels() == 2;
+            }
+
+            juce::MemoryBlock postRestore;
+            live.instance->getStateInformation(postRestore);
+            rememberHostAppliedState(trackId, live.slotId, postRestore);
+            ensureInsertRuntime(live);
+            if (!live.hostActive)
+            {
+                live.runtime->setTarget(InsertSlotRuntime::Target::Inactive);
+            }
+            else if (!wasActive)
+            {
+                // The instance was not processing. reset() drops a frozen tail before it runs again.
+                // This whole restore already holds exclusive access, so reset cannot overlap
+                // processBlock. The nested hook pauses again and resumes before we return.
+                bool resetDone = false;
+                const auto resetSlot = [&] {
+                    live.instance->reset();
+                    live.runtime->resetDelay();
+                    resetDone = true;
+                };
+                if (exclusiveInstanceAccess_)
+                {
+                    exclusiveInstanceAccess_(resetSlot);
+                }
+                else
+                {
+                    resetSlot();
+                }
+                juce::ignoreUnused(resetDone);
+                live.runtime->setTarget(live.hostBypassed ? InsertSlotRuntime::Target::HostBypass
+                                                          : InsertSlotRuntime::Target::Wet);
             }
             else
             {
-                resetSlot();
+                live.runtime->setTarget(live.hostBypassed ? InsertSlotRuntime::Target::HostBypass
+                                                          : InsertSlotRuntime::Target::Wet);
             }
-            juce::ignoreUnused(resetDone);
-            live.runtime->setTarget(live.hostBypassed ? InsertSlotRuntime::Target::HostBypass
-                                                      : InsertSlotRuntime::Target::Wet);
         }
-        else
-        {
-            live.runtime->setTarget(live.hostBypassed ? InsertSlotRuntime::Target::HostBypass
-                                                      : InsertSlotRuntime::Target::Wet);
-        }
-    }
 
-    rebuildAudioThreadMapAndPublish();
-    if (audibleChanged && audibleQueueInvalidation_)
+        rebuildAudioThreadMapAndPublish();
+        // A new plug-in state must not be heard through audio the worker already rendered.
+        if ((audibleChanged || stateWritten) && audibleQueueInvalidation_)
+        {
+            audibleQueueInvalidation_();
+        }
+        applied = true;
+    };
+    if (!withExclusiveInstanceAccess(mutate))
     {
-        audibleQueueInvalidation_();
+        return InPlaceRestore::Busy;
     }
-    return true;
+    return applied ? InPlaceRestore::Applied : InPlaceRestore::Busy;
 }
 
 InsertSlotId PluginInsertHost::allocateSlotId() noexcept
@@ -957,6 +1300,7 @@ juce::Result PluginInsertHost::addInsertFromVst3FileNoUndo(const TrackId trackId
     live.stage = stage;
     live.instance = std::move(inst);
     live.layoutOk = layoutOk;
+    stampNewInstanceEpoch(live);
     ensureInsertRuntime(live);
 
     insertLiveSlotSorted(trackId, std::move(live));
@@ -1407,6 +1751,7 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
         live.stage = desc.stage;
         live.instance = std::move(inst);
         live.layoutOk = layoutOk;
+        stampNewInstanceEpoch(live);
         live.hostActive = desc.hostActive;
         live.hostBypassed = desc.hostBypassed;
         ensureInsertRuntime(live);
@@ -1435,8 +1780,15 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
 
 void PluginInsertHost::importChain(const TrackId trackId, const PluginTrackChain& chain)
 {
-    if (tryInPlaceParameterStateRestore(trackId, chain))
+    const InPlaceRestore inPlace = tryInPlaceParameterStateRestore(trackId, chain);
+    if (inPlace == InPlaceRestore::Applied)
     {
+        return;
+    }
+    if (inPlace == InPlaceRestore::Busy)
+    {
+        // Rebuilding would destroy the instance we could not safely touch. Leave it as it is.
+        juce::Logger::writeToLog("[plugin] in-place state restore skipped: the insert was still in use");
         return;
     }
     importChainNoUndo(trackId, chain);
@@ -2402,6 +2754,7 @@ bool PluginInsertHost::installInsertInstanceForTests(const TrackId trackId,
     slot.stage = stage;
     slot.instance = std::move(instance);
     slot.layoutOk = tryPrepareStereoInsert(*slot.instance, sampleRate_, blockSize_);
+    stampNewInstanceEpoch(slot);
     ensureInsertRuntime(slot);
     if (!slot.layoutOk)
     {

@@ -67,6 +67,7 @@
 #include "engine/ReadAheadRenderer.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/PluginInsertHost.h"
+#include "plugins/Vst3PresetFile.h"
 #include "transport/Transport.h"
 
 namespace
@@ -95,6 +96,54 @@ void expect(const bool ok, const char* what)
 std::atomic<int> gOverlaps{ 0 };
 std::atomic<int> gDestroyedWhileProcessing{ 0 };
 std::atomic<int> gPreparedWhileProcessing{ 0 };
+
+// VST3 preset container for the worker-probe stand-in. The real JUCE wrapper is PresetProbe;
+// this builder only lets the read-ahead probe speak getPreset/setPreset.
+constexpr const char* kProbePresetClassId = "A1B2C3D4E5F60718293A4B5C6D7E8F90";
+
+void writeProbeU32(juce::MemoryOutputStream& s, const std::uint32_t v)
+{
+    const char b[4] = { (char)v, (char)(v >> 8), (char)(v >> 16), (char)(v >> 24) };
+    s.write(b, 4);
+}
+
+void writeProbeI64(juce::MemoryOutputStream& s, const std::int64_t v)
+{
+    const auto u = (std::uint64_t)v;
+    for (int i = 0; i < 8; ++i)
+    {
+        s.writeByte((char)((u >> (8 * i)) & 0xffu));
+    }
+}
+
+juce::MemoryBlock buildProbePreset(const juce::MemoryBlock& comp, const juce::MemoryBlock& cont)
+{
+    const auto compOffset = (std::int64_t)vst3_preset::kHeaderBytes;
+    const auto contOffset = compOffset + (std::int64_t)comp.getSize();
+    const auto listOffset = contOffset + (std::int64_t)cont.getSize();
+    juce::MemoryOutputStream s;
+    s.write("VST3", 4);
+    writeProbeU32(s, 1);
+    s.write(kProbePresetClassId, 32);
+    writeProbeI64(s, listOffset);
+    s.write(comp.getData(), comp.getSize());
+    if (cont.getSize() > 0)
+    {
+        s.write(cont.getData(), cont.getSize());
+    }
+    s.write("List", 4);
+    writeProbeU32(s, cont.getSize() > 0 ? 2u : 1u);
+    s.write("Comp", 4);
+    writeProbeI64(s, compOffset);
+    writeProbeI64(s, (std::int64_t)comp.getSize());
+    if (cont.getSize() > 0)
+    {
+        s.write("Cont", 4);
+        writeProbeI64(s, contOffset);
+        writeProbeI64(s, (std::int64_t)cont.getSize());
+    }
+    return { s.getData(), s.getDataSize() };
+}
 
 // ---------------------------------------------------------------------------------------------
 // Deterministic, STATE-DEPENDENT test insert: a one-pole feedback makes the output depend on
@@ -216,13 +265,62 @@ public:
     /// (state lead, torn mid-process read) yields a different blob than the audible position.
     void getStateInformation(juce::MemoryBlock& dest) override
     {
+        notePresetTouchWhileProcessing();
         const std::uint64_t sp = samplesProcessed();
         const std::int64_t cc = (std::int64_t)callCount();
         dest.append(&sp, sizeof(sp));
         dest.append(&cc, sizeof(cc));
         dest.append(state_, sizeof(state_));
     }
-    void setStateInformation(const void*, int) override {}
+    void setStateInformation(const void*, int) override
+    {
+        notePresetTouchWhileProcessing();
+    }
+
+    void getExtensions(juce::ExtensionsVisitor& visitor) const override
+    {
+        struct Client final : juce::ExtensionsVisitor::VST3Client
+        {
+            StatefulProbeInsert* self = nullptr;
+            Steinberg::Vst::IComponent* getIComponentPtr() const noexcept override { return nullptr; }
+            juce::MemoryBlock getPreset() const override
+            {
+                self->notePresetTouchWhileProcessing();
+                return buildProbePreset(self->presetComp_, self->presetCont_);
+            }
+            bool setPreset(const juce::MemoryBlock& raw) const override
+            {
+                self->notePresetTouchWhileProcessing();
+                juce::MemoryBlock comp;
+                juce::MemoryBlock cont;
+                if (!vst3_preset::copyChunk(raw.getData(), raw.getSize(), "Comp", comp))
+                {
+                    return false;
+                }
+                (void)vst3_preset::copyChunk(raw.getData(), raw.getSize(), "Cont", cont);
+                self->presetComp_ = std::move(comp);
+                self->presetCont_ = std::move(cont);
+                return true;
+            }
+        } client;
+        client.self = const_cast<StatefulProbeInsert*>(this);
+        visitor.visitVST3Client(client);
+    }
+
+    void setPresetPayloadForTests(juce::MemoryBlock comp, juce::MemoryBlock cont)
+    {
+        presetComp_ = std::move(comp);
+        presetCont_ = std::move(cont);
+    }
+    void copyPresetPayloadForTests(juce::MemoryBlock& comp, juce::MemoryBlock& cont) const
+    {
+        comp = presetComp_;
+        cont = presetCont_;
+    }
+    [[nodiscard]] int presetTouchesWhileProcessing() const noexcept
+    {
+        return presetTouchesWhileProcessing_.load(std::memory_order_acquire);
+    }
 
     [[nodiscard]] int callCount() const noexcept
     {
@@ -245,6 +343,13 @@ public:
     }
 
 private:
+    void notePresetTouchWhileProcessing() const noexcept
+    {
+        if (inProcess_.load(std::memory_order_acquire) != 0)
+        {
+            presetTouchesWhileProcessing_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     const float gain_;
     std::atomic<int> holdGate_{ 0 };
     std::atomic<int> holding_{ 0 };
@@ -253,6 +358,9 @@ private:
     std::atomic<std::uint64_t> samplesProcessed_{ 0 };
     std::vector<Call> calls_;
     float state_[2] = { 0.0f, 0.0f };
+    mutable juce::MemoryBlock presetComp_;
+    mutable juce::MemoryBlock presetCont_;
+    mutable std::atomic<int> presetTouchesWhileProcessing_{ 0 };
 };
 
 class StubDevice final : public juce::AudioIODevice
@@ -1740,6 +1848,188 @@ void testDeviceStopWaitsForBlockedWorker()
 }
 
 // =============================================================================================
+// Preset Load/Save while the REAL read-ahead worker is inside processBlock.
+// The pause, timeout and resume are ReadAheadRenderer's. The probe's VST3Client is a stand-in
+// (PresetProbe is the real JUCE wrapper; this probe's getStateInformation fingerprint is unchanged).
+struct PresetExclusiveUndo
+{
+    int records = 0;
+    juce::String lastLabel;
+    static void record(void* ctx, const juce::String& label, const PluginUndoStepSides&)
+    {
+        auto* self = static_cast<PresetExclusiveUndo*>(ctx);
+        ++self->records;
+        self->lastLabel = label;
+    }
+};
+
+[[nodiscard]] bool presetChunksEqual(const juce::File& file, const juce::MemoryBlock& wantComp, const juce::MemoryBlock& wantCont)
+{
+    juce::MemoryBlock raw;
+    if (!file.loadFileAsData(raw))
+    {
+        return false;
+    }
+    juce::MemoryBlock comp;
+    juce::MemoryBlock cont;
+    if (!vst3_preset::copyChunk(raw.getData(), raw.getSize(), "Comp", comp))
+    {
+        return false;
+    }
+    (void)vst3_preset::copyChunk(raw.getData(), raw.getSize(), "Cont", cont);
+    return comp.getSize() == wantComp.getSize() && comp == wantComp
+           && cont.getSize() == wantCont.getSize() && cont == wantCont;
+}
+
+void testPresetExclusiveAccessWhileWorkerHeld()
+{
+    std::printf("\n-- preset exclusive access while the real worker is inside processBlock --\n");
+    readahead::setConfiguredReadAheadDepth(kDepth);
+    Fixture on(0);
+    readahead::setConfiguredReadAheadDepth(0);
+    readahead::ReadAheadRenderer* const ra = on.h.engine.experimentalReadAhead();
+    expect(ra != nullptr, "thread-mode renderer constructed for the preset window");
+    if (ra == nullptr || on.pre == nullptr)
+    {
+        return;
+    }
+
+    // Same hook as Main.cpp: drain the callback, pause the worker, resume on every return.
+    on.h.pluginHost.setExclusiveInstanceAccess([&engine = on.h.engine](std::function<void()> fn) {
+        if (!engine.waitForAudioCallbackExit(250.0))
+        {
+            return;
+        }
+        if (readahead::ReadAheadRenderer* const renderer = engine.experimentalReadAhead())
+        {
+            if (!renderer->pauseWorkerAndWait())
+            {
+                return;
+            }
+            struct ResumeWorker
+            {
+                readahead::ReadAheadRenderer* renderer = nullptr;
+                ~ResumeWorker()
+                {
+                    if (renderer != nullptr)
+                    {
+                        renderer->resumeWorker();
+                    }
+                }
+            } resume{ renderer };
+            fn();
+            return;
+        }
+        fn();
+    });
+    PresetExclusiveUndo undo;
+    on.h.pluginHost.setUndoRecorder(&undo, &PresetExclusiveUndo::record);
+
+    PluginInsertHost::InsertInstanceToken preToken;
+    for (const auto& row : on.h.pluginHost.getInsertRowsForTrack(on.h.audioTids[1]))
+    {
+        if (row.stage == InsertStage::Pre)
+        {
+            preToken = on.h.pluginHost.insertInstanceToken(on.h.audioTids[1], row.slotId);
+        }
+    }
+    expect(preToken.namesALiveInstance(), "the held insert has a live instance token");
+
+    juce::MemoryBlock compA;
+    compA.append("comp-A-processor", 16);
+    juce::MemoryBlock contA;
+    const unsigned char contABytes[] = { 'c', 'o', 'n', 't', 0x00, 'A' };
+    contA.append(contABytes, sizeof(contABytes));
+    juce::MemoryBlock compB;
+    compB.append("comp-B-DIFFERENT", 16);
+    juce::MemoryBlock contB;
+    const unsigned char contBBytes[] = { 'o', 't', 'h', 'e', 'r', 0x00, 'B', '!' };
+    contB.append(contBBytes, sizeof(contBBytes));
+    expect(!(compA == compB) && !(contA == contB) && !(compA == contA),
+           "the stand-in processor and controller payloads differ, and the controller contains a null");
+    on.pre->setPresetPayloadForTests(compA, contA);
+
+    const juce::File preset = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                  .getChildFile("dal-readahead-preset-exclusive.vstpreset");
+    preset.deleteFile();
+    expect(on.h.pluginHost.saveInsertPresetToFile(preToken, preset).wasOk(),
+           "idle save through the production exclusive path writes the preset");
+    expect(undo.records == 0, "that save records no undo");
+    juce::MemoryBlock savedFile;
+    expect(preset.loadFileAsData(savedFile) && presetChunksEqual(preset, compA, contA),
+           "the saved file's Comp and Cont are the stand-in payloads, null byte included");
+
+    on.pre->setPresetPayloadForTests(compB, contB);
+    expect(parkWorkerInsideProbe(on), "worker parked inside the probe's processBlock");
+    if (!on.pre->isHeldInProcessBlock())
+    {
+        on.pre->setHoldInProcessBlock(false);
+        ra->setPauseAckTimeoutMsForTests(2000);
+        preset.deleteFile();
+        return;
+    }
+
+    const int depthWhileHeld = ra->pauseDepthForTests();
+    const int touchesBefore = on.pre->presetTouchesWhileProcessing();
+    ra->setPauseAckTimeoutMsForTests(50);
+    const juce::Result blockedSave = on.h.pluginHost.saveInsertPresetToFile(preToken, preset);
+    std::printf("blocked save: %s\n", blockedSave.getErrorMessage().toRawUTF8());
+    juce::MemoryBlock fileAfterBlockedSave;
+    const bool fileUntouched = preset.loadFileAsData(fileAfterBlockedSave) && fileAfterBlockedSave == savedFile;
+    expect(!blockedSave.wasOk() && fileUntouched, "a timed-out save does not overwrite the existing preset file");
+
+    const juce::Result blockedLoad = on.h.pluginHost.loadInsertPresetFromFile(preToken, preset);
+    std::printf("blocked load: %s\n", blockedLoad.getErrorMessage().toRawUTF8());
+    juce::MemoryBlock compNow;
+    juce::MemoryBlock contNow;
+    on.pre->copyPresetPayloadForTests(compNow, contNow);
+    expect(!blockedLoad.wasOk() && compNow == compB && contNow == contB,
+           "a timed-out load does not change processor or controller state");
+    expect(undo.records == 0 && undo.lastLabel.isEmpty(),
+           "a timed-out load records no undo and does not mark the project dirty");
+    expect(on.pre->presetTouchesWhileProcessing() == touchesBefore,
+           "neither state capture nor state apply ran while the worker was inside processBlock");
+    expect(ra->pauseDepthForTests() == depthWhileHeld,
+           "the timed-out pause withdrew its depth; the worker lock is not left held");
+    expect(on.pre->isHeldInProcessBlock(), "the worker is still inside the original processBlock");
+    expect(gOverlaps.load() == 0, "the blocked preset window did not overlap processBlock");
+
+    on.pre->setHoldInProcessBlock(false);
+    const auto releaseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (on.pre->isHeldInProcessBlock() && std::chrono::steady_clock::now() < releaseDeadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    expect(!on.pre->isHeldInProcessBlock(), "releasing the gate lets the worker leave processBlock");
+    ra->setPauseAckTimeoutMsForTests(2000);
+
+    expect(on.h.pluginHost.loadInsertPresetFromFile(preToken, preset).wasOk(),
+           "after the worker is released, load through the same path succeeds");
+    on.pre->copyPresetPayloadForTests(compNow, contNow);
+    expect(compNow.getSize() == compA.getSize() && compNow == compA
+               && contNow.getSize() == contA.getSize() && contNow == contA,
+           "the retry restores Comp and Cont from the file, lengths included");
+    expect(undo.records == 1 && undo.lastLabel == "Load preset", "the retry records one Load preset undo step");
+
+    on.pre->setPresetPayloadForTests(compB, contB);
+    expect(on.h.pluginHost.saveInsertPresetToFile(preToken, preset).wasOk(),
+           "a later save also succeeds once the worker is free");
+    expect(presetChunksEqual(preset, compB, contB), "the later save writes the new payloads");
+    expect(undo.records == 1, "that save still records no undo");
+    expect(on.pre->presetTouchesWhileProcessing() == touchesBefore,
+           "the successful retry did not capture or apply state during processBlock");
+    expect(ra->pauseDepthForTests() == depthWhileHeld, "the successful attempts released the worker pause");
+    expect(gOverlaps.load() == 0 && gDestroyedWhileProcessing.load() == 0
+               && gPreparedWhileProcessing.load() == 0,
+           "lifetime guards clean through the blocked preset attempt and the retry");
+
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    (void)on.h.runCallbackBlocks(1);
+    ra->setPauseAckTimeoutMsForTests(2000);
+    preset.deleteFile();
+}
+
+// =============================================================================================
 // DAL Mono Delay round-trip. Not part of the default suite (real VST3, fresh process per
 // reopen). Run: ReadAheadPrototypeFocusedTests --mono-delay-save
 // Reopen child: --mono-delay-reopen <project> <expected-sidecar>
@@ -2302,6 +2592,14 @@ int main(int argc, char** argv)
     {
         return runMonoDelaySave(argc, argv);
     }
+    if (argc >= 2 && juce::String(argv[1]) == "--preset-exclusive")
+    {
+        juce::ScopedJuceInitialiser_GUI juceInit;
+        std::printf("ReadAheadPrototypeFocusedTests --preset-exclusive\n");
+        testPresetExclusiveAccessWhileWorkerHeld();
+        std::printf("\n%d checks, %d failure(s)\n", checks, failures);
+        return failures == 0 ? 0 : 1;
+    }
     juce::ScopedJuceInitialiser_GUI juceInit; // MessageManager: prepareForDevice requires the message thread
     std::printf("ReadAheadPrototypeFocusedTests (model: docs/READAHEAD_PROTOTYPE.md, v2)\n");
 
@@ -2324,6 +2622,7 @@ int main(int argc, char** argv)
     testGuardedSaveFailurePreservesFileAndRetry();
     testWorkerThreadSmoke();
     testWorkerPauseAckTimeoutContract();
+    testPresetExclusiveAccessWhileWorkerHeld();
     testChainRemovalWaitsForBlockedWorker();
     testHostBypassWhileWorkerInsidePlugin();
     testDeviceStopWaitsForBlockedWorker();

@@ -150,7 +150,7 @@ void Session::replaceWithFreshStartupSession(Transport& transport) noexcept
     const std::shared_ptr<const SessionSnapshot> next
         = SessionSnapshot::withSingleEmptyTrack(audioId, juce::String("Track 1"));
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
-    currentProjectFile_ = {};
+    currentProjectFile_ = juce::File{};
     audioMixdown_ = defaultAudioMixdownProjectSettings();
     resetTransientSoloStateForProjectLoad();
     for (auto& memory : soloMemories_)
