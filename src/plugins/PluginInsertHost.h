@@ -220,6 +220,39 @@ public:
     };
     [[nodiscard]] InsertHostAudible insertHostAudible(TrackId trackId, InsertSlotId slotId) const;
 
+    /// Identity of one live insert instance. Captured when a preset dialog opens and checked
+    /// again when it returns, so a slot that was removed, replaced, or rebuilt by another
+    /// project cannot receive that dialog's file. `instanceEpoch` is unique for each instance
+    /// DAL places in a slot; it is not reused when the same slot id comes back.
+    struct InsertInstanceToken
+    {
+        TrackId trackId = kInvalidTrackId;
+        InsertSlotId slotId = kInvalidInsertSlotId;
+        std::uint64_t instanceEpoch = 0;
+
+        [[nodiscard]] bool namesALiveInstance() const noexcept
+        {
+            return trackId != kInvalidTrackId && slotId != kInvalidInsertSlotId && instanceEpoch != 0;
+        }
+    };
+
+    /// [Message thread] Token for the instance currently in the slot, or a token that
+    /// `namesALiveInstance()` rejects when the slot is missing or only an unavailable placeholder.
+    [[nodiscard]] InsertInstanceToken insertInstanceToken(TrackId trackId, InsertSlotId slotId) const;
+
+    /// [Message thread] Write this instance's VST3 preset to `destination`. Uses the wrapper's
+    /// own .vstpreset bytes (component class id, processor state, controller state). Does not
+    /// mark the project dirty, does not record undo, and does not change the project path.
+    /// A write failure leaves an existing file in place. Host Active / Bypass are not stored.
+    [[nodiscard]] juce::Result saveInsertPresetToFile(InsertInstanceToken token, const juce::File& destination);
+
+    /// [Message thread] Replace this instance's plug-in state from a .vstpreset file. The slot
+    /// and chain order stay. Host Active / Bypass stay. A successful load records one
+    /// "Load preset" undo step (before / after plug-in state) and marks the project dirty
+    /// through the existing undo recorder. A rejected file or a missed exclusive-access
+    /// window changes nothing and records nothing.
+    [[nodiscard]] juce::Result loadInsertPresetFromFile(InsertInstanceToken token, const juce::File& source);
+
     /// [Message thread] Runs `fn` while the audio callback is drained and the read-ahead worker
     /// is paused, when the app has installed a hook. Tests with no device call `fn` directly.
     /// Used so reset() on reactivation cannot overlap processBlock.
@@ -430,6 +463,8 @@ private:
         /// `unavailableDescriptor` so export/import round-trips them).
         bool hostActive = true;
         bool hostBypassed = false;
+        /// Bumped once per placed instance. Preset dialogs bind to this, not to the slot id alone.
+        std::uint64_t instanceEpoch = 0;
         /// Mix state co-owned by every published map entry for this slot.
         std::shared_ptr<InsertSlotRuntime> runtime;
         /// Unavailable placeholder (see `importChain`): `instance == nullptr` and this descriptor
@@ -459,7 +494,29 @@ private:
     void closeEditorForSlot(TrackId trackId, InsertSlotId slotId);
     void importChainNoUndo(TrackId trackId, const PluginTrackChain& chain);
 
-    [[nodiscard]] bool tryInPlaceParameterStateRestore(TrackId trackId, const PluginTrackChain& targetChain);
+    /// In-place undo of plug-in state. `Busy` means exclusive access was not obtained, so the
+    /// live instance is left as it is; the caller must not rebuild the chain on that result.
+    enum class InPlaceRestore
+    {
+        Applied,
+        DifferentChain,
+        Busy
+    };
+    [[nodiscard]] InPlaceRestore tryInPlaceParameterStateRestore(TrackId trackId, const PluginTrackChain& targetChain);
+
+    /// [Message thread] Runs `fn` only when the audio callback has left and the read-ahead worker
+    /// has acknowledged a pause. False means `fn` did not run and no pause remains held.
+    [[nodiscard]] bool withExclusiveInstanceAccess(const std::function<void()>& fn);
+
+    void stampNewInstanceEpoch(LiveInsertSlot& slot) noexcept;
+
+    [[nodiscard]] const LiveInsertSlot* findToken(const InsertInstanceToken& token) const noexcept;
+    [[nodiscard]] LiveInsertSlot* findTokenMutable(const InsertInstanceToken& token) noexcept;
+
+    /// Put one slot's processor state back from a chain snapshot. Host flags are not rewritten.
+    void restoreSlotOpaqueState(TrackId trackId, LiveInsertSlot& slot, const PluginTrackChain& chain);
+
+    void rememberHostAppliedState(TrackId trackId, InsertSlotId slotId, const juce::MemoryBlock& state);
 
     void pushPluginParameterUndoStep(TrackId trackId,
                                    InsertSlotId slotId,
@@ -562,6 +619,7 @@ private:
     PluginUndoRecorder undoRecorder_ = nullptr;
     std::function<void(std::function<void()>)> exclusiveInstanceAccess_;
     std::function<void()> audibleQueueInvalidation_;
+    std::uint64_t nextInstanceEpoch_ = 1;
 
     void ensureInsertRuntime(LiveInsertSlot& slot);
     void recordHostAudibleUndo(const juce::String& label, TrackId trackId, const PluginTrackChain& before);

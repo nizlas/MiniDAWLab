@@ -522,6 +522,77 @@ if (MSVC)
 endif()
 
 # -----------------------------------------------------------------------------
+# PresetProbe: a tiny VST3 effect whose processor state is a gain parameter plus a
+# side string that is not a parameter. InsertPresetFocusedTests loads the built
+# bundle through the real JUCE VST3 wrapper. It is not shipped with the app.
+# -----------------------------------------------------------------------------
+juce_add_plugin(PresetProbe
+    COMPANY_NAME "MiniDAWLab"
+    BUNDLE_ID "com.minidawlab.presetprobe"
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    COPY_PLUGIN_AFTER_BUILD FALSE
+    PLUGIN_MANUFACTURER_CODE Dalb
+    PLUGIN_CODE Prb1
+    FORMATS VST3
+    PRODUCT_NAME "PresetProbe")
+target_sources(PresetProbe PRIVATE tests/fixtures/PresetProbe/PresetProbeProcessor.cpp)
+target_compile_definitions(PresetProbe PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_VST3_CAN_REPLACE_VST2=0)
+target_link_libraries(PresetProbe
+    PRIVATE
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+
+# -----------------------------------------------------------------------------
+# InsertPresetFocusedTests: .vstpreset container checks, host Load/Save policy on a
+# stand-in (not the JUCE wrapper), and --probe-vst3 against the real wrapper.
+# -----------------------------------------------------------------------------
+juce_add_console_app(InsertPresetFocusedTests PRODUCT_NAME "InsertPresetFocusedTests")
+target_sources(InsertPresetFocusedTests PRIVATE
+    tests/selftest/InsertPresetFocusedTestsMain.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp)
+target_include_directories(InsertPresetFocusedTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(InsertPresetFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(InsertPresetFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+add_dependencies(InsertPresetFocusedTests PresetProbe_VST3)
+if (MSVC)
+    target_compile_options(InsertPresetFocusedTests PRIVATE /wd4458)
+endif()
+
+# -----------------------------------------------------------------------------
 # ExportLevelFocusedTests: export level / click diagnosis + level-meter regression. `--analyze <dir>`
 # measures the WAV/MP3 files written by `MiniDAWLab.exe --stability-export-levels` (JUCE WAV reader
 # + JUCE MP3 decoder to float, 4x oversampled peak estimate, edge transients, MP3-vs-WAV alignment).

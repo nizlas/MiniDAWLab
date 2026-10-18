@@ -235,21 +235,34 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // and the read-ahead worker has acknowledged a pause. Bypass and Active-off do not reset;
     // they discard the read-ahead queue so a segment rendered with the previous wet mix is not
     // played back (docs/READAHEAD_PROTOTYPE.md §6).
+    // Shared by host Active reactivation and preset load/save. A timeout is not ownership:
+    // the callback wait returns without calling fn, and a worker that does not acknowledge
+    // drops the pause depth it added. resume runs even if fn returns early.
     pluginInsertHost_->setExclusiveInstanceAccess([enginePtr = playbackEngine.get()](std::function<void()> fn) {
         if (!enginePtr->waitForAudioCallbackExit(250.0))
         {
-            juce::Logger::writeToLog("[plugin] insert reactivation: audio callback did not drain; left unchanged");
+            juce::Logger::writeToLog("[plugin] exclusive instance access: audio callback did not drain; left unchanged");
             return;
         }
         if (readahead::ReadAheadRenderer* const ra = enginePtr->experimentalReadAhead())
         {
             if (!ra->pauseWorkerAndWait())
             {
-                juce::Logger::writeToLog("[plugin] insert reactivation: read-ahead worker did not pause; left unchanged");
+                juce::Logger::writeToLog("[plugin] exclusive instance access: read-ahead worker did not pause; left unchanged");
                 return;
             }
+            struct ResumeWorker
+            {
+                readahead::ReadAheadRenderer* renderer = nullptr;
+                ~ResumeWorker()
+                {
+                    if (renderer != nullptr)
+                    {
+                        renderer->resumeWorker();
+                    }
+                }
+            } resume{ ra };
             fn();
-            ra->resumeWorker();
             return;
         }
         fn();

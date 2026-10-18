@@ -12,6 +12,18 @@ namespace
     constexpr int kToolbarH = 28;
     constexpr int kButton = 22;
 
+    [[nodiscard]] int presetButtonWidth(const juce::String& text)
+    {
+        const juce::Font font(juce::FontOptions(12.0f));
+        return font.getStringWidth(text) + 18;
+    }
+
+    [[nodiscard]] int presetToolbarMinWidth()
+    {
+        return 8 + kButton + 6 + kButton + 8 + presetButtonWidth("Load preset…") + 6
+               + presetButtonWidth("Save preset…") + 8;
+    }
+
     [[nodiscard]] bool dispatchHostUndoRedoFromPluginWindowKey(const juce::KeyPress& key,
                                                                const PluginEditorWindowHostShortcuts& sh)
     {
@@ -68,9 +80,20 @@ namespace
             editorResizable_ = editor_->isResizable();
             addAndMakeVisible(editor_.get());
             editor_->addComponentListener(this);
-            const int w = juce::jmax(160, editor_->getWidth());
+            configurePresetButton(loadButton_,
+                                  "Load preset…",
+                                  "Load a .vstpreset into this insert. The plug-in's own state is replaced. Host Active and Bypass stay as they are.");
+            configurePresetButton(saveButton_,
+                                  "Save preset…",
+                                  "Save this insert's plug-in state as a .vstpreset. The project is not modified. Host Active and Bypass are not stored in the file.");
+            loadButton_.onClick = [this] { beginLoadPreset(); };
+            saveButton_.onClick = [this] { beginSavePreset(); };
+            addAndMakeVisible(loadButton_);
+            addAndMakeVisible(saveButton_);
+            const int w = juce::jmax(presetToolbarMinWidth(), editor_->getWidth());
             const int h = juce::jmax(40, editor_->getHeight());
             setSize(w, h + kToolbarH);
+            refreshPresetButtons();
             startTimerHz(15);
         }
 
@@ -103,6 +126,12 @@ namespace
                 return;
             }
             const juce::ScopedValueSetter<bool> guard(guard_, true);
+            const int y = (kToolbarH - kButton) / 2;
+            const int loadW = presetButtonWidth(loadButton_.getButtonText());
+            const int saveW = presetButtonWidth(saveButton_.getButtonText());
+            const int x = 8 + kButton + 6 + kButton + 8;
+            loadButton_.setBounds(x, y, loadW, kButton);
+            saveButton_.setBounds(x + loadW + 6, y, saveW, kButton);
             if (editorResizable_)
             {
                 editor_->setBounds(0, kToolbarH, getWidth(), juce::jmax(1, getHeight() - kToolbarH));
@@ -150,7 +179,11 @@ namespace
         }
 
     private:
-        void timerCallback() override { repaint(); }
+        void timerCallback() override
+        {
+            refreshPresetButtons();
+            repaint();
+        }
 
         void componentMovedOrResized(juce::Component& component, bool, bool wasResized) override
         {
@@ -159,7 +192,7 @@ namespace
                 return;
             }
             const juce::ScopedValueSetter<bool> guard(guard_, true);
-            const int w = juce::jmax(160, component.getWidth());
+            const int w = juce::jmax(presetToolbarMinWidth(), component.getWidth());
             const int h = component.getHeight() + kToolbarH;
             if (getWidth() != w || getHeight() != h)
             {
@@ -222,12 +255,110 @@ namespace
             }
         }
 
+        static void configurePresetButton(juce::TextButton& button, const juce::String& name, const juce::String& tip)
+        {
+            button.setButtonText(name);
+            button.setName(name);
+            button.setTitle(name);
+            button.setDescription(tip);
+            button.setTooltip(tip);
+            button.setWantsKeyboardFocus(true);
+            button.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3d42));
+            button.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff4a4e54));
+            button.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffe8e8e8));
+            button.setColour(juce::TextButton::textColourOnId, juce::Colour(0xffe8e8e8));
+        }
+
+        void refreshPresetButtons()
+        {
+            const auto audible = host_.insertHostAudible(trackId_, slotId_);
+            const bool enabled = audible.available && !dialogBusy_;
+            loadButton_.setEnabled(enabled);
+            saveButton_.setEnabled(enabled);
+        }
+
+        void beginLoadPreset()
+        {
+            launchPresetDialog(false);
+        }
+
+        void beginSavePreset()
+        {
+            launchPresetDialog(true);
+        }
+
+        void launchPresetDialog(const bool save)
+        {
+            if (dialogBusy_)
+            {
+                return;
+            }
+            const auto token = host_.insertInstanceToken(trackId_, slotId_);
+            if (!token.namesALiveInstance() || !host_.insertHostAudible(trackId_, slotId_).available)
+            {
+                return;
+            }
+            dialogBusy_ = true;
+            refreshPresetButtons();
+            const int flags = save
+                                  ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting
+                                     | juce::FileBrowserComponent::canSelectFiles)
+                                  : (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles);
+            const juce::File start = save ? juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                                               .getChildFile("Preset.vstpreset")
+                                         : juce::File{};
+            chooser_ = std::make_shared<juce::FileChooser>(save ? "Save preset" : "Load preset", start, "*.vstpreset");
+            const juce::Component::SafePointer<InsertEditorShell> safe(this);
+            chooser_->launchAsync(flags, [safe, token, save, chooser = chooser_](const juce::FileChooser& fc) {
+                juce::ignoreUnused(chooser);
+                if (safe != nullptr)
+                {
+                    safe->dialogBusy_ = false;
+                    safe->refreshPresetButtons();
+                }
+                juce::File file = fc.getResult();
+                if (safe == nullptr || file == juce::File{})
+                {
+                    return;
+                }
+                if (save && !file.hasFileExtension("vstpreset"))
+                {
+                    const juce::File withExt = file.withFileExtension("vstpreset");
+                    if (withExt.existsAsFile())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon,
+                            "Save preset",
+                            "A preset with that name already exists. Choose it in the dialog to replace it.");
+                        return;
+                    }
+                    file = withExt;
+                }
+                const juce::Result result = save ? safe->host_.saveInsertPresetToFile(token, file)
+                                                 : safe->host_.loadInsertPresetFromFile(token, file);
+                if (!result.wasOk())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                          save ? "Save preset" : "Load preset",
+                                                          result.getErrorMessage());
+                }
+                if (safe != nullptr)
+                {
+                    safe->repaint();
+                }
+            });
+        }
+
         PluginInsertHost& host_;
         TrackId trackId_ = kInvalidTrackId;
         InsertSlotId slotId_ = kInvalidInsertSlotId;
         std::unique_ptr<juce::AudioProcessorEditor> editor_;
+        juce::TextButton loadButton_;
+        juce::TextButton saveButton_;
+        std::shared_ptr<juce::FileChooser> chooser_;
         bool editorResizable_ = false;
         bool guard_ = false;
+        bool dialogBusy_ = false;
     };
 
     void installShell(juce::DocumentWindow& window,
