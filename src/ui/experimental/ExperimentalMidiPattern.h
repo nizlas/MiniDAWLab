@@ -25,6 +25,7 @@
 #include "ui/experimental/ExperimentalMidiPitchBend.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -57,7 +58,24 @@ struct TimelineMidiNote
     std::int64_t startTick = 0;
     /// Held note length for future MIDI editing; drums ignore fixed gate separately.
     std::int64_t durationTicks = 240;
+    /// Process-lifetime identity. 0 means "not assigned yet". Copied through the in-memory undo
+    /// DTO so Undo/Redo can restore the same note. Not written to the project file.
+    std::uint64_t uid = 0;
+    /// Editor selection bit for the open MIDI editor. Copied through the undo DTO only, so an
+    /// undo step restores the selection that belonged to that edit. Not musical state and not JSON.
+    bool editorSelected = false;
 };
+
+/// Assign a process-lifetime uid. Existing non-zero ids are kept (undo restore, copy-in-place).
+inline void ensureTimelineNoteUid(TimelineMidiNote& n) noexcept
+{
+    if (n.uid != 0)
+    {
+        return;
+    }
+    static std::atomic<std::uint64_t> next{ 1 };
+    n.uid = next.fetch_add(1, std::memory_order_relaxed);
+}
 
 /// Default internal Musical Time resolution (ticks per quarter note).
 inline constexpr int kDefaultExperimentalTicksPerQuarter = 960;
@@ -191,7 +209,7 @@ struct ExperimentalMidiPattern
 {
     const int tpq = experimentalEffectiveTicksPerQuarter(p);
     return timelineAnchorSamplesForTickZero
-           + ticksToRelativeSamples(n.startTick, p.bpm > 0.0 ? p.bpm : 120.0, tpq, sampleRate);
+           + ticksToSignedSamples(n.startTick, p.bpm > 0.0 ? p.bpm : 120.0, tpq, sampleRate);
 }
 
 /// Exclusive end tick: `start + max(1, duration)`. Touching `a.end == b.start` is not an overlap.

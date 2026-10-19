@@ -675,23 +675,23 @@ private:
                     trimLaneUndoBefore_ = owner_.callbacks_.captureInstrumentMusicalUndoSnapshot();
                 }
 
-                const bool toggleMultiTrim = e.mods.isShiftDown();
+                const bool toggleMultiTrim = e.mods.isCommandDown() || e.mods.isCtrlDown();
+                const bool addMultiTrim = e.mods.isShiftDown() && !toggleMultiTrim;
                 if (toggleMultiTrim)
                 {
-                    const bool thisTrackHasSelection = !ac->getSelectedClipIds().empty();
-                    if (!thisTrackHasSelection)
+                    ac->toggleClipSelection(c->id);
+                    if (!ac->isClipSelected(c->id))
                     {
-                        if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
-                        {
-                            owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(
-                                laneTimelineTrackId_);
-                        }
-                        ac->setSelectedClipIdsExclusive(c->id);
+                        trimLaneGestureActive_ = false;
+                        repaint();
+                        return;
                     }
-                    else
-                    {
-                        ac->toggleClipSelection(c->id);
-                    }
+                    ac->setActiveSelectedClipId(c->id);
+                }
+                else if (addMultiTrim)
+                {
+                    ac->addClipToSelection(c->id);
+                    ac->setActiveSelectedClipId(c->id);
                 }
                 else
                 {
@@ -716,23 +716,24 @@ private:
 
         if (auto* clip = hitTestClipAtEvent(e.position))
         {
-            const bool toggleMulti = e.mods.isShiftDown();
-            if (toggleMulti)
+            const bool toggleMulti = e.mods.isCommandDown() || e.mods.isCtrlDown();
+            const bool addMulti = e.mods.isShiftDown() && !toggleMulti;
+            if (toggleMulti || addMulti)
             {
-                const bool thisTrackHasSelection = !ac->getSelectedClipIds().empty();
-                if (!thisTrackHasSelection)
-                {
-                    if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
-                    {
-                        owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(
-                            laneTimelineTrackId_);
-                    }
-                    ac->setSelectedClipIdsExclusive(clip->id);
-                }
-                else
+                if (toggleMulti)
                 {
                     ac->toggleClipSelection(clip->id);
                 }
+                else
+                {
+                    ac->addClipToSelection(clip->id);
+                }
+                if (ac->isClipSelected(clip->id))
+                {
+                    ac->setActiveSelectedClipId(clip->id);
+                }
+                repaint();
+                return;
             }
             else
             {
@@ -1447,7 +1448,7 @@ private:
             {
                 ac->setActiveSelectedClipId(clip->id);
             }
-            owner_.openMidiEditorForInstrumentClip(laneTimelineTrackId_, clip->id);
+            owner_.openMidiEditorForSelectedClips(laneTimelineTrackId_, clip->id);
             repaint();
             return;
         }
@@ -1900,6 +1901,42 @@ void InstrumentTimelineRowCoordinator::openMidiEditorForInstrumentClip(const Tra
     {
         callbacks_.openMidiEditorForInstrumentClip(timelineInstrumentTrackId, clipId);
     }
+}
+
+void InstrumentTimelineRowCoordinator::openMidiEditorForSelectedClips(const TrackId activeTrack,
+                                                                      const InstrumentMidiClipId activeClip)
+{
+    std::vector<std::pair<TrackId, InstrumentMidiClipId>> members;
+    std::vector<ArrangementEventId> selection;
+    trackLanes_.copyArrangementEventSelection(selection);
+    members.reserve(selection.size());
+    for (const ArrangementEventId& id : selection)
+    {
+        if (id.kind != ArrangementEventKind::MidiClip || id.eventId == 0 || id.trackId == kInvalidTrackId)
+        {
+            continue;
+        }
+        members.emplace_back(id.trackId, static_cast<InstrumentMidiClipId>(id.eventId));
+    }
+    bool containsActive = false;
+    for (const auto& member : members)
+    {
+        if (member.first == activeTrack && member.second == activeClip)
+        {
+            containsActive = true;
+            break;
+        }
+    }
+    if (!containsActive && activeClip != 0)
+    {
+        members.emplace_back(activeTrack, activeClip);
+    }
+    if (callbacks_.openMidiEditorForInstrumentClips != nullptr)
+    {
+        callbacks_.openMidiEditorForInstrumentClips(activeTrack, activeClip, members);
+        return;
+    }
+    openMidiEditorForInstrumentClip(activeTrack, activeClip);
 }
 
 std::optional<TrackId> InstrumentTimelineRowCoordinator::instrumentMidiLaneHitAtScreen(

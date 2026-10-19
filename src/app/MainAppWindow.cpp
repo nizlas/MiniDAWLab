@@ -1537,6 +1537,13 @@ public:
                         midiEditorPresenter_->openMidiEditorForInstrumentClip(timelineTid, clipId);
                     }
                 },
+                [this](TrackId activeTrack, InstrumentMidiClipId activeClip,
+                       const std::vector<std::pair<TrackId, InstrumentMidiClipId>>& members) {
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        midiEditorPresenter_->openMidiEditorForInstrumentClips(activeTrack, activeClip, members);
+                    }
+                },
                 [this](TrackId laneTid) {
                     if (instrumentMidiImportCoordinator_ != nullptr)
                     {
