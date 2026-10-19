@@ -5821,6 +5821,23 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
     rollViewportRepaintFlush_.requestFlush();
 }
 
+void ExperimentalPianoRollView::paintBarNoteLabel(juce::Graphics& g, const juce::Rectangle<float> noteRect,
+                                                     const int midiNote, const bool selected) const
+{
+    if (rowLabelMode_ != 1 || noteRect.getWidth() < 24.0f || noteRect.getHeight() < 11.0f)
+    {
+        return;
+    }
+    const juce::String label = juce::MidiMessage::getMidiNoteName(midiNote, true, true, 3);
+    const float fh = juce::jlimit(11.0f, 13.0f, noteRect.getHeight() - 2.0f);
+    g.setColour(selected ? juce::Colours::white.withAlpha(0.97f) : juce::Colours::white.withAlpha(0.94f));
+    g.setFont(juce::Font(juce::FontOptions().withHeight(fh)));
+    const auto textArea = noteRect.reduced(2.0f, 1.25f);
+    juce::Graphics::ScopedSaveState clipState(g);
+    g.reduceClipRegion(noteRect.toNearestInt());
+    g.drawText(label, textArea, juce::Justification::centred, true);
+}
+
 void ExperimentalPianoRollView::paint(juce::Graphics& g)
 {
     const auto kb = keyboardBounds();
@@ -6175,15 +6192,7 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                     g.setColour(edgeC);
                     g.drawRoundedRectangle(noteRect, 2.0f, 1.1f);
                 }
-                if (pianoRowMode && noteRect.getWidth() >= 24.0f && noteRect.getHeight() >= 11.0f)
-                {
-                    const juce::String label = juce::MidiMessage::getMidiNoteName(tn.midiNote, true, true, 3);
-                    const float fh = juce::jlimit(11.0f, 13.0f, noteRect.getHeight() - 2.0f);
-                    g.setColour(noteSelected ? juce::Colours::white.withAlpha(0.97f)
-                                             : juce::Colours::white.withAlpha(0.94f));
-                    g.setFont(juce::Font(juce::FontOptions().withHeight(fh)));
-                    g.drawText(label, noteRect.reduced(2.0f, 1.25f), juce::Justification::centred, true);
-                }
+                paintBarNoteLabel(g, noteRect, tn.midiNote, noteSelected);
             }
             else
             {

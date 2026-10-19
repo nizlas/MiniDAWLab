@@ -436,6 +436,10 @@ private:
                                    std::function<bool(bool extend)> apply);
     void paintActiveEventShade(juce::Graphics& g, juce::Rectangle<float> area) const;
     void paintOtherCohortNotes(juce::Graphics& g, juce::Rectangle<int> grid) const;
+    /// Bar label for every event. Same text, font, and size gate as the active event.
+    /// Clipped to the note so a rear event's name cannot cover a note painted later.
+    void paintBarNoteLabel(juce::Graphics& g, juce::Rectangle<float> noteRect, int midiNote,
+                           bool selected) const;
     [[nodiscard]] std::optional<juce::Rectangle<float>> cohortNoteBounds(const CohortMember& member,
                                                                         int noteIndex) const;
     [[nodiscard]] bool groupedCapturesOverlap(const std::vector<TimelineNoteMoveCapture>& captures,

@@ -30,6 +30,28 @@ struct MidiEditorProductionFlowAccess
     {
         return roll.getTimelineNoteVisualBounds(index);
     }
+
+    static std::optional<juce::Rectangle<float>> visualBounds(const ExperimentalPianoRollView& roll,
+                                                              const InstrumentMidiClip& clip, const int index)
+    {
+        if (roll.timelineClip_ == &clip)
+        {
+            return roll.getTimelineNoteVisualBounds(index);
+        }
+        for (const auto& member : roll.cohort_)
+        {
+            if (member.clip == &clip)
+            {
+                return roll.cohortNoteBounds(member, index);
+            }
+        }
+        return std::nullopt;
+    }
+
+    static bool activeClipIs(const ExperimentalPianoRollView& roll, const InstrumentMidiClip& clip)
+    {
+        return roll.timelineClip_ == &clip;
+    }
 };
 
 namespace
@@ -535,9 +557,10 @@ void writePng(const juce::Image& image, const juce::String& name)
 {
     // The snapshot is 24-bit RGB. JUCE's PNG writer does not reproduce those pixels,
     // so the file is written from Colour::getPixelAt, which the checks also use.
-    const juce::File file = previewDir().getChildFile(name);
+    const juce::File file = previewDir().getChildFile(name).withFileExtension("ppm");
+    file.deleteFile();
     file.getParentDirectory().createDirectory();
-    juce::FileOutputStream stream(file.withFileExtension("ppm"));
+    juce::FileOutputStream stream(file);
     const int w = image.getWidth();
     const int h = image.getHeight();
     stream.writeText("P6\n" + juce::String(w) + " " + juce::String(h) + "\n255\n", false, false, nullptr);
@@ -706,20 +729,43 @@ void testClipboard()
     }
     expect(selectedOnB == 1, "pasted note lands on B");
 
-    clickRoll(*roll, centreOf(world, *roll, *clipA, 60), juce::ModifierKeys::leftButtonModifier);
-    const auto gap = projectOf(*clipA, *findPitch(*clipA, 64)) - projectOf(*clipA, *findPitch(*clipA, 60));
-    clickRoll(*roll, centreOf(world, *roll, *clipA, 64),
+    clickRoll(*roll, pointFor(*roll, 8000, 50), juce::ModifierKeys::leftButtonModifier);
+    clickRoll(*roll, centreOf(world, *roll, *clipA, 64), juce::ModifierKeys::leftButtonModifier);
+    clickRoll(*roll, centreOf(world, *roll, *clipB, 72),
               juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::commandModifier);
+    clipA = world.ctlA.getClipById(aId);
+    clipB = world.ctlB.getClipById(bId);
+    const auto* sourceA = findPitch(*clipA, 64);
+    const auto* sourceB = findPitch(*clipB, 72);
+    expect(sourceA != nullptr && sourceB != nullptr && sourceA->editorSelected && sourceB->editorSelected,
+           "copy selection owns one note from A and one from B");
+    expect(clipA->startSamples != clipB->startSamples, "the two sources start at different times");
+    if (sourceA == nullptr || sourceB == nullptr)
+    {
+        return;
+    }
+    const auto uidA = sourceA->uid;
+    const auto uidB = sourceB->uid;
+    const auto tickA = sourceA->startTick;
+    const auto tickB = sourceB->startTick;
+    const auto gap = projectOf(*clipB, *sourceB) - projectOf(*clipA, *sourceA);
     const auto countA = (int)clipA->pattern.timelineNotes.size();
-    const auto countB = (int)world.ctlB.getClipById(bId)->pattern.timelineNotes.size();
+    const auto countB = (int)clipB->pattern.timelineNotes.size();
     roll->keyPressed(juce::KeyPress('c', juce::ModifierKeys::commandModifier, 'c'));
+    clickRoll(*roll, centreOf(world, *roll, *clipA, 64), juce::ModifierKeys::leftButtonModifier);
+    clipA = world.ctlA.getClipById(aId);
+    expect(MidiEditorProductionFlowAccess::activeClipIs(*roll, *clipA), "paste target is event A");
     world.window->notifyExternalTransportSeek(300000);
     armDialog("Keep event boundaries");
     roll->keyPressed(juce::KeyPress('v', juce::ModifierKeys::commandModifier, 'v'));
     pump(30);
     clipA = world.ctlA.getClipById(aId);
-    expect((int)clipA->pattern.timelineNotes.size() == countA + 2, "paste of both notes lands on the active event");
-    expect((int)world.ctlB.getClipById(bId)->pattern.timelineNotes.size() == countB, "the other source is unchanged");
+    clipB = world.ctlB.getClipById(bId);
+    expect((int)clipA->pattern.timelineNotes.size() == countA + 2, "both copies land on the target event");
+    expect((int)clipB->pattern.timelineNotes.size() == countB, "the other source is unchanged");
+    expect(findUid(*clipA, uidA) != nullptr && findUid(*clipA, uidA)->startTick == tickA
+               && findUid(*clipB, uidB) != nullptr && findUid(*clipB, uidB)->startTick == tickB,
+           "source notes keep their ticks");
     std::vector<std::int64_t> pasted;
     for (const auto& note : clipA->pattern.timelineNotes)
     {
@@ -977,9 +1023,22 @@ void testColourAndSnapshots()
     expect(borderLow == borderHigh, "selected border ignores velocity");
     expect(closeTo(borderLow, midi_editor_cohort::kSelectedNoteBorder, 28), "selected border is the fixed red");
 
-    const auto otherPoint = centreOf(world, *roll, *clipA, 60);
-    const auto other = pixelAt(later, (int)otherPoint.x, (int)otherPoint.y);
-    expect(closeTo(other, midi_editor_cohort::kOtherNoteFill, 12), "another event stays muted red on the light background");
+    const auto* otherNote = findPitch(*clipA, 60);
+    const auto otherBounds = otherNote != nullptr
+                                 ? MidiEditorProductionFlowAccess::visualBounds(
+                                       *roll, *clipA, (int)(otherNote - clipA->pattern.timelineNotes.data()))
+                                 : std::nullopt;
+    expect(otherBounds.has_value(), "the other event's note has production bounds");
+    if (otherBounds.has_value())
+    {
+        expect(closeTo(interiorFill(later, *otherBounds), midi_editor_cohort::kOtherNoteFill, 12),
+               "another event stays muted red on the light background");
+    }
+    const auto* heldNote = findPitch(*clipB, 72);
+    const int heldIndex = heldNote != nullptr ? (int)(heldNote - clipB->pattern.timelineNotes.data()) : -1;
+    const auto beforeSwitch = heldIndex >= 0
+                                  ? MidiEditorProductionFlowAccess::visualBounds(*roll, *clipB, heldIndex)
+                                  : std::nullopt;
 
     clickRoll(*roll, centreOf(world, *roll, *clipA, 60), juce::ModifierKeys::leftButtonModifier);
     roll = world.rollOrNull();
@@ -996,9 +1055,13 @@ void testColourAndSnapshots()
         expect(closeTo(interiorFill(earlier, *activeRect), midi_editor_cohort::kActiveNoteFill, 8),
                "the active event uses DAL red");
     }
-    const auto stillThere = pointFor(*roll, projectOf(*clipA, *findPitch(*clipA, 64)), 64);
-    expect(std::abs(stillThere.x - pointFor(*roll, projectOf(*clipA, *findPitch(*clipA, 64)), 64).x) < 1.0f,
-           "active switch does not move note x");
+    const auto afterSwitch = heldIndex >= 0
+                                 ? MidiEditorProductionFlowAccess::visualBounds(*roll, *clipB, heldIndex)
+                                 : std::nullopt;
+    expect(beforeSwitch.has_value() && afterSwitch.has_value()
+               && std::abs(beforeSwitch->getX() - afterSwitch->getX()) < 1.0f
+               && std::abs(beforeSwitch->getY() - afterSwitch->getY()) < 1.0f,
+           "active switch does not move the note");
 
     const auto inside = pointFor(*roll, 60000, 90);
     const auto outside = pointFor(*roll, 12000, 90);

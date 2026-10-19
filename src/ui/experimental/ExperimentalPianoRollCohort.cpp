@@ -570,8 +570,18 @@ std::optional<juce::Rectangle<float>> ExperimentalPianoRollView::cohortNoteBound
         {
             std::swap(xL, xR);
         }
-        auto rect = juce::Rectangle<float>(xL, (float)row->getY() + 2.0f, juce::jmax(4.0f, xR - xL),
+        xL = juce::jmax(xL, (float)grid.getX());
+        xR = juce::jmin(xR, (float)grid.getRight());
+        if (xR <= (float)grid.getX() || xL >= (float)grid.getRight())
+        {
+            return std::nullopt;
+        }
+        auto rect = juce::Rectangle<float>(xL, (float)row->getY() + (pianoRowMode ? 1.0f : 2.0f), xR - xL,
                                            (float)row->getHeight() - (pianoRowMode ? 2.0f : 4.0f));
+        if (rect.getWidth() < 3.0f)
+        {
+            rect = rect.withSizeKeepingCentre(4.0f, rect.getHeight());
+        }
         return rect;
     }
     const float halfW = pianoRowMode ? juce::jmax(4.0f, juce::jmin(6.8f, (float)kRowHeight * 0.48f))
@@ -668,6 +678,7 @@ void ExperimentalPianoRollView::paintOtherCohortNotes(juce::Graphics& g, const j
                 g.fillRoundedRectangle(rect, 2.0f);
                 g.setColour(border);
                 g.drawRoundedRectangle(rect, 2.0f, selected ? 2.2f : 1.0f);
+                paintBarNoteLabel(g, rect, note.midiNote, selected);
             }
             else
             {
