@@ -132,7 +132,7 @@ void renderFrame(const std::string& path, const bool laterEventActive)
         fillRect(px, kW, kH, g.x, y, g.x + 70, y + 16, fill);
         if (g.selected)
         {
-            const Rgba border = velocityRgb(g.velocity);
+            const Rgba border = noteGlyphColours(role).edge;
             fillRect(px, kW, kH, g.x, y, g.x + 70, y + 2, border);
             fillRect(px, kW, kH, g.x, y + 14, g.x + 70, y + 16, border);
         }
@@ -141,7 +141,7 @@ void renderFrame(const std::string& path, const bool laterEventActive)
 }
 } // namespace
 
-int main()
+int runMidiEditorCohortHelperChecks()
 {
     using namespace midi_editor_cohort;
 
@@ -199,13 +199,29 @@ int main()
     expect(roleForNote(false, false, true) == NotePaintRole::OtherValid, "other valid on any background");
     expect(roleForNote(false, true, false) == NotePaintRole::OutsideOwner, "outside own window");
     expect(roleForNote(true, false, false) == NotePaintRole::Selected, "selection wins");
-    const Rgba strong = noteFillRgb(NotePaintRole::ActiveValid, 127);
-    const Rgba muted = noteFillRgb(NotePaintRole::OtherValid, 127);
-    const Rgba grey = noteFillRgb(NotePaintRole::OutsideOwner, 127);
+    const Rgba strong = noteFillRgb(NotePaintRole::ActiveValid, 20);
+    const Rgba strongHard = noteFillRgb(NotePaintRole::ActiveValid, 127);
+    const Rgba muted = noteFillRgb(NotePaintRole::OtherValid, 20);
+    const Rgba mutedHard = noteFillRgb(NotePaintRole::OtherValid, 127);
+    const Rgba grey = noteFillRgb(NotePaintRole::OutsideOwner, 20);
+    const Rgba greyHard = noteFillRgb(NotePaintRole::OutsideOwner, 127);
+    expect(strong.r == strongHard.r && strong.g == strongHard.g && strong.b == strongHard.b,
+           "active fill ignores velocity");
+    expect(muted.r == mutedHard.r && muted.g == mutedHard.g && muted.b == mutedHard.b,
+           "other fill ignores velocity");
+    expect(grey.r == greyHard.r && grey.g == greyHard.g && grey.b == greyHard.b,
+           "outside fill ignores velocity");
+    expect(strong.r == kActiveNoteFill.r && strong.g == kActiveNoteFill.g && strong.b == kActiveNoteFill.b,
+           "active notes use DAL red");
     expect(strong.r > muted.r, "other events are a quieter red");
     expect(grey.r < 140 && grey.g > 80 && grey.b > 80, "outside notes are neutral grey");
-    const Rgba selected = noteFillRgb(NotePaintRole::Selected, 127);
-    expect(selected.r == 0x10 && selected.g == 0x10 && selected.b == 0x12, "selected fill stays black");
+    const NoteGlyphColours selectedLow = noteGlyphColours(NotePaintRole::Selected);
+    const NoteGlyphColours selectedHigh = noteGlyphColours(NotePaintRole::Selected);
+    expect(selectedLow.fill.r == 0x10 && selectedLow.fill.g == 0x10 && selectedLow.fill.b == 0x12,
+           "selected fill stays black");
+    expect(selectedLow.edge.r == kSelectedNoteBorder.r && selectedHigh.edge.r == kSelectedNoteBorder.r
+               && selectedLow.edge.g == selectedHigh.edge.g && selectedLow.edge.b == selectedHigh.edge.b,
+           "selected border is a fixed red");
 
     const NoteId a{ 1, 10, 5 };
     const NoteId b{ 1, 11, 5 };

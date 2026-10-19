@@ -6130,8 +6130,11 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             const std::int64_t vis0 = timelineClip_->startSamples;
             const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
             const bool startInsideOwner = a0 >= vis0 && a0 < vis1;
-            const float velA = juce::jlimit(0.28f, 1.0f, (float)tn.velocity / 127.0f);
             const bool noteSelected = isTimelineNoteIndexSelected(ti);
+            const midi_editor_cohort::NoteGlyphColours glyph = midi_editor_cohort::noteGlyphColours(
+                midi_editor_cohort::roleForNote(noteSelected, true, startInsideOwner));
+            const juce::Colour bodyC = juce::Colour::fromRGB(glyph.fill.r, glyph.fill.g, glyph.fill.b);
+            const juce::Colour edgeC = juce::Colour::fromRGB(glyph.edge.r, glyph.edge.g, glyph.edge.b);
 
             if (paintBars)
             {
@@ -6158,22 +6161,18 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 {
                     noteRect = noteRect.withSizeKeepingCentre(4.0f, noteRect.getHeight());
                 }
-                const juce::Colour velC = colourForMidiVelocity(tn.velocity);
-                const juce::Colour bodyC = startInsideOwner ? velC : juce::Colour(0xff6e6e76);
                 if (noteSelected)
                 {
-                    g.setColour(juce::Colour(0xff101012));
+                    g.setColour(bodyC);
                     g.fillRoundedRectangle(noteRect, 2.0f);
-                    g.setColour(velC.brighter(0.45f).withAlpha(0.97f));
-                    g.drawRoundedRectangle(noteRect, 2.0f, 2.35f);
-                    g.setColour(velC.darker(0.55f).withAlpha(0.88f));
-                    g.drawRoundedRectangle(noteRect, 2.0f, 1.05f);
+                    g.setColour(edgeC);
+                    g.drawRoundedRectangle(noteRect, 2.0f, 2.2f);
                 }
                 else
                 {
-                    g.setColour(bodyC.withAlpha(0.78f * velA));
+                    g.setColour(bodyC);
                     g.fillRoundedRectangle(noteRect, 2.0f);
-                    g.setColour(bodyC.darker(0.6f).withAlpha(0.9f));
+                    g.setColour(edgeC);
                     g.drawRoundedRectangle(noteRect, 2.0f, 1.1f);
                 }
                 if (pianoRowMode && noteRect.getWidth() >= 24.0f && noteRect.getHeight() >= 11.0f)
@@ -6197,22 +6196,18 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 const float cy = (float)rr.getCentreY();
                 juce::Path diamond;
                 diamond.addQuadrilateral(cx, cy - hitHalfH, cx + hitHalfW, cy, cx, cy + hitHalfH, cx - hitHalfW, cy);
-                const juce::Colour velC = colourForMidiVelocity(tn.velocity);
-                const juce::Colour bodyC = startInsideOwner ? velC : juce::Colour(0xff6e6e76);
                 if (noteSelected)
                 {
-                    g.setColour(juce::Colour(0xff101012));
+                    g.setColour(bodyC);
                     g.fillPath(diamond);
-                    g.setColour(velC.brighter(0.45f).withAlpha(0.97f));
+                    g.setColour(edgeC);
                     g.strokePath(diamond, juce::PathStrokeType(2.1f));
-                    g.setColour(velC.darker(0.55f).withAlpha(0.82f));
-                    g.strokePath(diamond, juce::PathStrokeType(1.2f));
                 }
                 else
                 {
-                    g.setColour(bodyC.darker(0.6f).withAlpha(0.85f + 0.15f * velA));
+                    g.setColour(edgeC);
                     g.strokePath(diamond, juce::PathStrokeType(1.15f));
-                    g.setColour(bodyC.withAlpha(0.65f + 0.35f * velA));
+                    g.setColour(bodyC);
                     g.fillPath(diamond);
                 }
             }

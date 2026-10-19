@@ -276,6 +276,7 @@ struct Rgba
     unsigned char a = 255;
 };
 
+/// Velocity-lane bars only. Note glyphs do not use this: a note's colour is its role.
 [[nodiscard]] inline Rgba velocityRgb(const int velocity) noexcept
 {
     int v = velocity;
@@ -312,6 +313,40 @@ struct Rgba
     return c;
 }
 
+/// DAL's note red from before the velocity blend (`0xffe05a7a` / edge `0xff8a2c46`).
+inline constexpr Rgba kActiveNoteFill{ 0xe0, 0x5a, 0x7a, 255 };
+inline constexpr Rgba kActiveNoteEdge{ 0x8a, 0x2c, 0x46, 255 };
+/// Fixed quieter red for another event's valid notes. Not a velocity mix.
+inline constexpr Rgba kOtherNoteFill{ 0x9a, 0x48, 0x5c, 255 };
+inline constexpr Rgba kOtherNoteEdge{ 0x5c, 0x2a, 0x36, 255 };
+inline constexpr Rgba kSelectedNoteFill{ 0x10, 0x10, 0x12, 255 };
+inline constexpr Rgba kSelectedNoteBorder{ 0xe0, 0x5a, 0x7a, 255 };
+inline constexpr Rgba kOutsideNoteFill{ 0x6e, 0x6e, 0x76, 255 };
+inline constexpr Rgba kOutsideNoteEdge{ 0x4a, 0x4a, 0x52, 255 };
+
+struct NoteGlyphColours
+{
+    Rgba fill{};
+    Rgba edge{};
+};
+
+/// Fill and border for one paint role. Velocity does not change either colour.
+[[nodiscard]] inline NoteGlyphColours noteGlyphColours(const NotePaintRole role) noexcept
+{
+    switch (role)
+    {
+        case NotePaintRole::Selected:
+            return NoteGlyphColours{ kSelectedNoteFill, kSelectedNoteBorder };
+        case NotePaintRole::OutsideOwner:
+            return NoteGlyphColours{ kOutsideNoteFill, kOutsideNoteEdge };
+        case NotePaintRole::OtherValid:
+            return NoteGlyphColours{ kOtherNoteFill, kOtherNoteEdge };
+        case NotePaintRole::ActiveValid:
+            break;
+    }
+    return NoteGlyphColours{ kActiveNoteFill, kActiveNoteEdge };
+}
+
 [[nodiscard]] inline Rgba mixRgb(const Rgba& a, const Rgba& b, const float u) noexcept
 {
     auto m = [u](const unsigned char x, const unsigned char y) {
@@ -322,20 +357,8 @@ struct Rgba
 
 [[nodiscard]] inline Rgba noteFillRgb(const NotePaintRole role, const int velocity) noexcept
 {
-    if (role == NotePaintRole::Selected)
-    {
-        return Rgba{ 0x10, 0x10, 0x12, 255 };
-    }
-    if (role == NotePaintRole::OutsideOwner)
-    {
-        return Rgba{ 0x6e, 0x6e, 0x76, 255 };
-    }
-    const Rgba strong = velocityRgb(velocity);
-    if (role == NotePaintRole::OtherValid)
-    {
-        return mixRgb(strong, Rgba{ 0x3a, 0x30, 0x32, 255 }, 0.42f);
-    }
-    return strong;
+    (void)velocity;
+    return noteGlyphColours(role).fill;
 }
 
 [[nodiscard]] inline NotePaintRole roleForNote(const bool selected,

@@ -512,22 +512,33 @@ public:
         return externalPattern_ != nullptr ? *externalPattern_ : pattern_;
     }
 
-    [[nodiscard]] ExperimentalInstrumentHost& auditionHost() const noexcept
+    /// Scratch mode (no clip) uses the window host on purpose. A bound event with no destination
+    /// returns null so audition stays silent instead of borrowing another event's instrument.
+    [[nodiscard]] ExperimentalInstrumentHost* boundAuditionHost() const noexcept
     {
-        return activeAuditionHost_ != nullptr ? *activeAuditionHost_ : host_;
+        if (externalPattern_ != nullptr)
+        {
+            return activeAuditionHost_;
+        }
+        return &host_;
     }
 
     [[nodiscard]] bool editorInstrumentGate() const noexcept
     {
+        ExperimentalInstrumentHost* const host = boundAuditionHost();
+        if (host == nullptr)
+        {
+            return false;
+        }
         if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr)
         {
             // Plugin state comes from the active event's destination host: for an Instrument row
             // that is the row's own host; for a `TrackKind::Midi` row it is the routed `MIDI To`
             // destination. Power/mute stay per-source, so muting a MIDI track also silences its audition.
             const auto* tr = instrumentTrackForClipBind_;
-            return auditionHost().hasInstrument() && tr->isPowerOn() && !tr->isMuted();
+            return host->hasInstrument() && tr->isPowerOn() && !tr->isMuted();
         }
-        return auditionHost().hasInstrument();
+        return host->hasInstrument();
     }
 
     /// Resolves what the status line describes (TrackId-backed, message thread only): the bound
@@ -536,8 +547,11 @@ public:
     [[nodiscard]] midi_editor_text::BoundTrackStatus resolveBoundTrackStatus() const
     {
         midi_editor_text::BoundTrackStatus s;
-        s.instrumentLoaded = auditionHost().hasInstrument();
-        s.instrumentName = auditionHost().getInstrumentNameForUi();
+        if (ExperimentalInstrumentHost* const host = boundAuditionHost())
+        {
+            s.instrumentLoaded = host->hasInstrument();
+            s.instrumentName = host->getInstrumentNameForUi();
+        }
         if (sessionForRoll_ == nullptr || instrumentTrackForClipBind_ == nullptr)
         {
             return s;
@@ -579,7 +593,9 @@ public:
     {
         const bool clipBound = externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr;
         const bool canPlayPattern = editorInstrumentGate();
-        const juce::String instrumentName = auditionHost().getInstrumentNameForUi();
+        ExperimentalInstrumentHost* const statusHost = boundAuditionHost();
+        const juce::String instrumentName = statusHost != nullptr ? statusHost->getInstrumentNameForUi()
+                                                                  : juce::String();
         const juce::String requiredKitForUi
             = clipBound && instrumentTrackForClipBind_ != nullptr
                   ? instrumentTrackForClipBind_->getRequiredKitName()
@@ -599,7 +615,7 @@ public:
         juce::String instPart;
         if (!clipBound)
         {
-            instPart = auditionHost().hasInstrument()
+            instPart = (statusHost != nullptr && statusHost->hasInstrument())
                            ? (instrumentName.isNotEmpty() ? (juce::String("Instrument: ") + instrumentName)
                                                           : juce::String("Instrument: (loaded)"))
                            : juce::String("No instrument loaded");
@@ -1225,6 +1241,11 @@ void ExperimentalMidiEditorWindow::Body::setOpenCohort(
     std::vector<ExperimentalMidiEditorWindow::CohortMemberBind> members)
 {
     cohortBinds_ = std::move(members);
+    if (auto* ending = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        // Note Off goes to the player that sent Note On, before a dropped destination is released.
+        ending->endActiveAuditionGestureOnMouseUp();
+    }
     std::vector<ExtraAuditionPlayer> keptPlayers;
     for (auto& extra : extraPlayers_)
     {
@@ -1309,7 +1330,12 @@ void ExperimentalMidiEditorWindow::Body::adoptActiveMember(const TrackId trackId
     boundTimelineClip_ = found->clip;
     externalPattern_ = &found->clip->pattern;
     persistentInstrumentClipIdForRebind_ = clipId;
-    activeAuditionHost_ = found->auditionHost != nullptr ? found->auditionHost : &host_;
+    if (auto* roll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        // Finish the previous destination before this event's player is installed.
+        roll->endActiveAuditionGestureOnMouseUp();
+    }
+    activeAuditionHost_ = found->auditionHost;
     if (auto* roll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
     {
         roll->setAuditionPlayer(playerForAuditionHost(activeAuditionHost_));

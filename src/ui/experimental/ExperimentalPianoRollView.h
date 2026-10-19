@@ -359,6 +359,7 @@ private:
     [[nodiscard]] juce::Rectangle<int> rulerTrackBounds() const;
     [[nodiscard]] juce::Rectangle<int> keyboardBounds() const;
     [[nodiscard]] juce::Rectangle<int> gridBounds() const;
+    friend struct MidiEditorProductionFlowAccess;
     [[nodiscard]] std::int64_t visibleEndSamples() const noexcept;
     [[nodiscard]] std::int64_t musicalSnapGridTicks() const noexcept;
     [[nodiscard]] std::int64_t referenceTimelineGridTicks() const noexcept;

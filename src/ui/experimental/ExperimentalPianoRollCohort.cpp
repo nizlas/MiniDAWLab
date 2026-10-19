@@ -56,10 +56,7 @@ namespace
 
 void ExperimentalPianoRollView::setAuditionPlayer(ExperimentalMidiPatternPlayer* player) noexcept
 {
-    if (player != nullptr)
-    {
-        player_ = player;
-    }
+    player_ = player;
 }
 
 void ExperimentalPianoRollView::copyTimelineClipboard(std::vector<TimelineClipboardNote>& out) const
@@ -278,10 +275,7 @@ void ExperimentalPianoRollView::reseatActiveMember(const CohortMember& member) n
     instrumentTrackController_ = member.controller;
     boundClipIdForSafety_ = member.clipId;
     boundTrackId_ = member.trackId;
-    if (member.auditionPlayer != nullptr)
-    {
-        player_ = member.auditionPlayer;
-    }
+    player_ = member.auditionPlayer;
     for (auto& other : cohort_)
     {
         other.active = other.clip == member.clip;
@@ -645,11 +639,10 @@ void ExperimentalPianoRollView::paintOtherCohortNotes(juce::Graphics& g, const j
             const std::int64_t a0 = absoluteSampleForTimelineNote(member.clip->timelineAnchorSamples, note, pattern, sr);
             const bool inside = midi_editor_cohort::noteStartInsideAudibleWindow(window, a0);
             const bool selected = noteIsSelected(member.trackId, member.clipId, i);
-            const midi_editor_cohort::Rgba rgb = midi_editor_cohort::noteFillRgb(
-                midi_editor_cohort::roleForNote(selected, false, inside), note.velocity);
-            const juce::Colour fill = juce::Colour::fromRGB(rgb.r, rgb.g, rgb.b);
-            const midi_editor_cohort::Rgba borderRgb = midi_editor_cohort::velocityRgb(note.velocity);
-            const juce::Colour border = juce::Colour::fromRGB(borderRgb.r, borderRgb.g, borderRgb.b);
+            const midi_editor_cohort::NoteGlyphColours glyph = midi_editor_cohort::noteGlyphColours(
+                midi_editor_cohort::roleForNote(selected, false, inside));
+            const juce::Colour fill = juce::Colour::fromRGB(glyph.fill.r, glyph.fill.g, glyph.fill.b);
+            const juce::Colour border = juce::Colour::fromRGB(glyph.edge.r, glyph.edge.g, glyph.edge.b);
             if (paintBars)
             {
                 const std::int64_t dur = ticksToSignedSamples(juce::jmax<std::int64_t>(1, note.durationTicks), bpm, tpq, sr);
@@ -671,9 +664,9 @@ void ExperimentalPianoRollView::paintOtherCohortNotes(juce::Graphics& g, const j
                 {
                     rect = rect.withSizeKeepingCentre(4.0f, rect.getHeight());
                 }
-                g.setColour(selected ? fill : fill.withAlpha(0.9f));
+                g.setColour(fill);
                 g.fillRoundedRectangle(rect, 2.0f);
-                g.setColour(selected ? border : fill.darker(0.4f));
+                g.setColour(border);
                 g.drawRoundedRectangle(rect, 2.0f, selected ? 2.2f : 1.0f);
             }
             else
@@ -688,7 +681,7 @@ void ExperimentalPianoRollView::paintOtherCohortNotes(juce::Graphics& g, const j
                 diamond.addQuadrilateral(cx, cy - hitHalfH, cx + hitHalfW, cy, cx, cy + hitHalfH, cx - hitHalfW, cy);
                 g.setColour(fill);
                 g.fillPath(diamond);
-                g.setColour(selected ? border : fill.darker(0.35f));
+                g.setColour(border);
                 g.strokePath(diamond, juce::PathStrokeType(selected ? 2.0f : 1.1f));
             }
         }

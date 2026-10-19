@@ -42,7 +42,8 @@ Examples:
   If MIDI editor bounds changed: open MIDI editor, resize, save/reload, verify. No mixdown or
   matrix required.
 - **MIDI note editing change:** Debug build; manual test in the MIDI editor; targeted MIDI
-  tests (`MidiEditorCohortFocusedTests` for the shared-editor rules). No mixdown/export tests
+  tests (`MidiEditorCohortFocusedTests`: helper rules plus a fixture that drives the real editor,
+  its mouse/key handlers, and `UndoRedoCoordinator`). No mixdown/export tests
   unless touched. Not the stability matrix.
 - **Mixdown change:** Debug build; `--stability-mixdown` wav (and mp3 if LAME is available);
   manual GUI check if the dialog changed. No delete-loop unless routing/audio callback changed.
@@ -99,7 +100,7 @@ Run **only** when preparing a tester/release build. See `docs/RELEASE_CERTIFICAT
 | Docs/scripts only | Level 0 build (or none if no code is compiled) | — |
 | Main window / UI bounds | Debug build + manual bounds save/reload | load-loop, 3 iterations |
 | MIDI editor UI only | Debug build + manual check in editor | — |
-| MIDI note model/editing | Debug build + manual note edit test. Shared-editor rules: `MidiEditorCohortFocusedTests` (selection modifiers, initial active event, z-order, audible window, left extend keeps the anchor, paint roles, project-time clipboard). Not the stability matrix. | MIDI-specific scenario if implemented; full matrix only if note model/persistence changed broadly |
+| MIDI note model/editing | Debug build + manual note edit test. Shared-editor rules: `MidiEditorCohortFocusedTests` (helper rules, plus the real editor's mouse/key handlers, undo, audition destinations, and component snapshots). Not the stability matrix. | MIDI-specific scenario if implemented; full matrix only if note model/persistence changed broadly |
 | Project save/load schema | Debug build + load-loop (2–3) + manual save/reload of a real project | autosave/recover; full matrix before commit batch |
 | Autosave/recovery | Debug build + `--stability-autosave` + `--stability-recover-autosave` | full matrix before release |
 | Mixdown/export | Debug build + `--stability-mixdown` wav/mp3 (asserts exact file set, temp cleanliness, controlled failure, playback health) + `MixdownPreGainFocusedTests` (LAME runner, progress window on screen) + manual dialog click | full matrix before release |
