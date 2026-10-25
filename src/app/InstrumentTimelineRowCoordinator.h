@@ -32,6 +32,12 @@ public:
         std::function<void(TrackId)> runExperimentalInstrumentPluginDescriptionRescanForTrack;
         std::function<void()> refreshMidiEditorInstrumentUiIfOpen;
         std::function<void(TrackId, InstrumentMidiClipId)> openMidiEditorForInstrumentClip;
+        /// Open every selected MIDI event together. Audio events in the arrangement selection are
+        /// omitted by the caller. Absent falls back to the single-clip callback.
+        std::function<void(TrackId activeTrack,
+                           InstrumentMidiClipId activeClip,
+                           const std::vector<std::pair<TrackId, InstrumentMidiClipId>>& members)>
+            openMidiEditorForInstrumentClips;
         std::function<void(TrackId)> runInstrumentMidiFileImportForTrack;
         /// P2: opens the "Instrument alternatives" popup for the track, anchored at the clicked
         /// header-strip cell (SCREEN coordinates).
@@ -148,6 +154,8 @@ public:
 
     void refreshMidiEditorInstrumentUiIfOpen();
     void openMidiEditorForInstrumentClip(TrackId timelineInstrumentTrackId, InstrumentMidiClipId clipId);
+    /// Double-click: the clicked event stays active and every selected MIDI event is a member.
+    void openMidiEditorForSelectedClips(TrackId activeTrack, InstrumentMidiClipId activeClip);
 
     /// Screen point in global pixels: instrument MIDI event lane row under the point, if any.
     [[nodiscard]] std::optional<TrackId> instrumentMidiLaneHitAtScreen(juce::Point<float> screenPt) const noexcept;

@@ -1153,6 +1153,8 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
             t.channel = (int)juce::jlimit(1, 16, (int)nn.channel);
             t.startTick = nn.startTick;
             t.durationTicks = nn.durationTicks;
+            t.uid = nn.uid;
+            t.editorSelected = nn.editorSelected;
             c.timelineNotes.push_back(std::move(t));
         }
         for (const auto& cp : cptr->pattern.ccPoints)
@@ -1321,6 +1323,8 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
             n.channel = (std::uint8_t)juce::jlimit(1, 16, tn.channel);
             n.startTick = tn.startTick;
             n.durationTicks = juce::jmax<std::int64_t>(1, tn.durationTicks);
+            n.uid = tn.uid;
+            n.editorSelected = tn.editorSelected;
             clip->pattern.timelineNotes.push_back(n);
         }
         copyAndNormalizeCcPointsFromDto(cdto, *clip);
@@ -1511,6 +1515,8 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
             n.channel = (std::uint8_t)juce::jlimit(1, 16, tn.channel);
             n.startTick = tn.startTick;
             n.durationTicks = juce::jmax<std::int64_t>(1, tn.durationTicks);
+            n.uid = tn.uid;
+            n.editorSelected = tn.editorSelected;
             clip->pattern.timelineNotes.push_back(n);
         }
         copyAndNormalizeCcPointsFromDto(cdto, *clip);

@@ -147,6 +147,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/experimental/ExperimentalMidiPatternPlayerHostBinding.cpp
     src/ui/experimental/ExperimentalMidiImport.cpp
     src/ui/experimental/ExperimentalPianoRollView.cpp
+    src/ui/experimental/ExperimentalPianoRollCohort.cpp
     src/ui/experimental/ExperimentalMidiEditorWindow.cpp
 )
 
@@ -591,6 +592,69 @@ add_dependencies(InsertPresetFocusedTests PresetProbe_VST3)
 if (MSVC)
     target_compile_options(InsertPresetFocusedTests PRIVATE /wd4458)
 endif()
+
+# Cohort rules for the shared MIDI editor (time, z-order, clipboard, extend). No audio device.
+# Shared MIDI editor: helper rules plus a console fixture that hosts the real editor window,
+# piano roll, and UndoRedoCoordinator. No audio device is opened.
+juce_add_console_app(MidiEditorCohortFocusedTests PRODUCT_NAME "MidiEditorCohortFocusedTests")
+target_sources(MidiEditorCohortFocusedTests PRIVATE
+    tests/selftest/MidiEditorCohortFocusedTestsMain.cpp
+    tests/selftest/MidiEditorProductionFlows.cpp
+    src/app/UndoRedoCoordinator.cpp
+    src/app/InstrumentMusicalUndoSnapshot.cpp
+    src/diagnostics/DrumNameDiagnosticFileLog.cpp
+    src/diagnostics/StabilityInvariants.cpp
+    src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/Track.cpp
+    src/instruments/InstrumentTrackController.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/InstrumentMidiClipExport.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/ExperimentalInstrumentHost.cpp
+    src/plugins/InstrumentCatalog.cpp
+    src/plugins/PluginDiscovery.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/Vst3ChildProcessScan.cpp
+    src/transport/Transport.cpp
+    src/ui/CollapsibleSideStrip.cpp
+    src/ui/ForbiddenCursor.cpp
+    src/ui/UiPlayheadClock.cpp
+    src/ui/TimelineLocatorPainter.cpp
+    src/ui/TimelineRulerView.cpp
+    src/ui/TimelineViewportModel.cpp
+    src/ui/experimental/ExperimentalMidiEditorWindow.cpp
+    src/ui/experimental/ExperimentalMidiImport.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayerHostBinding.cpp
+    src/ui/experimental/ExperimentalPianoRollCohort.cpp
+    src/ui/experimental/ExperimentalPianoRollView.cpp)
+target_include_directories(MidiEditorCohortFocusedTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(MidiEditorCohortFocusedTests PRIVATE
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(MidiEditorCohortFocusedTests PRIVATE
+    juce::juce_audio_utils
+    juce::juce_audio_processors
+    juce::juce_audio_formats
+    juce::juce_audio_devices
+    juce::juce_cryptography
+    juce::juce_gui_extra
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags)
+if (MSVC)
+    target_compile_options(MidiEditorCohortFocusedTests PRIVATE /wd4458)
+endif()
+juce_generate_juce_header(MidiEditorCohortFocusedTests)
 
 # -----------------------------------------------------------------------------
 # ExportLevelFocusedTests: export level / click diagnosis + level-meter regression. `--analyze <dir>`
