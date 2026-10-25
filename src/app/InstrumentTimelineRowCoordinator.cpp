@@ -630,11 +630,70 @@ private:
         dragEffectivePreviewDeltaSamples_ = 0;
         trimLaneGestureActive_ = false;
         trimLaneDragging_ = false;
+        if (arrangementGestureOwned_)
+        {
+            if (auto* stuck = dynamic_cast<TrackLanesView*>(getParentComponent()))
+            {
+                stuck->cancelArrangementGesture();
+            }
+            arrangementGestureOwned_ = false;
+            arrangementGestureClipId_ = 0;
+            arrangementGestureClipStart_ = 0;
+        }
         owner_.clearInstrumentMidiCrossTrackDropGhosts();
         restoreNormalCursorAfterInvalidMidiDrop();
 
         const bool midiMoveBlocked = owner_.trackLanes_.isInstrumentMidiClipMoveBlocked();
         const auto laneContent = getLaneContentBounds();
+
+        if (auto* lanesForTool = dynamic_cast<TrackLanesView*>(getParentComponent());
+            lanesForTool != nullptr && lanesForTool->activeEditTool() == EditTool::Split)
+        {
+            if (auto* clip = hitTestClipAtEvent(e.position))
+            {
+                std::int64_t splitT = snapTimelineSample(laneTimelineSampleAtLocalX(e.position.toInt()));
+                const std::int64_t windowStart = clip->startSamples;
+                const std::int64_t windowEnd = windowStart + clip->lengthSamples;
+                if (splitT <= windowStart)
+                {
+                    splitT = windowStart + 1;
+                }
+                if (splitT >= windowEnd)
+                {
+                    splitT = windowEnd - 1;
+                }
+                if (splitT > windowStart && splitT < windowEnd)
+                {
+                    const InstrumentMidiClipId id = clip->id;
+                    const TrackId laneTid = laneTimelineTrackId_;
+                    if (auto execute = owner_.callbacks_.executeUndoableInstrumentEdit)
+                    {
+                        execute(juce::String("Split MIDI clip"), [this, laneTid, id, splitT]() -> bool {
+                            InstrumentTrackController* ctl
+                                = owner_.instrumentRuntime_.getMidiClipControllerForTrack(laneTid);
+                            if (ctl == nullptr || !ctl->hasInstrumentTrack())
+                            {
+                                return false;
+                            }
+                            const bool ok = ctl->splitInstrumentMidiClip(id, splitT);
+                            if (ok)
+                            {
+                                owner_.trackLanes_.repaint();
+                                owner_.inspector_.refreshFromSession();
+                            }
+                            return ok;
+                        });
+                    }
+                    else
+                    {
+                        (void)ac->splitInstrumentMidiClip(id, splitT);
+                        owner_.trackLanes_.repaint();
+                        owner_.inspector_.refreshFromSession();
+                    }
+                }
+            }
+            return;
+        }
 
         if (!midiMoveBlocked && timelineMappingAvailableForClipDrag_() && !laneContent.isEmpty())
         {
@@ -769,6 +828,7 @@ private:
                         arrangementGestureOwned_ = true;
                         arrangementGestureClipId_ = clip->id;
                         arrangementGestureClipStart_ = clip->startSamples;
+                        dragMouseDownLocal_ = e.position.toInt();
                         dragMouseDownScreen_ = e.getScreenPosition().toFloat();
                         dragCouldMove_ = false;
                         grabKeyboardFocus();
@@ -847,10 +907,8 @@ private:
                 std::optional<std::int64_t> proposed;
                 if (arrangementGestureClipId_ != 0)
                 {
-                    const auto p0 = getLocalPoint(nullptr, dragMouseDownScreen_).toInt();
-                    const auto p1 = getLocalPoint(nullptr, e.getScreenPosition().toFloat()).toInt();
-                    const std::int64_t s0 = laneTimelineSampleAtLocalX(p0);
-                    const std::int64_t s1 = laneTimelineSampleAtLocalX(p1);
+                    const std::int64_t s0 = laneTimelineSampleAtLocalX(dragMouseDownLocal_);
+                    const std::int64_t s1 = laneTimelineSampleAtLocalX(e.position.toInt());
                     proposed = arrangementGestureClipStart_ + (s1 - s0);
                 }
                 const bool dropOk = lanes->updateArrangementGesture(
@@ -924,10 +982,8 @@ private:
             return;
         }
 
-        const auto p0 = getLocalPoint(nullptr, dragMouseDownScreen_).toInt();
-        const auto p1 = getLocalPoint(nullptr, e.getScreenPosition().toFloat()).toInt();
-        const std::int64_t s0 = laneTimelineSampleAtLocalX(p0);
-        const std::int64_t s1 = laneTimelineSampleAtLocalX(p1);
+        const std::int64_t s0 = laneTimelineSampleAtLocalX(dragMouseDownLocal_);
+        const std::int64_t s1 = laneTimelineSampleAtLocalX(e.position.toInt());
         const std::int64_t rawDelta = s1 - s0;
         std::int64_t effDelta = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(rawDelta);
         const std::int64_t minSelStart = earliestSelectedClipStartSamples(*ac);
@@ -952,8 +1008,12 @@ private:
 
         dragEffectivePreviewDeltaSamples_ = effDelta;
 
-        const std::optional<TrackId> hoverDest
+        std::optional<TrackId> hoverDest
             = owner_.instrumentMidiLaneHitAtScreen(e.getScreenPosition().toFloat());
+        if (!hoverDest.has_value() && getLocalBounds().contains(e.getPosition()))
+        {
+            hoverDest = laneTimelineTrackId_;
+        }
         std::vector<std::pair<std::int64_t, std::int64_t>> ghostSpans;
         if (hoverDest.has_value() && *hoverDest != laneTimelineTrackId_)
         {
@@ -979,6 +1039,11 @@ private:
             setInvalidMidiDropCursor();
         }
 
+        repaint();
+        if (auto* parent = getParentComponent())
+        {
+            parent->repaint(getBoundsInParent());
+        }
         owner_.repaintInstrumentTrackRow();
     }
 
@@ -1095,14 +1160,17 @@ private:
             trimLaneUndoBefore_.clear();
         }
 
-        if (ac != nullptr && !owner_.trackLanes_.isInstrumentMidiClipMoveBlocked() && dragCouldMove_
-            && (dragDragging_ || e.getDistanceFromDragStart() >= kClipDragThresholdPx))
+        const bool commitMove = ac != nullptr && !owner_.trackLanes_.isInstrumentMidiClipMoveBlocked()
+                                 && dragCouldMove_
+                                 && (dragDragging_ || e.getDistanceFromDragStart() >= kClipDragThresholdPx);
+        std::int64_t dCommit = 0;
+        std::optional<TrackId> dropLane;
+        std::vector<InstrumentMidiClipId> clipIdsOrdered;
+        if (commitMove)
         {
-            const auto p0 = getLocalPoint(nullptr, dragMouseDownScreen_).toInt();
-            const auto p1 = getLocalPoint(nullptr, e.getScreenPosition().toFloat()).toInt();
-            const std::int64_t s0 = laneTimelineSampleAtLocalX(p0);
-            const std::int64_t s1 = laneTimelineSampleAtLocalX(p1);
-            std::int64_t dCommit = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(s1 - s0);
+            const std::int64_t s0 = laneTimelineSampleAtLocalX(dragMouseDownLocal_);
+            const std::int64_t s1 = laneTimelineSampleAtLocalX(e.position.toInt());
+            dCommit = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(s1 - s0);
 
             const std::int64_t minSelStart = earliestSelectedClipStartSamples(*ac);
             if (minSelStart != std::numeric_limits<std::int64_t>::max())
@@ -1113,10 +1181,19 @@ private:
                 dCommit = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(dCommit);
             }
 
-            const std::optional<TrackId> dropLane
-                = owner_.instrumentMidiLaneHitAtScreen(e.getScreenPosition().toFloat());
+            dropLane = owner_.instrumentMidiLaneHitAtScreen(e.getScreenPosition().toFloat());
+            if (!dropLane.has_value() && getLocalBounds().contains(e.getPosition()))
+            {
+                dropLane = laneTimelineTrackId_;
+            }
+            clipIdsOrdered = ac->getSelectedClipIds();
+            // Drop the preview before the model moves. The change broadcast repaints synchronously,
+            // and a preview still applied on top of the new start would draw the event twice as far.
+            dragEffectivePreviewDeltaSamples_ = 0;
+        }
+        if (commitMove)
+        {
             const TrackId destTid = dropLane.value_or(laneTimelineTrackId_);
-            const std::vector<InstrumentMidiClipId> clipIdsOrdered = ac->getSelectedClipIds();
 
             if (destTid != laneTimelineTrackId_)
             {
@@ -1597,8 +1674,9 @@ private:
                 left = mid - minW * 0.5f;
                 right = mid + minW * 0.5f;
             }
-            left = juce::jlimit(band.getX(), band.getRight(), left);
-            right = juce::jlimit(band.getX(), band.getRight(), right);
+            // The frame uses the same session x as the note bars. The lane's graphics clip cuts both
+            // to the viewport; pinning the rect to the band made a partly off-screen event look
+            // stationary while its notes slid inside it.
             if (right <= band.getX() + 0.5f || left >= band.getRight() - 0.5f)
             {
                 return {};
@@ -1644,8 +1722,7 @@ private:
                 left = mid - minW * 0.5f;
                 right = mid + minW * 0.5f;
             }
-            left = juce::jlimit(band.getX(), band.getRight(), left);
-            right = juce::jlimit(band.getX(), band.getRight(), right);
+            // Same unclamped session rect as `getEventBoundsForSessionSpan` (ghosts included).
             if (right <= band.getX() + 0.5f || left >= band.getRight() - 0.5f)
             {
                 return {};
@@ -1948,6 +2025,7 @@ std::optional<TrackId> InstrumentTimelineRowCoordinator::instrumentMidiLaneHitAt
         return std::nullopt;
     }
     const juce::Point<int> p{ juce::roundToInt(screenPt.x), juce::roundToInt(screenPt.y) };
+    const juce::Point<int> inLanes = trackLanes_.getLocalPoint(nullptr, p);
     for (int ti = 0; ti < snap->getNumTracks(); ++ti)
     {
         const Track& tr = snap->getTrack(ti);
@@ -1963,7 +2041,7 @@ std::optional<TrackId> InstrumentTimelineRowCoordinator::instrumentMidiLaneHitAt
         {
             continue;
         }
-        if (it->second->getScreenBounds().contains(p))
+        if (it->second->getBounds().contains(inLanes) || it->second->getScreenBounds().contains(p))
         {
             return tid;
         }

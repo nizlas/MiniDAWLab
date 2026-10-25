@@ -657,6 +657,85 @@ endif()
 juce_generate_juce_header(MidiEditorCohortFocusedTests)
 
 # -----------------------------------------------------------------------------
+# ArrangementMidiEventFocusedTests: three arrangement-window MIDI event bugs.
+# Production MidiEventLane mouse handlers (paint during a drag, scissors through the undo
+# command, several finished drags of one event). No audio device and no stability matrix.
+# -----------------------------------------------------------------------------
+juce_add_console_app(ArrangementMidiEventFocusedTests PRODUCT_NAME "ArrangementMidiEventFocusedTests")
+target_sources(ArrangementMidiEventFocusedTests PRIVATE
+    tests/selftest/ArrangementMidiEventFocusedTestsMain.cpp
+    src/app/ArrangementEventSelectionCoordinator.cpp
+    src/app/InstrumentMusicalUndoSnapshot.cpp
+    src/app/InstrumentRuntimeCoordinator.cpp
+    src/app/InstrumentTimelineRowCoordinator.cpp
+    src/app/UndoRedoCoordinator.cpp
+    src/audio/LatencySettingsStore.cpp
+    src/diagnostics/DrumNameDiagnosticFileLog.cpp
+    src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
+    src/diagnostics/PlaybackUiLoadLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/StabilityInvariants.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/Track.cpp
+    src/engine/CountInClickOutput.cpp
+    src/engine/InstrumentRenderPool.cpp
+    src/engine/LiveMidiInputBus.cpp
+    src/engine/PlaybackEngine.cpp
+    src/engine/PlaybackMixHelpers.cpp
+    src/engine/ReadAheadRenderer.cpp
+    src/engine/RecorderService.cpp
+    src/engine/RoutingPlanBuilder.cpp
+    src/engine/SoloMuteView.cpp
+    src/instruments/InstrumentTrackController.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/AudioWaveformCache.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/ExperimentalInstrumentHost.cpp
+    src/plugins/InstrumentCatalog.cpp
+    src/plugins/PluginDiscovery.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/Vst3ChildProcessScan.cpp
+    src/transport/Transport.cpp
+    src/ui/ClipWaveformView.cpp
+    src/ui/ForbiddenCursor.cpp
+    src/ui/InspectorPanControl.cpp
+    src/ui/InspectorView.cpp
+    src/ui/TimelineLocatorPainter.cpp
+    src/ui/UiPlayheadClock.cpp
+    src/ui/TimelineRulerView.cpp
+    src/ui/TimelineViewportModel.cpp
+    src/ui/TrackHeaderView.cpp
+    src/ui/TrackLanesView.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp)
+target_include_directories(ArrangementMidiEventFocusedTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(ArrangementMidiEventFocusedTests PRIVATE
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1
+    JUCE_USE_MP3AUDIOFORMAT=1)
+target_link_libraries(ArrangementMidiEventFocusedTests PRIVATE
+    juce::juce_audio_utils
+    juce::juce_audio_processors
+    juce::juce_audio_formats
+    juce::juce_audio_devices
+    juce::juce_cryptography
+    juce::juce_gui_extra
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags)
+if (MSVC)
+    target_compile_options(ArrangementMidiEventFocusedTests PRIVATE /wd4458)
+endif()
+juce_generate_juce_header(ArrangementMidiEventFocusedTests)
+
+# -----------------------------------------------------------------------------
 # ExportLevelFocusedTests: export level / click diagnosis + level-meter regression. `--analyze <dir>`
 # measures the WAV/MP3 files written by `MiniDAWLab.exe --stability-export-levels` (JUCE WAV reader
 # + JUCE MP3 decoder to float, 4x oversampled peak estimate, edge transients, MP3-vs-WAV alignment).

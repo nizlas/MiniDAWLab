@@ -332,6 +332,9 @@ public:
 
     void setActiveEditToolProvider(std::function<EditTool()> fn) noexcept;
 
+    /// The arrangement tool the MIDI event lanes and audio lanes share. Pointer when unset.
+    [[nodiscard]] EditTool activeEditTool() const noexcept;
+
     void setOnUndoableClipSplitRequested(
         std::function<void(PlacedClipId, std::int64_t, bool)> fn) noexcept;
 

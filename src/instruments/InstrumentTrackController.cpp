@@ -2455,6 +2455,44 @@ bool InstrumentTrackController::applyInstrumentMidiClipVisibleTrim(const Instrum
     return true;
 }
 
+bool InstrumentTrackController::splitInstrumentMidiClip(const InstrumentMidiClipId id,
+                                                        const std::int64_t splitSamples) noexcept
+{
+    if (!trackActive_)
+    {
+        return false;
+    }
+    InstrumentMidiClip* const src = getClipById(id);
+    if (src == nullptr || src->lengthSamples < 2)
+    {
+        return false;
+    }
+    const std::int64_t start = src->startSamples;
+    const std::int64_t end = start + src->lengthSamples;
+    if (splitSamples <= start || splitSamples >= end)
+    {
+        return false;
+    }
+
+    InstrumentMidiClip right = *src;
+    right.startSamples = splitSamples;
+    right.lengthSamples = end - splitSamples;
+    const std::int64_t oldLength = src->lengthSamples;
+    src->lengthSamples = splitSamples - start;
+    const std::vector<InstrumentMidiClipId> created = appendDeepCopiedInstrumentMidiClips(
+        { right }, { { right.startSamples, right.timelineAnchorSamples } });
+    if (created.size() != 1)
+    {
+        if (InstrumentMidiClip* const restored = getClipById(id))
+        {
+            restored->lengthSamples = oldLength;
+        }
+        return false;
+    }
+    replaceInstrumentMidiClipSelectionOrdered({ id, created.front() });
+    return true;
+}
+
 bool InstrumentTrackController::renameInstrumentMidiClip(const InstrumentMidiClipId id,
                                                          juce::String newName) noexcept
 {

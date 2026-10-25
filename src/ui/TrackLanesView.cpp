@@ -1238,6 +1238,11 @@ void TrackLanesView::setActiveEditToolProvider(std::function<EditTool()> fn) noe
     activeEditToolProvider_ = std::move(fn);
 }
 
+EditTool TrackLanesView::activeEditTool() const noexcept
+{
+    return activeEditToolProvider_ != nullptr ? activeEditToolProvider_() : EditTool::Pointer;
+}
+
 void TrackLanesView::setOnUndoableClipSplitRequested(
     std::function<void(PlacedClipId, std::int64_t, bool)> fn) noexcept
 {

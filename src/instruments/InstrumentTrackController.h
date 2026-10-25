@@ -681,6 +681,15 @@ public:
                                                            std::int64_t newVisibleStartSamples,
                                                            std::int64_t newVisibleLengthSamples) noexcept;
 
+    /// Split one timeline clip at `splitSamples`, which must lie strictly inside the visible window.
+    /// The left clip keeps its id, start and `timelineAnchorSamples`; the right clip is a deep copy
+    /// with the same anchor and pattern (notes, CC, pitch bend) and a window that begins at the split.
+    /// Playback is unchanged: a note sounds only when its note-on lies in the window, and is truncated
+    /// at that window's end. A note that crosses the split therefore keeps sounding only on the left.
+    /// CC and pitch bend stay in both copies and each window chases them with the existing audible-span
+    /// rule. Same controller, so the track's instrument and MIDI channel are untouched.
+    [[nodiscard]] bool splitInstrumentMidiClip(InstrumentMidiClipId id, std::int64_t splitSamples) noexcept;
+
     /// Effective delta after clamping the current selection so every clip stays at or past sample 0.
     [[nodiscard]] std::int64_t clampInstrumentMidiClipMoveDeltaForCurrentSelection(
         std::int64_t deltaSamples) const noexcept;
