@@ -652,6 +652,27 @@ void testSnappedNoteEdits()
     setSnap(false, SnapResolution::Straight_1_4);
     expect(seekAt(96000 + 30000) % 24000 != 0, "snap off: the editor ruler is free");
 
+    // Paste keeps the copied length: a note shorter than the grid can still be placed in an empty area.
+    setSnap(true, SnapResolution::Straight_1_1);
+    const auto copiedDuration = findPitch(*clip, 60)->durationTicks;
+    clickRoll(*roll, centreOf(world, *roll, *clip, 60), juce::ModifierKeys::leftButtonModifier);
+    roll->keyPressed(juce::KeyPress('c', juce::ModifierKeys::commandModifier, 'c'));
+    expect(seekAt(480000) == 480000, "paste target is on a bar");
+    roll->keyPressed(juce::KeyPress('v', juce::ModifierKeys::commandModifier, 'v'));
+    pump(30);
+    clip = world.ctlA.getClipById(id);
+    const bool pasted = std::any_of(clip->pattern.timelineNotes.begin(), clip->pattern.timelineNotes.end(),
+                                    [&](const TimelineMidiNote& n) {
+                                        return n.midiNote == 60 && n.startTick == 5 * kBarTicks
+                                               && n.durationTicks == copiedDuration;
+                                    });
+    expect(pasted, "1/1: a note shorter than the grid pastes at current time with its own length");
+    const size_t afterPaste = clip->pattern.timelineNotes.size();
+    roll->keyPressed(juce::KeyPress('v', juce::ModifierKeys::commandModifier, 'v'));
+    pump(30);
+    clip = world.ctlA.getClipById(id);
+    expect(clip->pattern.timelineNotes.size() == afterPaste, "a real overlap still refuses the paste");
+
     // Drawing: with snap on the note fills the grid cell under the pointer.
     setSnap(true, SnapResolution::Straight_1_1);
     const auto draw = pointFor(*roll, 300000, 72);

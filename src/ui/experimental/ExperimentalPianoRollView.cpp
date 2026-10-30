@@ -3228,7 +3228,9 @@ bool ExperimentalPianoRollView::handleTimelineNotesPasteShortcut()
         return true;
     }
 
-    if (currentEditCandidatesOverlap({}, toAdd, nullptr))
+    // Paste keeps each copied length, so the snap-sized minimum for new or resized notes does not
+    // apply: at 1/1 it would refuse every note shorter than a bar, even in an empty area.
+    if (!validateTimelineNotesNoOverlap(pattern_->timelineNotes, {}, toAdd, 1).valid)
     {
         flashForbiddenNoDropCursor();
         return true;
