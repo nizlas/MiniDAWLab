@@ -575,6 +575,75 @@ void writePng(const juce::Image& image, const juce::String& name)
     }
 }
 
+// 4/4, 120 BPM, 48 kHz, 960 ticks per quarter: a bar is 3840 ticks.
+void testSnappedNoteEdits()
+{
+    constexpr std::int64_t kBarTicks = 3840;
+    World world;
+    const auto setSnap = [&world](const bool enabled, const SnapResolution resolution) {
+        SnapSettings snap;
+        snap.enabled = enabled;
+        snap.resolution = resolution;
+        world.session.setArrangementSnapSettings(snap);
+    };
+    setSnap(true, SnapResolution::Straight_1_1);
+    const auto id = world.addClip(world.ctlA, 0, 960000, 0,
+                                  { makeNote(7680, 60, 80), makeNote(8260, 64, 70) }, "A");
+    world.addMember(world.idA, id, &world.ctlA, &world.hostA);
+    world.show(world.ctlA, id);
+    auto* roll = world.rollOrNull();
+    auto* clip = world.ctlA.getClipById(id);
+    expect(roll != nullptr && clip != nullptr, "snap fixture laid out");
+    if (roll == nullptr || clip == nullptr)
+    {
+        return;
+    }
+    publishLayout(*roll);
+    const double spp = roll->getViewportSamplesPerPixel();
+    const auto dragPitch = [&](const int pitch, const double samples) {
+        const auto from = centreOf(world, *roll, *clip, pitch);
+        dragRoll(*roll, from, from.translated((float)(samples / spp), 0.0f), nullptr);
+        clip = world.ctlA.getClipById(id);
+        return findPitch(*clip, pitch)->startTick;
+    };
+
+    expect(dragPitch(60, 20000.0) == 7680, "1/1: a short drag stays on its bar");
+    expect(dragPitch(60, 60000.0) == 7680 + kBarTicks, "1/1: a note shorter than the grid lands on the next bar");
+    expect(dragPitch(60, -60000.0) == 7680, "1/1: and moves back");
+    expect(findPitch(*clip, 60)->durationTicks == 960, "a move keeps the note length");
+
+    // Multi-select: the grabbed note lands on the grid, the other keeps its distance.
+    const std::int64_t gap = findPitch(*clip, 64)->startTick - findPitch(*clip, 60)->startTick;
+    clickRoll(*roll, centreOf(world, *roll, *clip, 60), juce::ModifierKeys::leftButtonModifier);
+    clickRoll(*roll, centreOf(world, *roll, *clip, 64),
+              juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::commandModifier);
+    expect(dragPitch(60, 60000.0) == 7680 + kBarTicks, "multi-select: the grabbed note lands on the bar");
+    expect(findPitch(*clip, 64)->startTick - findPitch(*clip, 60)->startTick == gap,
+           "multi-select: the notes keep their distance");
+    clickRoll(*roll, pointFor(*roll, 500000, 40), juce::ModifierKeys::leftButtonModifier);
+
+    // Off-grid note: its new start lands on the absolute grid, it does not keep its offset.
+    expect(dragPitch(64, 60000.0) % kBarTicks == 0, "an off-grid note lands on the absolute grid");
+
+    setSnap(true, SnapResolution::Straight_1_4);
+    expect(dragPitch(60, 30000.0) == 7680 + kBarTicks + 960, "1/4: the note lands on a quarter");
+    setSnap(false, SnapResolution::Straight_1_4);
+    const auto free = dragPitch(60, 30000.0);
+    expect(free != 7680 + kBarTicks + 960 && free % 960 != 0, "snap off: the note moves freely");
+
+    // Drawing: with snap on the note fills the grid cell under the pointer.
+    setSnap(true, SnapResolution::Straight_1_1);
+    const auto draw = pointFor(*roll, 300000, 72);
+    roll->mouseDown(mouseEvent(*roll, draw, draw, juce::ModifierKeys::leftButtonModifier, false));
+    roll->mouseUp(mouseEvent(*roll, draw, draw, juce::ModifierKeys(), false));
+    roll->mouseDoubleClick(mouseEvent(*roll, draw, draw, juce::ModifierKeys::leftButtonModifier, false));
+    pump(30);
+    clip = world.ctlA.getClipById(id);
+    const auto* drawn = findPitch(*clip, 72);
+    expect(drawn != nullptr && drawn->startTick == 3 * kBarTicks && drawn->durationTicks == kBarTicks,
+           "1/1: a drawn note starts on the bar and fills it");
+}
+
 void testSharedEdits()
 {
     World world;
@@ -1082,6 +1151,7 @@ void testColourAndSnapshots()
 
 int runMidiEditorProductionFlows()
 {
+    testSnappedNoteEdits();
     testSharedEdits();
     testClipboard();
     testExtend();

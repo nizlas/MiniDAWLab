@@ -443,7 +443,8 @@ private:
     [[nodiscard]] std::optional<juce::Rectangle<float>> cohortNoteBounds(const CohortMember& member,
                                                                         int noteIndex) const;
     [[nodiscard]] bool groupedCapturesOverlap(const std::vector<TimelineNoteMoveCapture>& captures,
-                                              const std::vector<TimelineMidiNote>& candidates) const noexcept;
+                                              const std::vector<TimelineMidiNote>& candidates,
+                                              std::int64_t minDurationTicks) const noexcept;
     [[nodiscard]] bool capturedSpansNeedExtend(
         const std::vector<std::pair<InstrumentMidiClip*, midi_editor_cohort::ProjectSpan>>& spans) const noexcept;
     void extendClipsToCover(

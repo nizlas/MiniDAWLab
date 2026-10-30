@@ -2013,6 +2013,8 @@ void ExperimentalMidiEditorWindow::Body::syncArrangementSnapUiFromSession()
     arrangementSnapToggle_.setEnabled(true);
     arrangementSnapResolutionCombo_.setEnabled(true);
     arrangementSnapToggle_.setToggleState(s.enabled, juce::dontSendNotification);
+    // Still editable while off, but dimmed so a shown resolution does not read as active snap.
+    arrangementSnapResolutionCombo_.setAlpha(s.enabled ? 1.0f : 0.5f);
     arrangementSnapResolutionCombo_.setSelectedId(snapResolutionToComboItemId(s.resolution),
                                                  juce::dontSendNotification);
     arrangementSnapUiApplyingFromSession_ = false;
@@ -2027,6 +2029,7 @@ void ExperimentalMidiEditorWindow::Body::handleArrangementSnapControlsChangedByU
     SnapSettings s;
     s.enabled = arrangementSnapToggle_.getToggleState();
     s.resolution = snapResolutionFromComboItemId(arrangementSnapResolutionCombo_.getSelectedId());
+    arrangementSnapResolutionCombo_.setAlpha(s.enabled ? 1.0f : 0.5f);
     sessionForRoll_->setArrangementSnapSettings(s);
     if (arrangementSnapToolbarSyncHandler_)
     {

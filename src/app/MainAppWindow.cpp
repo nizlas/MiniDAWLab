@@ -9178,6 +9178,8 @@ void mini_daw_app_transport::TransportControlsContent::applyArrangementSnapUiFro
 {
     arrangementSnapUiApplyingFromProject_ = true;
     arrangementSnapToggle_.setToggleState(s.enabled, juce::dontSendNotification);
+    // Still editable while off, but dimmed so a shown resolution does not read as active snap.
+    arrangementSnapResolutionCombo_.setAlpha(s.enabled ? 1.0f : 0.5f);
     arrangementSnapResolutionCombo_.setSelectedId(snapResolutionToComboItemId(s.resolution),
                                                  juce::dontSendNotification);
     arrangementSnapUiApplyingFromProject_ = false;
@@ -9203,6 +9205,7 @@ void mini_daw_app_transport::TransportControlsContent::handleArrangementSnapUiCh
     arrangementSnapSettings_.enabled = arrangementSnapToggle_.getToggleState();
     arrangementSnapSettings_.resolution
         = snapResolutionFromComboItemId(arrangementSnapResolutionCombo_.getSelectedId());
+    arrangementSnapResolutionCombo_.setAlpha(arrangementSnapSettings_.enabled ? 1.0f : 0.5f);
     session.setArrangementSnapSettings(arrangementSnapSettings_);
     if (midiEditorPresenter_ != nullptr)
     {

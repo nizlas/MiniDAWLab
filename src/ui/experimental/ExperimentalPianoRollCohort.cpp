@@ -486,7 +486,8 @@ void ExperimentalPianoRollView::extendClipsToCover(
 }
 
 bool ExperimentalPianoRollView::groupedCapturesOverlap(const std::vector<TimelineNoteMoveCapture>& captures,
-                                                        const std::vector<TimelineMidiNote>& candidates) const noexcept
+                                                        const std::vector<TimelineMidiNote>& candidates,
+                                                        const std::int64_t minDurationTicks) const noexcept
 {
     struct Group
     {
@@ -524,7 +525,7 @@ bool ExperimentalPianoRollView::groupedCapturesOverlap(const std::vector<Timelin
     for (const auto& group : groups)
     {
         if (!validateTimelineNotesNoOverlap(group.pattern->timelineNotes, group.ignore, group.next,
-                                            minTimelineNoteDurationTicks(), &group.original)
+                                            minDurationTicks, &group.original)
                  .valid)
         {
             return true;

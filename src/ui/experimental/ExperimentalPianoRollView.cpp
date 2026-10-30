@@ -3531,7 +3531,8 @@ void ExperimentalPianoRollView::updateTimelineNoteResizeGesture(const juce::Poin
         ownerPattern->timelineNotes[(size_t)cap.index] = next;
     }
 
-    timelineResizeInvalid_ = groupedCapturesOverlap(timelineResizeCaptures_, candidates);
+    timelineResizeInvalid_
+        = groupedCapturesOverlap(timelineResizeCaptures_, candidates, minTimelineNoteDurationTicks());
     juce::ignoreUnused(ignore, originals);
 }
 
@@ -3789,7 +3790,9 @@ void ExperimentalPianoRollView::updateTimelineNoteMoveGesture(const juce::Point<
         candidates.push_back(n);
     }
 
-    timelineMoveInvalid_ = groupedCapturesOverlap(timelineMoveCaptures_, candidates);
+    // A move keeps every duration, so the snap-sized minimum for new or resized notes does not apply:
+    // at 1/1 it would reject every note shorter than a bar and the note would jump back on release.
+    timelineMoveInvalid_ = groupedCapturesOverlap(timelineMoveCaptures_, candidates, 1);
     juce::ignoreUnused(ignore, originals);
 }
 

@@ -11,6 +11,8 @@
 #include "app/UndoRedoCoordinator.h"
 #include "audio/LatencySettingsStore.h"
 #include "diagnostics/StabilityScenarioRunner.h"
+#include "domain/ArrangementMusicalSnap.h"
+#include "domain/AudioClip.h"
 #include "domain/Session.h"
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
@@ -131,8 +133,7 @@ struct Harness
             = [this](const juce::String& label, std::function<bool()> mutator) {
                   undo->executeUndoableInstrumentEdit(label, std::move(mutator));
               };
-        rowCallbacks.snapArrangementTimelineSample
-            = [](const std::int64_t s) { return juce::jmax(std::int64_t { 0 }, s); };
+        rowCallbacks.snapArrangementTimelineSample = [this](const std::int64_t s) { return snapped(s); };
         rowCallbacks.clearAudioAndOtherInstrumentSelectionsForMidiTrack = [this](const TrackId keep) {
             lanes->clearAllPlacedClipSelections();
             runtime->forEachInstrumentController([&](const TrackId tid, InstrumentTrackController& ctl) {
@@ -153,6 +154,7 @@ struct Harness
         rowsReady = true;
         lanes->setArrangementInteractionPeers(rows.get(), runtime.get());
         lanes->setActiveEditToolProvider([] { return EditTool::Pointer; });
+        lanes->setArrangementTimelineSnapFunction([this](const std::int64_t s) { return snapped(s); });
 
         trackA = session.appendExperimentalInstrumentShellTrack("Drums").value_or(kInvalidTrackId);
         trackB = session.appendExperimentalInstrumentShellTrack("Keys").value_or(kInvalidTrackId);
@@ -182,6 +184,13 @@ struct Harness
         lanes.reset();
         rows.reset();
         runtime.reset();
+    }
+
+    // Same call as the transport's arrangement snap, at the fixture's fixed rate (no audio device).
+    [[nodiscard]] std::int64_t snapped(const std::int64_t s) const noexcept
+    {
+        return snapSampleToGridIfEnabled(s, session.getArrangementSnapSettings(), session.getProjectMusicalTime(),
+                                         48000.0);
     }
 
     [[nodiscard]] InstrumentTrackController* controller(const TrackId tid) const
@@ -706,6 +715,171 @@ void testRepeatedDrags(Harness& h, juce::Component& laneA, juce::Component& lane
     expect(startOf(ctlA) > 100000, "the left drag stays far from the project start");
 }
 
+[[nodiscard]] float xOf(const Harness& h, const std::int64_t sample)
+{
+    return TimelineRulerView::sessionSampleToLocalX(sample, 0.f, h.viewport.getVisibleStartSamples(),
+                                                    h.viewport.getSamplesPerPixel());
+}
+
+void setSnap(Harness& h, const bool enabled, const SnapResolution resolution)
+{
+    SnapSettings snap;
+    snap.enabled = enabled;
+    snap.resolution = resolution;
+    h.session.setArrangementSnapSettings(snap);
+}
+
+// 4/4, 120 BPM, 48 kHz: a bar is 96000 samples, a quarter 24000.
+void testSnappedDrags(Harness& h, juce::Component& lane, InstrumentTrackController& ctl)
+{
+    constexpr std::int64_t kBar = 96000;
+    constexpr std::int64_t kQuarter = 24000;
+    const auto startOf = [&ctl] { return ctl.getClips().front()->startSamples; };
+    const auto dragBy = [&](const std::int64_t start, const std::int64_t samples) {
+        TimelineMidiNote note;
+        note.midiNote = 60;
+        note.channel = 1;
+        note.durationTicks = 200;
+        h.putClip(ctl, start, 100000, { note }, {});
+        h.showSample(start - 250 * (std::int64_t)h.viewport.getSamplesPerPixel());
+        const juce::Point<float> body { xOf(h, start + 40000), lane.getHeight() * 0.55f };
+        Gesture drag(lane, body);
+        drag.finish(body + juce::Point<float>((float)((double)samples / h.viewport.getSamplesPerPixel()), 0.f));
+        return startOf();
+    };
+
+    setSnap(h, true, SnapResolution::Straight_1_1);
+    expect(dragBy(20 * kBar, 30000) == 20 * kBar, "1/1: a short MIDI drag stays on its bar");
+    expect(dragBy(20 * kBar, 60000) == 21 * kBar, "1/1: a MIDI drag past the midpoint lands on the next bar");
+    setSnap(h, true, SnapResolution::Straight_1_4);
+    expect(dragBy(20 * kBar, 30000) == 20 * kBar + kQuarter, "1/4: a MIDI drag lands on a quarter");
+    setSnap(h, false, SnapResolution::Straight_1_1);
+    const std::int64_t free = dragBy(20 * kBar, 30000);
+    expect(free != 20 * kBar && free % kQuarter != 0, "snap off: a MIDI drag is free");
+
+    // The same musical result at another zoom and after a horizontal scroll.
+    setSnap(h, true, SnapResolution::Straight_1_1);
+    h.viewport.zoomAroundSample(0.5, 600.0, (double)h.lanes->getWidth(), Harness::kExtent, 10.0, 2000.0);
+    expect(dragBy(30 * kBar, 60000) == 31 * kBar, "1/1 holds after zoom and scroll");
+    h.viewport.zoomAroundSample(2.0, 600.0, (double)h.lanes->getWidth(), Harness::kExtent, 10.0, 2000.0);
+
+    // Off-grid object: its new start lands on the absolute grid, it does not keep its offset.
+    setSnap(h, true, SnapResolution::Straight_1_1);
+    expect(dragBy(20 * kBar + 7000, 60000) == 21 * kBar, "an off-grid MIDI event lands on the absolute grid");
+    setSnap(h, false, SnapResolution::Straight_1_1);
+}
+
+void testSnappedAudioDrags(Harness& h)
+{
+    constexpr std::int64_t kBar = 96000;
+    constexpr std::int64_t kQuarter = 24000;
+    h.session.addTrack();
+    TrackId audioTrack = kInvalidTrackId;
+    const auto first = h.session.loadSessionSnapshotForAudioThread();
+    for (int i = 0; i < first->getNumTracks(); ++i)
+    {
+        if (trackKindAcceptsTimelineAudioClips(first->getTrack(i).getKind()))
+        {
+            audioTrack = first->getTrack(i).getId();
+        }
+    }
+    juce::AudioBuffer<float> silence(2, 480000);
+    silence.clear();
+    const auto material = std::make_shared<const AudioClip>(std::move(silence), 48000.0, juce::String("snap-audio"));
+    expect(h.session.addPlacedClipFromExistingMaterial(material, 20 * kBar, 0, 100000, audioTrack).wasOk(),
+           "an audio event is placed");
+    h.lanes->syncTracksFromSession();
+    h.lanes->resized();
+    h.runtime->forEachInstrumentController(
+        [](TrackId, InstrumentTrackController& ctl) { ctl.clearClipSelection(); });
+
+    ClipWaveformView* lane = nullptr;
+    for (int i = 0; i < h.lanes->getNumChildComponents(); ++i)
+    {
+        if (auto* view = dynamic_cast<ClipWaveformView*>(h.lanes->getChildComponent(i));
+            view != nullptr && view->getTrackId() == audioTrack)
+        {
+            lane = view;
+        }
+    }
+    expect(lane != nullptr && lane->getWidth() > 0, "the audio lane is laid out");
+    if (lane == nullptr)
+    {
+        return;
+    }
+    const auto startOf = [&] {
+        const auto snap = h.session.loadSessionSnapshotForAudioThread();
+        return snap->getTrack(snap->findTrackIndexById(audioTrack)).getPlacedClip(0).getStartSample();
+    };
+    const auto dragBy = [&](const std::int64_t samples) {
+        const std::int64_t start = startOf();
+        h.showSample(start - 250 * (std::int64_t)h.viewport.getSamplesPerPixel());
+        const juce::Point<float> body { xOf(h, start + 40000), lane->getHeight() * 0.8f };
+        Gesture drag(*lane, body);
+        drag.finish(body + juce::Point<float>((float)((double)samples / h.viewport.getSamplesPerPixel()), 0.f));
+        return startOf();
+    };
+
+    setSnap(h, true, SnapResolution::Straight_1_1);
+    expect(dragBy(30000) == 20 * kBar, "1/1: a short audio drag stays on its bar");
+    expect(dragBy(60000) == 21 * kBar, "1/1: an audio drag past the midpoint lands on the next bar");
+    setSnap(h, true, SnapResolution::Straight_1_4);
+    expect(dragBy(30000) == 21 * kBar + kQuarter, "1/4: an audio drag lands on a quarter");
+    setSnap(h, false, SnapResolution::Straight_1_1);
+    const std::int64_t before = startOf();
+    const std::int64_t free = dragBy(30000);
+    expect(free != before && free % kQuarter != 0, "snap off: an audio drag is free");
+
+    // Multi-select: the grabbed event lands on the grid, the other one keeps its distance.
+    expect(h.session.addPlacedClipFromExistingMaterial(material, startOf() - 3 * kBar + 1234, 0, 100000, audioTrack).wasOk(),
+           "a second, off-grid audio event is placed");
+    h.lanes->syncTracksFromSession();
+    const auto placed = [&] {
+        const auto snap = h.session.loadSessionSnapshotForAudioThread();
+        const Track& track = snap->getTrack(snap->findTrackIndexById(audioTrack));
+        std::vector<std::pair<PlacedClipId, std::int64_t>> out;
+        for (int i = 0; i < track.getNumPlacedClips(); ++i)
+        {
+            out.emplace_back(track.getPlacedClip(i).getId(), track.getPlacedClip(i).getStartSample());
+        }
+        std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+        return out;
+    };
+    h.lanes->setOnArrangementGroupMoveRequested(
+        [&](const ArrangementGroupMovePlan& plan, const std::vector<ArrangementEventOrigin>& origins) {
+            std::vector<Session::AudioClipGroupRelocation> moves;
+            for (size_t i = 0; i < origins.size() && i < plan.dests.size(); ++i)
+            {
+                Session::AudioClipGroupRelocation move;
+                move.id = origins[i].id.eventId;
+                move.newStartSampleOnTimeline = plan.dests[i].destStartSamples;
+                move.destTrackId = plan.dests[i].destTrackId;
+                moves.push_back(move);
+            }
+            const bool moved = h.session.tryMoveAudioClipsTogether(moves);
+            h.lanes->syncTracksFromSession();
+            return moved;
+        });
+    auto events = placed();
+    const std::int64_t grabbedStart = events[1].second;
+    const std::int64_t gap = events[1].second - events[0].second;
+    h.lanes->setArrangementEventSelection({ ArrangementEventId { ArrangementEventKind::AudioClip, audioTrack, events[0].first },
+                                            ArrangementEventId { ArrangementEventKind::AudioClip, audioTrack, events[1].first } });
+    setSnap(h, true, SnapResolution::Straight_1_1);
+    h.showSample(grabbedStart - 500 * (std::int64_t)h.viewport.getSamplesPerPixel());
+    const juce::Point<float> grab { xOf(h, grabbedStart + 40000), lane->getHeight() * 0.8f };
+    {
+        Gesture drag(*lane, grab);
+        drag.finish(grab + juce::Point<float>((float)(60000.0 / h.viewport.getSamplesPerPixel()), 0.f));
+    }
+    events = placed();
+    expect(events[1].second % kBar == 0 && events[1].second > grabbedStart,
+           "multi-select: the grabbed event lands on the absolute grid");
+    expect(events[1].second - events[0].second == gap, "multi-select: the events keep their distance");
+    expect(events[0].second % kBar != 0, "multi-select: the other event is not snapped on its own");
+    setSnap(h, false, SnapResolution::Straight_1_1);
+}
+
 } // namespace
 
 bool isStabilityTestModeActive() noexcept
@@ -729,6 +903,8 @@ int main()
     testScissors(harness, *lanes[0], *harness.controller(harness.trackA));
     testRepeatedDrags(harness, *lanes[0], *lanes[1], *harness.controller(harness.trackA),
                       *harness.controller(harness.trackB));
+    testSnappedDrags(harness, *lanes[0], *harness.controller(harness.trackA));
+    testSnappedAudioDrags(harness);
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
