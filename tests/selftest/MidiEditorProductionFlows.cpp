@@ -26,6 +26,8 @@ struct MidiEditorProductionFlowAccess
 {
     static juce::Rectangle<int> grid(const ExperimentalPianoRollView& roll) { return roll.gridBounds(); }
     static juce::Rectangle<int> keyboard(const ExperimentalPianoRollView& roll) { return roll.keyboardBounds(); }
+    static juce::Rectangle<int> ruler(const ExperimentalPianoRollView& roll) { return roll.rulerTrackBounds(); }
+    static double displayedPlayhead(const ExperimentalPianoRollView& roll) { return roll.uiPlayheadDisplaySamples_; }
     static std::optional<juce::Rectangle<float>> noteBounds(const ExperimentalPianoRollView& roll, const int index)
     {
         return roll.getTimelineNoteVisualBounds(index);
@@ -630,6 +632,25 @@ void testSnappedNoteEdits()
     setSnap(false, SnapResolution::Straight_1_4);
     const auto free = dragPitch(60, 30000.0);
     expect(free != 7680 + kBarTicks + 960 && free % 960 != 0, "snap off: the note moves freely");
+
+    // Current time set in the editor's ruler follows the same snap.
+    world.session.setArrangementExtentSamples(960000);
+    const auto seekAt = [&](const std::int64_t sample) {
+        const auto track = MidiEditorProductionFlowAccess::ruler(*roll);
+        const juce::Point<float> p { (float)track.getX()
+                                         + (float)(((double)sample - (double)roll->getViewportVisibleStartSamples()) / spp),
+                                     (float)track.getBottom() - 2.0f };
+        roll->mouseDown(mouseEvent(*roll, p, p, juce::ModifierKeys::leftButtonModifier, false));
+        roll->mouseUp(mouseEvent(*roll, p, p, juce::ModifierKeys(), false));
+        return (std::int64_t)std::llround(MidiEditorProductionFlowAccess::displayedPlayhead(*roll));
+    };
+    setSnap(true, SnapResolution::Straight_1_1);
+    expect(seekAt(96000 + 30000) == 96000, "1/1: the editor ruler sets current time on the nearest bar");
+    expect(seekAt(96000 + 60000) == 192000, "1/1: and on to the next bar");
+    setSnap(true, SnapResolution::Straight_1_4);
+    expect(seekAt(96000 + 30000) == 120000, "1/4: the editor ruler sets current time on a quarter");
+    setSnap(false, SnapResolution::Straight_1_4);
+    expect(seekAt(96000 + 30000) % 24000 != 0, "snap off: the editor ruler is free");
 
     // Drawing: with snap on the note fills the grid cell under the pointer.
     setSnap(true, SnapResolution::Straight_1_1);

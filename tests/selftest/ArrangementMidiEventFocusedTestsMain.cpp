@@ -28,6 +28,7 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackHeaderView.h"
 #include "ui/TrackLanesView.h"
+#include "ui/UiPlayheadClock.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -769,6 +770,37 @@ void testSnappedDrags(Harness& h, juce::Component& lane, InstrumentTrackControll
     setSnap(h, false, SnapResolution::Straight_1_1);
 }
 
+// Current time set in the ruler. The clock holds the requested sample until the audio thread commits it.
+void testSnappedRulerSeek(Harness& h)
+{
+    constexpr std::int64_t kBar = 96000;
+    constexpr std::int64_t kQuarter = 24000;
+    UiPlayheadClock clock;
+    TimelineRulerView ruler(h.session, h.transport, h.deviceManager, h.viewport, clock);
+    ruler.setSize(1200, 40);
+    const juce::MouseInputSource src { juce::Desktop::getInstance().getMainMouseSource() };
+    const auto now = juce::Time::getCurrentTime();
+    const auto seekAt = [&](const std::int64_t sample) {
+        const juce::Point<float> p { xOf(h, sample), 30.f };
+        ruler.mouseDown(juce::MouseEvent(src, p, juce::ModifierKeys::leftButtonModifier, 0.f, 0.f, 0.f, 0.f, 0.f,
+                                         &ruler, &ruler, now, p, now, 1, false));
+        ruler.mouseUp(juce::MouseEvent(src, p, juce::ModifierKeys(), 0.f, 0.f, 0.f, 0.f, 0.f, &ruler, &ruler, now, p,
+                                       now, 1, false));
+        return (std::int64_t)std::llround(clock.readDisplaySamples(h.transport.readPlayheadSamplesForUi(), false,
+                                                                   48000.0));
+    };
+
+    h.showSample(19 * kBar);
+    setSnap(h, true, SnapResolution::Straight_1_1);
+    expect(seekAt(20 * kBar + 30000) == 20 * kBar, "1/1: current time goes back to the nearest bar");
+    expect(seekAt(20 * kBar + 60000) == 21 * kBar, "1/1: current time goes on to the nearest bar");
+    setSnap(h, true, SnapResolution::Straight_1_4);
+    expect(seekAt(20 * kBar + 30000) == 20 * kBar + kQuarter, "1/4: current time lands on a quarter");
+    setSnap(h, false, SnapResolution::Straight_1_1);
+    const std::int64_t free = seekAt(20 * kBar + 30000);
+    expect(free % kQuarter != 0 && std::abs(free - (20 * kBar + 30000)) < 400, "snap off: current time is free");
+}
+
 void testSnappedAudioDrags(Harness& h)
 {
     constexpr std::int64_t kBar = 96000;
@@ -904,6 +936,7 @@ int main()
     testRepeatedDrags(harness, *lanes[0], *lanes[1], *harness.controller(harness.trackA),
                       *harness.controller(harness.trackB));
     testSnappedDrags(harness, *lanes[0], *harness.controller(harness.trackA));
+    testSnappedRulerSeek(harness);
     testSnappedAudioDrags(harness);
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

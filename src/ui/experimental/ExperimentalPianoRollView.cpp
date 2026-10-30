@@ -4910,8 +4910,16 @@ void ExperimentalPianoRollView::applyRulerSeekAtXInTrack(const float xInTrack, c
     {
         return;
     }
-    const std::int64_t s =
+    std::int64_t s =
         TimelineRulerView::xToSessionSampleClamped(xInTrack, trackWidth, visibleStartSamples_, samplesPerPixel_);
+    // Current time obeys the shared arrangement snap state, exactly like the main-timeline ruler.
+    if (deviceManager_ != nullptr)
+    {
+        s = snapSampleToGridIfEnabled(s,
+                                      session_->getArrangementSnapSettings(),
+                                      session_->getProjectMusicalTime(),
+                                      effectiveDeviceSampleRate(deviceManager_));
+    }
     const std::int64_t seekTarget = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
     transport_->requestSeek(seekTarget);
     syncUiPlayheadAfterRulerSeek(seekTarget);

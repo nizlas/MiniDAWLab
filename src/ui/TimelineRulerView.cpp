@@ -205,8 +205,13 @@ void TimelineRulerView::applySeekForLocalX(const float x) noexcept
         return;
     }
     const std::int64_t s = xToSessionSampleClamped(x, w, visStart, spp);
+    // Current time obeys the same arrangement snap state as the locators (free when snap is off).
+    const std::int64_t snapped = snapSampleToGridIfEnabled(s,
+                                                           session_.getArrangementSnapSettings(),
+                                                           session_.getProjectMusicalTime(),
+                                                           effectiveDisplaySampleRate(deviceManager_));
     const std::int64_t seekTarget
-        = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+        = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), snapped);
     transport_.requestSeek(seekTarget);
     // The audio thread commits the seek a block later; anchoring the shared clock keeps every
     // current-time indicator on the requested sample in the meantime. The `PlayheadOverlay`

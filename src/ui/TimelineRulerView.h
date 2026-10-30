@@ -7,7 +7,8 @@
 // ROLE IN THE ARCHITECTURE
 //   User points on the **session** timeline (same sample space as
 //   `Session::getArrangementExtentSamples` / `Transport`) without clicking the event lane.
-//   **Seek** uses `Transport::requestSeek` on press and drag on the **lower** half; **Ctrl** sets
+//   **Seek** uses `Transport::requestSeek` on press and drag on the **lower** half, on the grid
+//   when arrangement snap is on; **Ctrl** sets
 //   the **left** locator, **Alt** sets the **right**. The **upper** half (no modifier) toggles
 //   **cycle** visualization (transient on `Transport`) when not blocked during record/count-in.
 //   The event lane (`ClipWaveformView`) stays focused on
