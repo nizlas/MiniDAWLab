@@ -2455,6 +2455,61 @@ bool InstrumentTrackController::applyInstrumentMidiClipVisibleTrim(const Instrum
     return true;
 }
 
+namespace
+{
+    /// Divide one automation list at a scissors cut. Each stream keeps one neighbour across the cut
+    /// when no point sits exactly on it: the left half needs the end of a ramp that crosses the cut,
+    /// the right half needs the value to chase at its start. `points` must be sorted by time.
+    template <typename Point, typename StreamKey, typename SampleOf>
+    void divideAutomationAtCut(const std::vector<Point>& points,
+                               std::vector<Point>& leftPoints,
+                               std::vector<Point>& rightPoints,
+                               const StreamKey& streamKey,
+                               const SampleOf& sampleOf,
+                               const std::int64_t cutSample)
+    {
+        std::map<int, std::size_t> lastBeforeCut;
+        std::map<int, std::size_t> firstAfterCut;
+        std::map<int, bool> pointOnCut;
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            const std::int64_t sample = sampleOf(points[i]);
+            const int key = streamKey(points[i]);
+            if (sample < cutSample)
+            {
+                lastBeforeCut[key] = i;
+            }
+            else if (sample == cutSample)
+            {
+                pointOnCut[key] = true;
+            }
+            else
+            {
+                firstAfterCut.try_emplace(key, i);
+            }
+        }
+        const auto isNeighbour = [&](const std::map<int, std::size_t>& neighbours, const std::size_t i, const int key) {
+            const auto it = neighbours.find(key);
+            return it != neighbours.end() && it->second == i && pointOnCut.count(key) == 0;
+        };
+        leftPoints.clear();
+        rightPoints.clear();
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            const std::int64_t sample = sampleOf(points[i]);
+            const int key = streamKey(points[i]);
+            if (sample <= cutSample || isNeighbour(firstAfterCut, i, key))
+            {
+                leftPoints.push_back(points[i]);
+            }
+            if (sample >= cutSample || isNeighbour(lastBeforeCut, i, key))
+            {
+                rightPoints.push_back(points[i]);
+            }
+        }
+    }
+}
+
 bool InstrumentTrackController::splitInstrumentMidiClip(const InstrumentMidiClipId id,
                                                         const std::int64_t splitSamples) noexcept
 {
@@ -2474,9 +2529,55 @@ bool InstrumentTrackController::splitInstrumentMidiClip(const InstrumentMidiClip
         return false;
     }
 
+    double sr = timelineSampleRate_;
+    if (sr <= 0.0 || !std::isfinite(sr))
+    {
+        sr = 48000.0;
+    }
+    const double bpm = src->pattern.bpm > 0.0 ? src->pattern.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(src->pattern);
+    const std::int64_t anchor = src->timelineAnchorSamples;
+
     InstrumentMidiClip right = *src;
     right.startSamples = splitSamples;
     right.lengthSamples = end - splitSamples;
+    const ExperimentalMidiPattern whole = src->pattern;
+
+    // Notes go to the half their note-on sounds in. A note across the cut ends there, so dragging
+    // the left half back out cannot bring back anything that was cut away.
+    src->pattern.timelineNotes.clear();
+    right.pattern.timelineNotes.clear();
+    for (TimelineMidiNote note : whole.timelineNotes)
+    {
+        const std::int64_t on = absoluteSampleForTimelineNote(anchor, note, whole, sr);
+        if (on >= splitSamples)
+        {
+            right.pattern.timelineNotes.push_back(note);
+            continue;
+        }
+        const std::int64_t toCut = splitSamples - on;
+        if (ticksToRelativeSamples(note.durationTicks, bpm, tpq, sr) > toCut)
+        {
+            auto ticks = juce::jmax<std::int64_t>(1, (std::int64_t)((double)toCut / sr * (bpm / 60.0) * (double)tpq));
+            while (ticks < note.durationTicks && ticksToRelativeSamples(ticks, bpm, tpq, sr) < toCut)
+            {
+                ++ticks;
+            }
+            note.durationTicks = juce::jmin(ticks, note.durationTicks);
+        }
+        src->pattern.timelineNotes.push_back(note);
+    }
+    divideAutomationAtCut(
+        whole.ccPoints, src->pattern.ccPoints, right.pattern.ccPoints,
+        [](const MidiCcPoint& p) { return (int)p.controller * 17 + (int)p.channel; },
+        [&](const MidiCcPoint& p) { return anchor + ticksToRelativeSamples(p.startTick, bpm, tpq, sr); },
+        splitSamples);
+    divideAutomationAtCut(
+        whole.pitchBendPoints, src->pattern.pitchBendPoints, right.pattern.pitchBendPoints,
+        [](const MidiPitchBendPoint& p) { return (int)p.channel; },
+        [&](const MidiPitchBendPoint& p) { return anchor + ticksToRelativeSamples(p.startTick, bpm, tpq, sr); },
+        splitSamples);
+
     const std::int64_t oldLength = src->lengthSamples;
     src->lengthSamples = splitSamples - start;
     const std::vector<InstrumentMidiClipId> created = appendDeepCopiedInstrumentMidiClips(
@@ -2486,6 +2587,7 @@ bool InstrumentTrackController::splitInstrumentMidiClip(const InstrumentMidiClip
         if (InstrumentMidiClip* const restored = getClipById(id))
         {
             restored->lengthSamples = oldLength;
+            restored->pattern = whole;
         }
         return false;
     }

@@ -34,6 +34,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -572,17 +573,16 @@ void testScissors(Harness& h, juce::Component& lane, InstrumentTrackController& 
     expect(left->timelineAnchorSamples == start && right->timelineAnchorSamples == start,
            "both halves keep the original timeline anchor");
     expect(splitAt > start && splitAt < start + length, "split is strictly inside the window");
-    expect(left->pattern.timelineNotes.size() == 2 && right->pattern.timelineNotes.size() == 2,
-           "notes are copied, not rewritten");
-    expect(left->pattern.ccPoints.size() == 3 && right->pattern.ccPoints.size() == 3, "CC points are copied");
-    bool sameTicks = true;
-    for (size_t i = 0; i < left->pattern.timelineNotes.size(); ++i)
-    {
-        sameTicks = sameTicks && left->pattern.timelineNotes[i].startTick == right->pattern.timelineNotes[i].startTick
-                    && left->pattern.timelineNotes[i].durationTicks == right->pattern.timelineNotes[i].durationTicks
-                    && left->pattern.timelineNotes[i].channel == 2;
-    }
-    expect(sameTicks, "copied notes keep tick positions and channel");
+    expect(left->pattern.timelineNotes.size() == 1 && left->pattern.timelineNotes.front().midiNote == 42
+               && left->pattern.timelineNotes.front().channel == 2,
+           "the left half holds the note that starts before the cut");
+    expect(right->pattern.timelineNotes.size() == 1 && right->pattern.timelineNotes.front().midiNote == 48
+               && right->pattern.timelineNotes.front().startTick == 6000
+               && right->pattern.timelineNotes.front().durationTicks == 400
+               && right->pattern.timelineNotes.front().channel == 2,
+           "the right half holds the note that starts after the cut, unchanged");
+    expect(left->pattern.ccPoints.size() == 3 && right->pattern.ccPoints.size() == 3,
+           "both halves keep the CC points each side needs across the cut");
 
     const auto snap = ctl.loadRenderSnapshotForAudioThread();
     expect(snap != nullptr, "split publishes a render snapshot");
@@ -648,6 +648,112 @@ void testScissors(Harness& h, juce::Component& lane, InstrumentTrackController& 
     expect(ctl.getClips().size() == 2, "redo splits again");
     h.undo->invokeUndoFromWindowShortcut();
     h.lanes->setActiveEditToolProvider([] { return EditTool::Pointer; });
+}
+
+void setSnap(Harness& h, bool enabled, SnapResolution resolution);
+
+// The reported sequence: cut, delete the right half, drag the left half back out over the gap.
+void testScissorsRemovesCutContent(Harness& h, juce::Component& lane, InstrumentTrackController& ctl)
+{
+    const std::int64_t start = 2000000;
+    const std::int64_t length = 200000;
+    TimelineMidiNote crossing;
+    crossing.midiNote = 42;
+    crossing.startTick = 0;
+    crossing.durationTicks = 8000;
+    TimelineMidiNote after;
+    after.midiNote = 48;
+    after.startTick = 6000;
+    after.durationTicks = 400;
+    const auto ccAt = [](const std::int64_t tick, const int controller, const int value) {
+        MidiCcPoint p;
+        p.startTick = tick;
+        p.controller = (std::uint8_t)controller;
+        p.value = (std::uint8_t)value;
+        return p;
+    };
+    // The ramp from tick 1000 to 7000 crosses the cut at tick 4000.
+    const std::vector<MidiCcPoint> cc { ccAt(500, 11, 5), ccAt(1000, 11, 10), ccAt(7000, 11, 90), ccAt(7500, 11, 40) };
+    const InstrumentMidiClipId original = h.putClip(ctl, start, length, { crossing, after }, cc);
+    const ExperimentalMidiPattern fullPattern = ctl.getClipById(original)->pattern;
+    setSnap(h, false, SnapResolution::Straight_1_1);
+    h.showSample(start - 20000);
+    h.lanes->setActiveEditToolProvider([] { return EditTool::Split; });
+    const float midX = TimelineRulerView::sessionSampleToLocalX(start + length / 2, 0.f,
+                                                                 h.viewport.getVisibleStartSamples(), Harness::kSpp);
+    const juce::Point<float> click { midX, lane.getHeight() * 0.55f };
+    const auto now = juce::Time::getCurrentTime();
+    const auto src = juce::Desktop::getInstance().getMainMouseSource();
+    lane.mouseDown(juce::MouseEvent(src, click, juce::ModifierKeys::leftButtonModifier, 0.f, 0.f, 0.f, 0.f, 0.f,
+                                     &lane, &lane, now, click, now, 1, false));
+    h.lanes->setActiveEditToolProvider([] { return EditTool::Pointer; });
+
+    InstrumentMidiClipId rightId = 0;
+    for (const auto& c : ctl.getClips())
+    {
+        rightId = c != nullptr && c->id != original ? c->id : rightId;
+    }
+    InstrumentMidiClip* const left = ctl.getClipById(original);
+    InstrumentMidiClip* const right = ctl.getClipById(rightId);
+    expect(left != nullptr && right != nullptr, "cut fixture has two halves");
+    if (left == nullptr || right == nullptr)
+    {
+        return;
+    }
+    const std::int64_t splitAt = right->startSamples;
+
+    // What the halves play must equal what the same windows played when both held the full pattern.
+    const auto playback = [&ctl] {
+        std::vector<std::array<std::int64_t, 3>> out;
+        const auto snap = ctl.loadRenderSnapshotForAudioThread();
+        for (const auto& n : snap->notes)
+        {
+            out.push_back({ n.absSample, n.noteOffAbsSample, (std::int64_t)n.midiNote });
+        }
+        for (const auto& stream : snap->ccStreams)
+        {
+            for (const auto& e : stream.events)
+            {
+                out.push_back({ e.absSample, (std::int64_t)e.value, (std::int64_t)stream.controller + 1000 });
+            }
+        }
+        return out;
+    };
+    const auto cutPlayback = playback();
+    const ExperimentalMidiPattern leftCut = left->pattern;
+    const ExperimentalMidiPattern rightCut = right->pattern;
+    left->pattern = fullPattern;
+    right->pattern = fullPattern;
+    ctl.notifyClipPatternMutated(original);
+    ctl.notifyClipPatternMutated(rightId);
+    expect(playback() == cutPlayback, "cutting away hidden content does not change playback");
+    left->pattern = leftCut;
+    right->pattern = rightCut;
+    ctl.notifyClipPatternMutated(original);
+    ctl.notifyClipPatternMutated(rightId);
+
+    expect(ctl.removeInstrumentMidiClipsByIds({ rightId }), "the right half is deleted");
+    expect(ctl.applyInstrumentMidiClipVisibleTrim(original, start, length), "the left half is dragged back out");
+
+    expect(left->pattern.timelineNotes.size() == 1 && left->pattern.timelineNotes.front().midiNote == 42,
+           "the deleted notes do not come back");
+    const auto ticks = left->pattern.timelineNotes.empty() ? 0 : left->pattern.timelineNotes.front().durationTicks;
+    expect(ticks > 0 && ticks < crossing.durationTicks, "a note across the cut ends at the cut");
+    bool cutNoteHeard = false;
+    bool noteEndsAtCut = false;
+    for (const auto& n : ctl.loadRenderSnapshotForAudioThread()->notes)
+    {
+        cutNoteHeard = cutNoteHeard || n.midiNote == 48;
+        noteEndsAtCut = noteEndsAtCut || (n.midiNote == 42 && std::abs(n.noteOffAbsSample - splitAt) <= 25);
+    }
+    expect(!cutNoteHeard, "the deleted notes are not played");
+    expect(noteEndsAtCut, "the kept note still stops at the cut");
+    bool cutCcKept = false;
+    for (const auto& p : left->pattern.ccPoints)
+    {
+        cutCcKept = cutCcKept || p.startTick == 7500;
+    }
+    expect(!cutCcKept, "CC past the cut does not come back");
 }
 
 void testRepeatedDrags(Harness& h, juce::Component& laneA, juce::Component& laneB, InstrumentTrackController& ctlA,
@@ -933,6 +1039,7 @@ int main()
     }
     testClippedDragPaintsFrameWithNotes(harness, *lanes[0], *harness.controller(harness.trackA));
     testScissors(harness, *lanes[0], *harness.controller(harness.trackA));
+    testScissorsRemovesCutContent(harness, *lanes[0], *harness.controller(harness.trackA));
     testRepeatedDrags(harness, *lanes[0], *lanes[1], *harness.controller(harness.trackA),
                       *harness.controller(harness.trackB));
     testSnappedDrags(harness, *lanes[0], *harness.controller(harness.trackA));
