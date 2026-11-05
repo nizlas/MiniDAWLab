@@ -197,6 +197,32 @@ bool pump(const std::function<bool()>& pred, const int ms)
 }
 
 constexpr double kSr = 48000.0;
+
+/// AmpliTube 4's settings from a JUCE VST3 state: the IComponent preset XML with the per-capture
+/// random `GUID` attribute removed (AmpliTube writes a new one on every getState).
+juce::String ampliTubeSettings(const juce::MemoryBlock& state)
+{
+    if (state.getSize() <= 8)
+    {
+        return {};
+    }
+    // JUCE's VST3 state: "VC2!" + 4-byte size, then the XML.
+    const juce::String text = juce::String::fromUTF8(static_cast<const char*>(state.getData()) + 8, (int)state.getSize() - 8);
+    const juce::String encoded = text.fromFirstOccurrenceOf("<IComponent>", false, false).upToFirstOccurrenceOf("</IComponent>", false, false);
+    juce::MemoryBlock component;
+    if (encoded.isEmpty() || !component.fromBase64Encoding(encoded) || component.getSize() <= 4)
+    {
+        return {};
+    }
+    juce::String xml = juce::String::fromUTF8(static_cast<const char*>(component.getData()) + 4, (int)component.getSize() - 4);
+    const int g = xml.indexOf("GUID=\"");
+    if (g >= 0)
+    {
+        const int end = xml.indexOfChar(g + 6, '"');
+        xml = xml.substring(0, g) + xml.substring(end + 1);
+    }
+    return xml;
+}
 int gFailureDialogs = 0;
 std::function<void()> gLastRetry;
 
@@ -592,6 +618,28 @@ void testAmpliTube(const juce::PluginDescription& amp)
     v[0]->getStateInformation(st);
     check(st.getSize() > 0, "AmpliTube state captured");
     v[1]->setStateInformation(st.getData(), (int)st.getSize());
+    {
+        // Save / reopen through the helper: the bytes a reload gives back, compared with the same
+        // reload in-process (an in-process AmpliTube is never destroyed here: its destructor is the
+        // known crash).
+        juce::MemoryBlock afterLoad, again;
+        v[1]->getStateInformation(afterLoad);
+        v[1]->getStateInformation(again);
+        check(ampliTubeSettings(afterLoad) == ampliTubeSettings(again) && ampliTubeSettings(again).isNotEmpty(),
+              "AmpliTube settings are stable across captures (its preset GUID changes per capture)");
+        check(ampliTubeSettings(afterLoad) == ampliTubeSettings(st), "a reload in the helper keeps every saved setting");
+        check(ampliTubeSettings(st) != ampliTubeSettings(juce::MemoryBlock("VC2!xxxx<x/>", 12)), "the settings comparison is not vacuous");
+        auto local = inProcess(amp, kSr, 512);
+        if (local != nullptr)
+        {
+            local->setStateInformation(st.getData(), (int)st.getSize());
+            juce::MemoryBlock localAfter;
+            local->getStateInformation(localAfter);
+            check(ampliTubeSettings(localAfter) == ampliTubeSettings(afterLoad),
+                  "a reload in the helper gives the same settings as the same reload in-process");
+            local.release(); // leaked on purpose
+        }
+    }
     for (const int bs : { 64, 128, 256, 512 })
     {
         for (auto& p : v)
