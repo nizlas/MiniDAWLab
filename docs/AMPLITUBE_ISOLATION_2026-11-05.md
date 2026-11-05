@@ -38,7 +38,7 @@ for AmpliTube 4. Evidence: `docs/evidence/amplitube-isolation-2026-11-05/`.
 | Missed deadline | stand-in | The stage outputs silence, not the dry signal. The section stays with the helper until it reports that sequence. No new request is sent and the late output is discarded, so a late helper never writes into a reused buffer (tested). |
 | Off | `PluginInsertHost::unloadForOff` / `destroyNextOffRetiredInsert` | State is captured via the helper. A failed capture cancels the unload, and the row stays loaded and silent. Before a destroy that runs a destructor in the helper, every On instance is paused, drained and captured; if that fails, the destruction is postponed. If only Off rows remain in the helper, it is terminated instead. |
 | Crash | `IsolatedHostConnection` | Detected through the process handle in the lanes' waits and in a watch thread. Stages go silent. Restore runs only while stopped, with "Restoring plugins... k/N" one instance per message-loop turn. Play, record, Power, structural edits, undo/redo, save and open are blocked meanwhile. If no On instance exists, no helper is started. There is one automatic attempt; after that, a failure dialog offers Retry, and state stays saved. |
-| Hang | control requests with per-kind limits | A request that is not answered marks the helper unresponsive and offers "Restart" from the last captured state. Audio is protected by the deadline. |
+| Hang | control requests with per-kind limits, and an audio-side watch | A control request that is not answered, or an audio request that has been outstanding for 2 s with no helper progress (the control channel may still answer), marks the helper unresponsive. One notice with Restart is shown per helper. Meanwhile the stage stays silent and sends nothing new; there is no automatic restart and no repeated notice. Restart restores from the last captured state, after Stop. |
 | Editor | `openNativeEditor` → helper top-level window | AmpliTube's real editor runs in the helper, not reparented into DAL. Closing it captures state and makes the same undo step as an in-process editor. |
 | Export | `AudioMixdownExporter` | A block the helper cannot produce fails the export with a message, and nothing is written. |
 
@@ -65,7 +65,7 @@ for AmpliTube 4. Evidence: `docs/evidence/amplitube-isolation-2026-11-05/`.
 
 | Suite | Result | Covers |
 |---|---|---|
-| `IsolatedInsertFocusedTests` (new) | 79 / 0 | See the list below. |
+| `IsolatedInsertFocusedTests` (new) | 104 / 0 (two runs each at the last changes) | See the list below. |
 | `InsertPersistenceFocusedTests --isolate-delay <exe>` (new mode) | 153 / 0 | The existing Off, Power-while-busy, stepwise On, Save/reopen and dormant-chain suite, run through the real insert host and `TrackPowerCoordinator` with DAL Mono Delay in the helper. |
 | `InsertPersistenceFocusedTests` (in-process) | 153 / 0 | |
 | `MiniDAWSelftests` 3543 / 0, `InsertAudible` 86 / 0, `Solo` 111 / 0, `InstrumentParallel` 45 / 0, `ExportLevel` 76 / 0, `ArrangementMidiEvent` 87 / 0, `MidiEditorCohort` ok | unchanged | |
@@ -128,11 +128,31 @@ simulation of Conny's laptop.
   rows stays resident, about 83 MB as float in TSE_pt2.
 * No parameter list is mirrored. DAL's generic parameter window shows nothing for AmpliTube; its
   own editor is the way to edit it.
-* A hang shows only through a control request that is not answered. A helper that is alive but
-  stuck only on the audio side shows as deadline misses, not as "not responding".
 * There is no helper-side spin. DAL lanes spin 50 µs before sleeping. The per-block cost above is
   with that setting; spinning more was not tried.
 * The peak-block increase (10 blocks above 70 % with 9 processing AmpliTube rows after Stop) is
   real headroom lost. On a 4-core laptop the margin is smaller, which is not measured.
 * No listening test, and no manual editor test in DAL's UI (the editor was opened and closed in
   the helper by the test).
+
+## After review (release 1.4.1)
+
+* **Audio-side hang** (`IsolatedHostConnection::checkAudioHang`). The test makes the helper stall
+  one instance forever while its control channel keeps answering, over 200 blocks. Results:
+  * every lane wait ended within its deadline (worst under 4 ms at 128 samples);
+  * the hung stage stayed silent with at most 2 requests;
+  * another instance in the same helper kept processing;
+  * exactly one notice was shown, none more 1.5 s later, and there was no automatic restart;
+  * Restart ended the hung helper, started one new helper, and the stage processed again.
+* **Real AmpliTube 4 editor round trip** (`IsolatedInsertFocusedTests`). In the helper, the real
+  editor was opened. Another real AmpliTube setting from the TSE_pt2 copy was applied while it
+  was open, the same way a preset load reaches the plug-in. The editor was then closed through
+  its window's close button path, which reached DAL. The state was saved, reopened in a new
+  instance, taken Off (instance destroyed) and brought back On. The settings were identical at
+  every step, and the instance processed audio after On.
+  * AmpliTube writes a new random preset `GUID` on every capture, so settings are compared with
+    that attribute removed. Its 2096 host parameters are unmapped automation slots ("Param N"),
+    so a GUI edit cannot be imitated through a parameter.
+  * **Not done:** clicking in AmpliTube's window and DAL's own menus by hand. This session had
+    no desktop control. The DAL side of open, close, save, reopen and Off/On runs in
+    `InsertPersistenceFocusedTests --isolate-delay` (153 / 0) through the real insert host.
