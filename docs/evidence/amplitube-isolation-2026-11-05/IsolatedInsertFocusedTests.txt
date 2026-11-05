@@ -1,0 +1,23 @@
+[deterministic] DAL Mono Delay in-process vs isolated
+  bs=64 round trip mean 2.9 us, max 18.0 us
+  bs=128 round trip mean 4.5 us, max 18.3 us
+  bs=512 round trip mean 24.0 us, max 34.2 us
+[first block / state / preset]
+[parallel] 4 isolated instances in 4 lanes
+  4 lanes x 200 blocks in 2.7 ms wall
+[late reply / hang] deadline, outstanding section, no reuse
+[offline] sliced wait, no deadline, failure reported
+[crash on destroy] DAL lives, only On instances restored
+  AmpliTube 4 host restarted; 2 instance(s) restored.
+[crash while processing, crash during restore] no loop, Retry works
+[teardown] last instance / project close end the helper without destructors
+[AmpliTube 4] real plug-in in the helper
+  3 AmpliTube instances loaded in 2588.57 ms
+  latency reported: 7 samples
+  helper private bytes with 3 AmpliTube: 885.3 MB
+  bs=64: requests=2937 misses=1 mean round trip 38.2 us, max 605.2 us
+  bs=128: requests=4437 misses=1 mean round trip 47.7 us, max 1106.7 us
+  bs=256: requests=5187 misses=1 mean round trip 56.5 us, max 1106.7 us
+  bs=512: requests=5562 misses=1 mean round trip 66.6 us, max 1106.7 us
+  AmpliTube destructor ran in the helper without a crash
+IsolatedInsertFocusedTests: 79 checks, 0 failure(s)

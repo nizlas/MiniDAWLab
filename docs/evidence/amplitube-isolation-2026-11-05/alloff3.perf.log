@@ -1,0 +1,178 @@
+﻿2026-11-05T22:45:07.043+01:00 stability test mode active (prompts auto-answer deterministically)
+2026-11-05T22:45:09.834+01:00 ================================================================
+2026-11-05T22:45:09.834+01:00 scenario start: perf-profile iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-s0-cpu\TSE_pt2_261031\TSE_pt2-alloff3.dalproj
+2026-11-05T22:45:09.835+01:00 steps queued: 21 (delete-loop iterations expand at plan time)
+2026-11-05T22:45:10.343+01:00 step begin: perf-profile: load TSE_pt2-alloff3.dalproj
+2026-11-05T22:45:23.581+01:00 step end ok: perf-profile: load TSE_pt2-alloff3.dalproj elapsedMs=13238
+2026-11-05T22:45:23.635+01:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-11-05T22:45:24.823+01:00 step begin: perf-profile: verify loaded
+2026-11-05T22:45:24.824+01:00   track count after load: 52
+2026-11-05T22:45:24.824+01:00 step end ok: perf-profile: verify loaded elapsedMs=0
+2026-11-05T22:45:25.077+01:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-11-05T22:45:25.077+01:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-11-05T22:45:33.080+01:00 step begin: perf-profile: runtime conditions
+2026-11-05T22:45:33.080+01:00   exe=C:\Users\nicla\development\MiniDAWLab-resource-saving\build\ninja-release-rs\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.4.0 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-11-05T22:45:33.081+01:00 step end ok: perf-profile: runtime conditions elapsedMs=0
+2026-11-05T22:45:33.387+01:00 step begin: perf-profile: project load (loaded vs processed)
+2026-11-05T22:45:33.387+01:00   exe=C:\Users\nicla\development\MiniDAWLab-resource-saving\build\ninja-release-rs\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.4.0 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-11-05T22:45:33.387+01:00   tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=46 instances=58 | proxy states: 3:Primary,57:Primary,25:Primary,40:Primary,8:Primary,26:Primary,45:Primary,46:Primary,54:Primary,65:Primary,5:Primary,23:Primary,9:Primary,24:Primary
+2026-11-05T22:45:33.388+01:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=1
+2026-11-05T22:45:33.694+01:00 step begin: perf-profile: switch every source row Off
+2026-11-05T22:45:33.695+01:00   switched Off: 50 source rows
+2026-11-05T22:45:33.696+01:00 step end ok: perf-profile: switch every source row Off elapsedMs=1
+2026-11-05T22:45:53.724+01:00 step begin: perf-profile: project load after Off (loaded vs processed)
+2026-11-05T22:45:53.725+01:00   tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=51) | instrument registry entries=14 primaryLoaded=0 primaryEmpty=14 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=46 instances=0 | proxy states: 3:Primary,57:Primary,25:Primary,40:Primary,8:Primary,26:Primary,45:Primary,46:Primary,54:Primary,65:Primary,5:Primary,23:Primary,9:Primary,24:Primary
+2026-11-05T22:45:53.726+01:00 step end ok: perf-profile: project load after Off (loaded vs processed) elapsedMs=1
+2026-11-05T22:45:56.728+01:00 step begin: perf-profile: mixer window closed
+2026-11-05T22:45:56.734+01:00   mixer visible=no
+2026-11-05T22:45:56.735+01:00 step end ok: perf-profile: mixer window closed elapsedMs=6
+2026-11-05T22:45:57.083+01:00 step begin: perf-profile: transport stopped, never played (profiler on)
+2026-11-05T22:45:57.084+01:00   playing=no | rest: insert stages=0 restingNow=0 stageBlocks rested=0 processed=0 instrumentBlocks rested=0 processed=13272 liveInserts=0 | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=947 serialBlocks=1 jobsByCallback=1249 jobsByWorkers=12023 joinKernelWaits=347 lastDispatchWallMs=0.302 lastJoinWaitMs=0.000 (cumulative since start)
+2026-11-05T22:45:57.084+01:00 step end ok: perf-profile: transport stopped, never played (profiler on) elapsedMs=0
+2026-11-05T22:45:59.115+01:00 step begin: perf-profile: stopped/never-played measurement window begins (20 s)
+2026-11-05T22:45:59.115+01:00   window start: playhead=181473 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=386.445 MB private=496.719 MB
+2026-11-05T22:45:59.116+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-05T22:45:59.117+01:00 step end ok: perf-profile: stopped/never-played measurement window begins (20 s) elapsedMs=1
+2026-11-05T22:46:19.138+01:00 step begin: perf-profile: stopped/never-played collect
+2026-11-05T22:46:19.139+01:00   === window: stopped/never-played ===
+2026-11-05T22:46:19.139+01:00   window end: wall=20.02 s playhead=181473 (started 181473)
+2026-11-05T22:46:19.140+01:00   engine: blocks=1878 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=0.011/0.025/0.080 budget%(mean/max)=0.2/0.8 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-05T22:46:19.140+01:00   output: peakHold=0.000 masterPeakL/R=0.000/0.000 oversL/R=0/0 rmsL/R=0.0000/0.0000 nonFinite=0
+2026-11-05T22:46:19.141+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-05T22:46:19.141+01:00   instruments: hosts with live processBlock blocks=0 hosts with proxy-mixed blocks=0 hosts with neither=14 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-05T22:46:19.141+01:00   render pool: rest: insert stages=0 restingNow=0 stageBlocks rested=0 processed=0 instrumentBlocks rested=0 processed=13272 liveInserts=0 | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=947 serialBlocks=1 jobsByCallback=1249 jobsByWorkers=12023 joinKernelWaits=347 lastDispatchWallMs=0.302 lastJoinWaitMs=0.000 (cumulative since start)
+2026-11-05T22:46:19.141+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-05T22:46:19.142+01:00   process: cpu=7.7% of one core (0.3% of 24 cores) systemBusy=9.8% workingSet=386.152 MB private=496.41 MB pageFaultsInWindow=3 (soft+hard; 0.149821/s)
+2026-11-05T22:46:19.142+01:00   profile: blocks=1878 callback ms(mean/max)=0.025/0.080
+2026-11-05T22:46:19.142+01:00   profile: category instrument-plugin: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:46:19.142+01:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:46:19.143+01:00   profile: category insert-plugin: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:46:19.143+01:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.025/0.080 shareOfCallback=100.0%
+2026-11-05T22:46:19.143+01:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.003/0.011
+2026-11-05T22:46:19.143+01:00   profile: phase live-midi: perBlock ms(mean/max)=0.002/0.007
+2026-11-05T22:46:19.143+01:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.000/0.003
+2026-11-05T22:46:19.144+01:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.000/0.000
+2026-11-05T22:46:19.144+01:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.000
+2026-11-05T22:46:19.144+01:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.003/0.030
+2026-11-05T22:46:19.144+01:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.001/0.004
+2026-11-05T22:46:19.145+01:00   profile: worst block: total=0.080 ms (512 samples): instrument-plugin CPU 0.000 | proxy-mix 0.000 | insert-plugin 0.000 | generation-section wall 0.000 | remainder 0.080
+2026-11-05T22:46:19.145+01:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=0.000/0.000 callbackIdleWait ms(mean/max)=0.000/0.000 jobsPerBlock=0.0 parallelBlocks=0 of 1878 effectiveParallelism(instrumentCPU/sectionWall)=0.00 (parallel blocks only: 0.00)
+2026-11-05T22:46:19.145+01:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-11-05T22:46:19.145+01:00   profile: callback start intervals: n=1878 ms(mean/max)=10.666/11.401 lateStarts(>1.25x period)=0
+2026-11-05T22:46:19.145+01:00   profile: instances with calls=0 of registered 72; top 12 by summed ms:
+2026-11-05T22:46:19.146+01:00   profile: top 0 together = 0.0% of callback time
+2026-11-05T22:46:19.146+01:00   profile: by plug-in (instances, perBlock ms, share):
+2026-11-05T22:46:19.146+01:00 step end ok: perf-profile: stopped/never-played collect elapsedMs=7
+2026-11-05T22:46:19.392+01:00 step begin: perf-profile: start playback (warm-up 5 s)
+2026-11-05T22:46:19.392+01:00   start at 0.00 s (sample 0) cycle=on profiler=ON generation=as configured | rest: insert stages=0 restingNow=0 stageBlocks rested=0 processed=0 instrumentBlocks rested=0 processed=13272 liveInserts=0 | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=947 serialBlocks=1 jobsByCallback=1249 jobsByWorkers=12023 joinKernelWaits=347 lastDispatchWallMs=0.302 lastJoinWaitMs=0.000 (cumulative since start)
+2026-11-05T22:46:19.393+01:00 step end ok: perf-profile: start playback (warm-up 5 s) elapsedMs=1
+2026-11-05T22:46:24.410+01:00 step begin: perf-profile: configured measurement window begins (20 s)
+2026-11-05T22:46:24.410+01:00   window start: playhead=241152 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=400.129 MB private=510.234 MB
+2026-11-05T22:46:24.411+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-05T22:46:24.411+01:00 step end ok: perf-profile: configured measurement window begins (20 s) elapsedMs=0
+2026-11-05T22:46:44.440+01:00 step begin: perf-profile: configured collect
+2026-11-05T22:46:44.440+01:00   === window: configured ===
+2026-11-05T22:46:44.440+01:00   window end: wall=20.03 s playhead=1202688 (started 241152)
+2026-11-05T22:46:44.441+01:00   engine: blocks=1878 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=0.018/0.041/0.120 budget%(mean/max)=0.4/1.1 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-05T22:46:44.441+01:00   output: peakHold=0.000 masterPeakL/R=0.000/0.000 oversL/R=0/0 rmsL/R=0.0000/0.0000 nonFinite=0
+2026-11-05T22:46:44.441+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-05T22:46:44.441+01:00   instruments: hosts with live processBlock blocks=0 hosts with proxy-mixed blocks=0 hosts with neither=14 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-05T22:46:44.441+01:00   render pool: rest: insert stages=0 restingNow=0 stageBlocks rested=0 processed=0 instrumentBlocks rested=0 processed=13272 liveInserts=0 | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=947 serialBlocks=2350 jobsByCallback=85813 jobsByWorkers=12023 joinKernelWaits=347 lastDispatchWallMs=0.302 lastJoinWaitMs=0.000 (cumulative since start)
+2026-11-05T22:46:44.442+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-05T22:46:44.442+01:00   process: cpu=8.1% of one core (0.3% of 24 cores) systemBusy=9.4% workingSet=385.992 MB private=496.078 MB pageFaultsInWindow=1 (soft+hard; 0.0499252/s)
+2026-11-05T22:46:44.442+01:00   profile: blocks=1878 callback ms(mean/max)=0.041/0.120
+2026-11-05T22:46:44.442+01:00   profile: category instrument-plugin: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:46:44.443+01:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:46:44.443+01:00   profile: category insert-plugin: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:46:44.443+01:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.032/0.091 shareOfCallback=77.0%
+2026-11-05T22:46:44.443+01:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.003/0.008
+2026-11-05T22:46:44.443+01:00   profile: phase live-midi: perBlock ms(mean/max)=0.002/0.013
+2026-11-05T22:46:44.444+01:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.017/0.077
+2026-11-05T22:46:44.444+01:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.004/0.018
+2026-11-05T22:46:44.444+01:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.000
+2026-11-05T22:46:44.444+01:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.003/0.016
+2026-11-05T22:46:44.444+01:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.001/0.005
+2026-11-05T22:46:44.445+01:00   profile: worst block: total=0.120 ms (512 samples): instrument-plugin CPU 0.000 | proxy-mix 0.000 | insert-plugin 0.000 | generation-section wall 0.046 | remainder 0.074
+2026-11-05T22:46:44.445+01:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=0.009/0.064 callbackIdleWait ms(mean/max)=0.000/0.000 jobsPerBlock=36.0 parallelBlocks=0 of 1878 effectiveParallelism(instrumentCPU/sectionWall)=0.00 (parallel blocks only: 0.00)
+2026-11-05T22:46:44.445+01:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-11-05T22:46:44.445+01:00   profile: callback start intervals: n=1878 ms(mean/max)=10.666/11.134 lateStarts(>1.25x period)=0
+2026-11-05T22:46:44.445+01:00   profile: instances with calls=0 of registered 72; top 12 by summed ms:
+2026-11-05T22:46:44.446+01:00   profile: top 0 together = 0.0% of callback time
+2026-11-05T22:46:44.446+01:00   profile: by plug-in (instances, perBlock ms, share):
+2026-11-05T22:46:44.446+01:00 step end ok: perf-profile: configured collect elapsedMs=6
+2026-11-05T22:46:44.693+01:00 step begin: perf-profile: stop playback (profiler stays on)
+2026-11-05T22:46:44.694+01:00   stopped; playhead=1214976
+2026-11-05T22:46:44.694+01:00 step end ok: perf-profile: stop playback (profiler stays on) elapsedMs=0
+2026-11-05T22:46:44.897+01:00 step begin: perf-profile: stopped/right-after-stop measurement window begins (20 s)
+2026-11-05T22:46:44.897+01:00   window start: playhead=1214976 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=399.926 MB private=510.102 MB
+2026-11-05T22:46:44.898+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-05T22:46:44.899+01:00 step end ok: perf-profile: stopped/right-after-stop measurement window begins (20 s) elapsedMs=2
+2026-11-05T22:47:04.928+01:00 step begin: perf-profile: stopped/right-after-stop collect
+2026-11-05T22:47:04.928+01:00   === window: stopped/right-after-stop ===
+2026-11-05T22:47:04.929+01:00   window end: wall=20.03 s playhead=1214976 (started 1214976)
+2026-11-05T22:47:04.929+01:00   engine: blocks=1878 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=0.012/0.025/0.076 budget%(mean/max)=0.2/0.7 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-05T22:47:04.929+01:00   output: peakHold=0.000 masterPeakL/R=0.000/0.000 oversL/R=0/0 rmsL/R=0.0000/0.0000 nonFinite=0
+2026-11-05T22:47:04.930+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-05T22:47:04.930+01:00   instruments: hosts with live processBlock blocks=0 hosts with proxy-mixed blocks=0 hosts with neither=14 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-05T22:47:04.930+01:00   render pool: rest: insert stages=0 restingNow=0 stageBlocks rested=0 processed=0 instrumentBlocks rested=0 processed=13272 liveInserts=0 | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=947 serialBlocks=2374 jobsByCallback=86677 jobsByWorkers=12023 joinKernelWaits=347 lastDispatchWallMs=0.302 lastJoinWaitMs=0.000 (cumulative since start)
+2026-11-05T22:47:04.930+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-05T22:47:04.931+01:00   process: cpu=5.4% of one core (0.2% of 24 cores) systemBusy=9.1% workingSet=386.105 MB private=497.324 MB pageFaultsInWindow=10 (soft+hard; 0.499221/s)
+2026-11-05T22:47:04.931+01:00   profile: blocks=1878 callback ms(mean/max)=0.025/0.076
+2026-11-05T22:47:04.931+01:00   profile: category instrument-plugin: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:47:04.931+01:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:47:04.932+01:00   profile: category insert-plugin: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:47:04.932+01:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.025/0.076 shareOfCallback=100.0%
+2026-11-05T22:47:04.932+01:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.003/0.023
+2026-11-05T22:47:04.932+01:00   profile: phase live-midi: perBlock ms(mean/max)=0.002/0.008
+2026-11-05T22:47:04.932+01:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.000/0.001
+2026-11-05T22:47:04.933+01:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.000/0.000
+2026-11-05T22:47:04.933+01:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.000
+2026-11-05T22:47:04.933+01:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.003/0.007
+2026-11-05T22:47:04.933+01:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.001/0.040
+2026-11-05T22:47:04.933+01:00   profile: worst block: total=0.076 ms (512 samples): instrument-plugin CPU 0.000 | proxy-mix 0.000 | insert-plugin 0.000 | generation-section wall 0.000 | remainder 0.076
+2026-11-05T22:47:04.933+01:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=0.000/0.000 callbackIdleWait ms(mean/max)=0.000/0.000 jobsPerBlock=0.0 parallelBlocks=0 of 1878 effectiveParallelism(instrumentCPU/sectionWall)=0.00 (parallel blocks only: 0.00)
+2026-11-05T22:47:04.934+01:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-11-05T22:47:04.934+01:00   profile: callback start intervals: n=1878 ms(mean/max)=10.666/11.220 lateStarts(>1.25x period)=0
+2026-11-05T22:47:04.934+01:00   profile: instances with calls=0 of registered 72; top 12 by summed ms:
+2026-11-05T22:47:04.934+01:00   profile: top 0 together = 0.0% of callback time
+2026-11-05T22:47:04.934+01:00   profile: by plug-in (instances, perBlock ms, share):
+2026-11-05T22:47:04.935+01:00 step end ok: perf-profile: stopped/right-after-stop collect elapsedMs=7
+2026-11-05T22:47:05.178+01:00 step begin: perf-profile: wait 30 s stopped
+2026-11-05T22:47:05.179+01:00 step end ok: perf-profile: wait 30 s stopped elapsedMs=0
+2026-11-05T22:47:35.202+01:00 step begin: perf-profile: stopped/after-gap measurement window begins (20 s)
+2026-11-05T22:47:35.202+01:00   window start: playhead=1214976 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=386.027 MB private=497.641 MB
+2026-11-05T22:47:35.203+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-05T22:47:35.204+01:00 step end ok: perf-profile: stopped/after-gap measurement window begins (20 s) elapsedMs=2
+2026-11-05T22:47:55.229+01:00 step begin: perf-profile: stopped/after-gap collect
+2026-11-05T22:47:55.229+01:00   === window: stopped/after-gap ===
+2026-11-05T22:47:55.230+01:00   window end: wall=20.03 s playhead=1214976 (started 1214976)
+2026-11-05T22:47:55.230+01:00   engine: blocks=1878 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=0.012/0.024/0.077 budget%(mean/max)=0.2/0.7 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-05T22:47:55.230+01:00   output: peakHold=0.000 masterPeakL/R=0.000/0.000 oversL/R=0/0 rmsL/R=0.0000/0.0000 nonFinite=0
+2026-11-05T22:47:55.230+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-05T22:47:55.231+01:00   instruments: hosts with live processBlock blocks=0 hosts with proxy-mixed blocks=0 hosts with neither=14 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-05T22:47:55.231+01:00   render pool: rest: insert stages=0 restingNow=0 stageBlocks rested=0 processed=0 instrumentBlocks rested=0 processed=13272 liveInserts=0 | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=947 serialBlocks=2374 jobsByCallback=86677 jobsByWorkers=12023 joinKernelWaits=347 lastDispatchWallMs=0.302 lastJoinWaitMs=0.000 (cumulative since start)
+2026-11-05T22:47:55.231+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-05T22:47:55.231+01:00   process: cpu=7.9% of one core (0.3% of 24 cores) systemBusy=8.8% workingSet=386.027 MB private=497.641 MB pageFaultsInWindow=0 (soft+hard; 0/s)
+2026-11-05T22:47:55.232+01:00   profile: blocks=1878 callback ms(mean/max)=0.024/0.077
+2026-11-05T22:47:55.232+01:00   profile: category instrument-plugin: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:47:55.232+01:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:47:55.232+01:00   profile: category insert-plugin: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-05T22:47:55.233+01:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.024/0.077 shareOfCallback=100.0%
+2026-11-05T22:47:55.233+01:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.003/0.008
+2026-11-05T22:47:55.233+01:00   profile: phase live-midi: perBlock ms(mean/max)=0.002/0.006
+2026-11-05T22:47:55.233+01:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.000/0.001
+2026-11-05T22:47:55.234+01:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.000/0.000
+2026-11-05T22:47:55.234+01:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.001
+2026-11-05T22:47:55.234+01:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.003/0.009
+2026-11-05T22:47:55.234+01:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.001/0.005
+2026-11-05T22:47:55.234+01:00   profile: worst block: total=0.077 ms (512 samples): instrument-plugin CPU 0.000 | proxy-mix 0.000 | insert-plugin 0.000 | generation-section wall 0.000 | remainder 0.077
+2026-11-05T22:47:55.235+01:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=0.000/0.000 callbackIdleWait ms(mean/max)=0.000/0.000 jobsPerBlock=0.0 parallelBlocks=0 of 1878 effectiveParallelism(instrumentCPU/sectionWall)=0.00 (parallel blocks only: 0.00)
+2026-11-05T22:47:55.235+01:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-11-05T22:47:55.235+01:00   profile: callback start intervals: n=1878 ms(mean/max)=10.666/11.294 lateStarts(>1.25x period)=0
+2026-11-05T22:47:55.235+01:00   profile: instances with calls=0 of registered 72; top 12 by summed ms:
+2026-11-05T22:47:55.235+01:00   profile: top 0 together = 0.0% of callback time
+2026-11-05T22:47:55.236+01:00   profile: by plug-in (instances, perBlock ms, share):
+2026-11-05T22:47:55.236+01:00 step end ok: perf-profile: stopped/after-gap collect elapsedMs=7
+2026-11-05T22:47:55.482+01:00 step begin: perf-profile: stop playback, profiler off
+2026-11-05T22:47:55.483+01:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-11-05T22:47:56.292+01:00 RESULT: PASS scenario=perf-profile totalMs=166458

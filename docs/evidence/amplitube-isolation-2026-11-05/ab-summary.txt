@@ -1,0 +1,105 @@
+===== iso
+[stopped/never-played] callback min/mean/max=0.547/0.806/1.460 near70=0 overruns=0 | sampled cores DAL=0.45 helper=0.01 sum=0.46 | private DAL=2.09 GB helper=2.64 GB sum=4.73 GB
+     cpu=45.9% of one core (1.9% of 24 cores) systemBusy=14.3% wo
+     by plug-in (instances, perBlock ms, share): [VB3-II x3 1.030 ms 127.9%] [HALion Sonic x9 0.268 ms 33.2%] [Pro-R [Post] x1 0.255 ms 31.7%] [Groove Agent SE x2 0.166 ms 20.6%] [Pro-Q 3 [Post] x2 0.033 ms 4.1%] [DAL Mono Delay [Post] x2 0.028 ms 3.5%]
+[configured] callback min/mean/max=0.344/0.544/1.122 near70=0 overruns=0 | sampled cores DAL=0.49 helper=0.01 sum=0.50 | private DAL=2.09 GB helper=2.64 GB sum=4.74 GB
+     cpu=48.5% of one core (2.0% of 24 cores) systemBusy=13.8% wo
+     by plug-in (instances, perBlock ms, share): [VB3-II x3 1.044 ms 191.9%] [Pro-R [Post] x5 0.373 ms 68.5%] [Groove Agent SE x2 0.357 ms 65.6%] [HALion Sonic x9 0.319 ms 58.5%] [Pro-Q 3 [Post] x2 0.038 ms 7.0%] [DAL Mono Delay [Post] x2 0.033 ms 6.0%]
+[stopped/right-after-stop] callback min/mean/max=1.109/1.643/2.402 near70=0 overruns=0 | sampled cores DAL=0.50 helper=0.02 sum=0.52 | private DAL=2.09 GB helper=2.64 GB sum=4.74 GB
+     cpu=49.5% of one core (2.1% of 24 cores) systemBusy=12.6% wo
+     by plug-in (instances, perBlock ms, share): [Pro-R [Post] x5 1.102 ms 67.1%] [VB3-II x3 1.028 ms 62.6%] [HALion Sonic x9 0.258 ms 15.7%] [Groove Agent SE x2 0.192 ms 11.7%] [Pro-Q 3 [Post] x2 0.033 ms 2.0%] [DAL Mono Delay [Post] x2 0.024 ms 1.5%]
+[stopped/after-gap] callback min/mean/max=1.165/1.650/2.530 near70=0 overruns=0 | sampled cores DAL=0.50 helper=0.01 sum=0.51 | private DAL=2.09 GB helper=2.64 GB sum=4.74 GB
+     cpu=49.8% of one core (2.1% of 24 cores) systemBusy=13.1% wo
+     by plug-in (instances, perBlock ms, share): [Pro-R [Post] x5 1.112 ms 67.4%] [VB3-II x3 1.015 ms 61.5%] [HALion Sonic x9 0.260 ms 15.7%] [Groove Agent SE x2 0.160 ms 9.7%] [Pro-Q 3 [Post] x2 0.033 ms 2.0%] [DAL Mono Delay [Post] x2 0.024 ms 1.5%]
+ load: tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | i
+  exit=0
+===== inproc
+[stopped/never-played] callback min/mean/max=0.510/0.768/1.435 near70=0 overruns=0 | sampled cores DAL=0.45 helper=0.00 sum=0.45 | private DAL=4.89 GB helper=0.00 GB sum=4.89 GB
+     cpu=45.4% of one core (1.9% of 24 cores) systemBusy=13.1% wo
+     by plug-in (instances, perBlock ms, share): [VB3-II x3 0.987 ms 128.4%] [Pro-R [Post] x1 0.244 ms 31.8%] [HALion Sonic x9 0.242 ms 31.4%] [Groove Agent SE x2 0.152 ms 19.8%] [Pro-Q 3 [Post] x2 0.031 ms 4.1%] [DAL Mono Delay [Post] x2 0.027 ms 3.5%]
+[configured] callback min/mean/max=0.338/0.565/1.234 near70=0 overruns=0 | sampled cores DAL=0.48 helper=0.00 sum=0.48 | private DAL=4.89 GB helper=0.00 GB sum=4.89 GB
+     cpu=48.7% of one core (2.0% of 24 cores) systemBusy=14.6% wo
+     by plug-in (instances, perBlock ms, share): [VB3-II x3 1.061 ms 187.6%] [Pro-R [Post] x5 0.369 ms 65.3%] [Groove Agent SE x2 0.353 ms 62.5%] [HALion Sonic x9 0.312 ms 55.2%] [Pro-Q 3 [Post] x2 0.038 ms 6.6%] [DAL Mono Delay [Post] x2 0.032 ms 5.6%]
+[stopped/right-after-stop] callback min/mean/max=1.083/1.509/2.276 near70=0 overruns=0 | sampled cores DAL=0.50 helper=0.00 sum=0.50 | private DAL=4.89 GB helper=0.00 GB sum=4.89 GB
+     cpu=50.5% of one core (2.1% of 24 cores) systemBusy=9.8% wor
+     by plug-in (instances, perBlock ms, share): [Pro-R [Post] x5 1.000 ms 66.3%] [VB3-II x3 0.954 ms 63.2%] [HALion Sonic x9 0.227 ms 15.0%] [Groove Agent SE x2 0.174 ms 11.5%] [Pro-Q 3 [Post] x2 0.028 ms 1.8%] [DAL Mono Delay [Post] x2 0.021 ms 1.4%]
+[stopped/after-gap] callback min/mean/max=1.095/1.489/2.371 near70=0 overruns=0 | sampled cores DAL=0.45 helper=0.00 sum=0.45 | private DAL=4.89 GB helper=0.00 GB sum=4.89 GB
+     cpu=45.2% of one core (1.9% of 24 cores) systemBusy=9.4% wor
+     by plug-in (instances, perBlock ms, share): [Pro-R [Post] x5 0.987 ms 66.2%] [VB3-II x3 0.946 ms 63.5%] [HALion Sonic x9 0.224 ms 15.0%] [Groove Agent SE x2 0.140 ms 9.4%] [Pro-Q 3 [Post] x2 0.027 ms 1.8%] [DAL Mono Delay [Post] x2 0.020 ms 1.4%]
+ load: tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | i
+  exit=0
+===== ampon-iso
+[stopped/never-played] callback min/mean/max=3.268/4.379/6.100 near70=0 overruns=0 | sampled cores DAL=0.58 helper=0.20 sum=0.78 | private DAL=2.09 GB helper=2.66 GB sum=4.76 GB
+     cpu=58.1% of one core (2.4% of 24 cores) systemBusy=12.5% wo
+     by plug-in (instances, perBlock ms, share): [AmpliTube 4 [Pre] x7 2.182 ms 49.8%] [Pro-R [Post] x7 1.584 ms 36.2%] [VB3-II x3 1.018 ms 23.2%] [HALion Sonic x9 0.260 ms 5.9%] [Groove Agent SE x2 0.157 ms 3.6%] [DAL Mono Delay [Post] x5 0.049 ms 1.1%] [Pro-Q 3 [
+[configured] callback min/mean/max=0.832/1.119/2.016 near70=0 overruns=0 | sampled cores DAL=0.67 helper=0.27 sum=0.94 | private DAL=2.10 GB helper=2.66 GB sum=4.76 GB
+     cpu=67.6% of one core (2.8% of 24 cores) systemBusy=14.1% wo
+     by plug-in (instances, perBlock ms, share): [AmpliTube 4 [Pre] x9 3.428 ms 306.4%] [Pro-R [Post] x11 1.914 ms 171.1%] [VB3-II x3 1.053 ms 94.1%] [Groove Agent SE x2 0.326 ms 29.2%] [HALion Sonic x9 0.298 ms 26.6%] [DAL Mono Delay [Post] x5 0.059 ms 5.3%] [Pro-
+[stopped/right-after-stop] callback min/mean/max=4.660/5.985/8.313 near70=10 overruns=0 | sampled cores DAL=0.70 helper=0.24 sum=0.94 | private DAL=2.10 GB helper=2.66 GB sum=4.76 GB
+     cpu=69.8% of one core (2.9% of 24 cores) systemBusy=12.6% wo
+     by plug-in (instances, perBlock ms, share): [AmpliTube 4 [Pre] x9 2.843 ms 47.5%] [Pro-R [Post] x11 2.520 ms 42.1%] [VB3-II x3 1.033 ms 17.3%] [HALion Sonic x9 0.268 ms 4.5%] [Groove Agent SE x2 0.195 ms 3.3%] [DAL Mono Delay [Post] x5 0.053 ms 0.9%] [Pro-Q 3 
+[stopped/after-gap] callback min/mean/max=4.576/5.927/7.785 near70=7 overruns=0 | sampled cores DAL=0.68 helper=0.28 sum=0.95 | private DAL=2.10 GB helper=2.66 GB sum=4.76 GB
+     cpu=67.3% of one core (2.8% of 24 cores) systemBusy=12.3% wo
+     by plug-in (instances, perBlock ms, share): [AmpliTube 4 [Pre] x9 2.819 ms 47.6%] [Pro-R [Post] x11 2.484 ms 41.9%] [VB3-II x3 1.031 ms 17.4%] [HALion Sonic x9 0.260 ms 4.4%] [Groove Agent SE x2 0.159 ms 2.7%] [DAL Mono Delay [Post] x5 0.053 ms 0.9%] [Pro-Q 3 
+ load: tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=25 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | i
+  exit=0
+===== ampon-inproc
+[stopped/never-played] callback min/mean/max=3.056/3.882/5.449 near70=0 overruns=0 | sampled cores DAL=0.74 helper=0.00 sum=0.74 | private DAL=4.91 GB helper=0.00 GB sum=4.91 GB
+     cpu=73.5% of one core (3.1% of 24 cores) systemBusy=12.0% wo
+     by plug-in (instances, perBlock ms, share): [AmpliTube 4 [Pre] x7 1.774 ms 45.7%] [Pro-R [Post] x7 1.525 ms 39.3%] [VB3-II x3 0.997 ms 25.7%] [HALion Sonic x9 0.257 ms 6.6%] [Groove Agent SE x2 0.158 ms 4.1%] [DAL Mono Delay [Post] x5 0.047 ms 1.2%] [Pro-Q 3 [
+[configured] callback min/mean/max=0.704/0.968/1.802 near70=0 overruns=0 | sampled cores DAL=0.88 helper=0.00 sum=0.88 | private DAL=4.91 GB helper=0.00 GB sum=4.91 GB
+     cpu=88.0% of one core (3.7% of 24 cores) systemBusy=12.4% wo
+     by plug-in (instances, perBlock ms, share): [AmpliTube 4 [Pre] x9 2.651 ms 273.7%] [Pro-R [Post] x11 1.803 ms 186.2%] [VB3-II x3 0.989 ms 102.1%] [Groove Agent SE x2 0.308 ms 31.8%] [HALion Sonic x9 0.270 ms 27.8%] [DAL Mono Delay [Post] x5 0.054 ms 5.6%] [Pro
+[stopped/right-after-stop] callback min/mean/max=4.428/5.497/7.406 near70=0 overruns=0 | sampled cores DAL=0.92 helper=0.00 sum=0.92 | private DAL=4.91 GB helper=0.00 GB sum=4.91 GB
+     cpu=91.7% of one core (3.8% of 24 cores) systemBusy=14.8% wo
+     by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 2.532 ms 46.1%] [AmpliTube 4 [Pre] x9 2.351 ms 42.8%] [VB3-II x3 1.072 ms 19.5%] [HALion Sonic x9 0.265 ms 4.8%] [Groove Agent SE x2 0.192 ms 3.5%] [DAL Mono Delay [Post] x5 0.049 ms 0.9%] [Pro-Q 3 
+[stopped/after-gap] callback min/mean/max=4.323/5.310/7.389 near70=0 overruns=0 | sampled cores DAL=0.88 helper=0.00 sum=0.88 | private DAL=4.91 GB helper=0.00 GB sum=4.91 GB
+     cpu=88.5% of one core (3.7% of 24 cores) systemBusy=12.4% wo
+     by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 2.440 ms 45.9%] [AmpliTube 4 [Pre] x9 2.282 ms 43.0%] [VB3-II x3 1.015 ms 19.1%] [HALion Sonic x9 0.268 ms 5.1%] [Groove Agent SE x2 0.165 ms 3.1%] [DAL Mono Delay [Post] x5 0.047 ms 0.9%] [Pro-Q 3 
+ load: tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=25 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | i
+  exit=0
+===== alloff1
+[stopped/never-played] callback min/mean/max=0.009/0.022/0.067 near70=0 overruns=0 | sampled cores DAL=0.07 helper=0.00 sum=0.07 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=6.8% of one core (0.3% of 24 cores) systemBusy=6.4% work
+     by plug-in (instances, perBlock ms, share):
+[configured] callback min/mean/max=0.015/0.036/0.122 near70=0 overruns=0 | sampled cores DAL=0.08 helper=0.00 sum=0.08 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=7.7% of one core (0.3% of 24 cores) systemBusy=7.3% work
+     by plug-in (instances, perBlock ms, share):
+[stopped/right-after-stop] callback min/mean/max=0.009/0.022/0.065 near70=0 overruns=0 | sampled cores DAL=0.07 helper=0.00 sum=0.07 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=7.1% of one core (0.3% of 24 cores) systemBusy=7.9% work
+     by plug-in (instances, perBlock ms, share):
+[stopped/after-gap] callback min/mean/max=0.011/0.027/0.077 near70=0 overruns=0 | sampled cores DAL=0.07 helper=0.00 sum=0.07 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=7.3% of one core (0.3% of 24 cores) systemBusy=10.0% wor
+     by plug-in (instances, perBlock ms, share):
+ load: tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | i
+  exit=0
+===== alloff2
+[stopped/never-played] callback min/mean/max=0.010/0.021/0.089 near70=0 overruns=0 | sampled cores DAL=0.06 helper=0.00 sum=0.06 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=5.5% of one core (0.2% of 24 cores) systemBusy=9.6% work
+     by plug-in (instances, perBlock ms, share):
+[configured] callback min/mean/max=0.014/0.035/0.124 near70=0 overruns=0 | sampled cores DAL=0.07 helper=0.00 sum=0.07 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=7.1% of one core (0.3% of 24 cores) systemBusy=6.9% work
+     by plug-in (instances, perBlock ms, share):
+[stopped/right-after-stop] callback min/mean/max=0.009/0.022/0.079 near70=0 overruns=0 | sampled cores DAL=0.06 helper=0.00 sum=0.06 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=5.9% of one core (0.2% of 24 cores) systemBusy=6.8% work
+     by plug-in (instances, perBlock ms, share):
+[stopped/after-gap] callback min/mean/max=0.010/0.024/0.099 near70=0 overruns=0 | sampled cores DAL=0.07 helper=0.00 sum=0.07 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=6.4% of one core (0.3% of 24 cores) systemBusy=11.9% wor
+     by plug-in (instances, perBlock ms, share):
+ load: tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | i
+  exit=0
+===== alloff3
+[stopped/never-played] callback min/mean/max=0.011/0.025/0.080 near70=0 overruns=0 | sampled cores DAL=0.08 helper=0.00 sum=0.08 | private DAL=0.48 GB helper=0.00 GB sum=0.48 GB
+     cpu=7.7% of one core (0.3% of 24 cores) systemBusy=9.8% work
+     by plug-in (instances, perBlock ms, share):
+[configured] callback min/mean/max=0.018/0.041/0.120 near70=0 overruns=0 | sampled cores DAL=0.08 helper=0.00 sum=0.08 | private DAL=0.50 GB helper=0.00 GB sum=0.50 GB
+     cpu=8.1% of one core (0.3% of 24 cores) systemBusy=9.4% work
+     by plug-in (instances, perBlock ms, share):
+[stopped/right-after-stop] callback min/mean/max=0.012/0.025/0.076 near70=0 overruns=0 | sampled cores DAL=0.06 helper=0.00 sum=0.06 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=5.4% of one core (0.2% of 24 cores) systemBusy=9.1% work
+     by plug-in (instances, perBlock ms, share):
+[stopped/after-gap] callback min/mean/max=0.012/0.024/0.077 near70=0 overruns=0 | sampled cores DAL=0.08 helper=0.00 sum=0.08 | private DAL=0.49 GB helper=0.00 GB sum=0.49 GB
+     cpu=7.9% of one core (0.3% of 24 cores) systemBusy=8.8% work
+     by plug-in (instances, perBlock ms, share):
+ load: tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | i
+  exit=0
