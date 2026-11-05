@@ -1159,8 +1159,8 @@ namespace
             expect(old.experimentalInstrumentTracks.size() == 1U
                        && !old.experimentalInstrumentTracks[0].hasProxy
                        && old.experimentalInstrumentTracks[0].pluginVersion.isEmpty()
-                       && old.experimentalInstrumentTracks[0].proxyUpdateMode == "auto",
-                   "p1b: v19 loads with no proxy, no plugin version, update mode auto");
+                       && old.experimentalInstrumentTracks[0].proxyUpdateMode == "manual",
+                   "p1b: v19 loads with no proxy, no plugin version, update mode manual");
         }
 
         // Malformed proxy metadata / malformed timeline rate never fail the load (PI-025).
@@ -1195,8 +1195,8 @@ namespace
                    "p1b: malformed proxy object degrades to no-proxy");
             expect(back.timelineSampleRate == 48000.0,
                    "p1b: malformed timeline rate falls back to deviceSampleRateAtSave");
-            expect(back.experimentalInstrumentTracks[0].proxyUpdateMode == "auto",
-                   "p1b: unrecognized proxyUpdateMode repairs to auto");
+            expect(back.experimentalInstrumentTracks[0].proxyUpdateMode == "manual",
+                   "p1b: unrecognized proxyUpdateMode repairs to manual");
         }
 
         // Newer versions stay rejected (unchanged contract).
@@ -1217,7 +1217,7 @@ namespace
         {
             ProjectFileExperimentalInstrumentTrackV1 et = makeV20FixtureProject().experimentalInstrumentTracks[0];
             stripExperimentalInstrumentTrackPluginFieldsForUndo(et);
-            expect(!et.hasProxy && et.pluginVersion.isEmpty() && et.proxyUpdateMode == "auto",
+            expect(!et.hasProxy && et.pluginVersion.isEmpty() && et.proxyUpdateMode == "manual",
                    "p1b: undo strip clears proxy metadata, plugin version and update mode");
         }
 
@@ -7727,6 +7727,7 @@ namespace
         bool recording = false;
         std::map<TrackId, bool> quiescent; // absent = quiescent (eligible)
         std::set<TrackId> primaryMissing;  // exists=false but derived identity available
+        std::set<TrackId> poweredOff;      // track switched Off (Power)
         std::vector<TrackId> observedChanges;
         std::unique_ptr<proxy_policy::ProxyUpdatePolicyService> policy;
 
@@ -7775,6 +7776,7 @@ namespace
             };
             d.onRenderRelevantChangeObserved
                 = [this](const TrackId t) { observedChanges.push_back(t); };
+            d.destinationPoweredOff = [this](const TrackId t) { return poweredOff.count(t) != 0; };
             policy = std::make_unique<proxy_policy::ProxyUpdatePolicyService>(std::move(d));
         }
 
@@ -8069,6 +8071,108 @@ namespace
         expect(pf.policy->retry(TrackId{ 1 }) && pf.finishJob(TrackId{ 1 })
                    && pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Current,
                "p1h-manual: explicit Retry renders and publishes to Current");
+    }
+
+    // Automatic rendering is opt-in (2026-11-05): a missing or unknown mode is Manual, the
+    // writer always stores the mode, and an Off track never renders in any mode.
+    void testProxyPolicyOptInAndPoweredOffTrack()
+    {
+        using proxy_policy::ProxyUpdateMode;
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        expect(proxy_policy::parseProxyUpdateMode({}) == ProxyUpdateMode::Manual
+                   && proxy_policy::parseProxyUpdateMode("bogus") == ProxyUpdateMode::Manual
+                   && proxy_policy::parseProxyUpdateMode("auto") == ProxyUpdateMode::AutoAfterIdle,
+               "opt-in: a missing or unknown mode parses as Manual, only explicit auto is Auto");
+
+        // Writer: every mode is explicit on disk, Auto included, and reads back unchanged.
+        const juce::File file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                    .getChildFile("dal_optin_modes.dalproj");
+        for (const char* mode : { "auto", "onSave", "manual", "off" })
+        {
+            ProjectFileV1 data = makeV20FixtureProject();
+            data.experimentalInstrumentTracks[0].proxyUpdateMode = mode;
+            const auto wr = writeProjectFile(file, data);
+            juce::var root;
+            (void)juce::JSON::parse(file.loadFileAsString(), root);
+            bool explicitOnDisk = false;
+            if (const auto* exArr = root.getProperty("experimentalInstrumentTracks", {}).getArray())
+            {
+                explicitOnDisk = !exArr->isEmpty()
+                                 && (*exArr)[0].getProperty("proxyUpdateMode", {}).toString() == mode;
+            }
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(file, back);
+            expect(wr.wasOk() && rr.wasOk() && explicitOnDisk
+                       && back.experimentalInstrumentTracks[0].proxyUpdateMode == mode,
+                   std::string("opt-in: mode is written explicitly and kept: ") + mode);
+        }
+        (void)file.deleteFile();
+
+        // A destination whose mode string is empty (old file, no key) never renders on its own.
+        {
+            PolicyFixture pf;
+            pf.modes[TrackId{ 1 }] = {};
+            pf.addCurrentDest(TrackId{ 1 }, "a");
+            pf.policy->tick();
+            pf.edit(TrackId{ 1 }, "b");
+            pf.advance(proxy_policy::kAutoIdleDelayMs * 3.0);
+            expect(!pf.hasActiveJob(TrackId{ 1 })
+                       && pf.status(TrackId{ 1 }).state == RS::WaitingForManual,
+                   "opt-in: a destination without a saved mode waits for Render now");
+            expect(pf.policy->renderNow(TrackId{ 1 }) && pf.finishJob(TrackId{ 1 }),
+                   "opt-in: Render now still renders a destination without a saved mode");
+        }
+
+        // An Off track: Auto never fires, Render now and Retry are refused, a running job is
+        // cancelled, and back On a still-stale Auto destination re-arms a full window.
+        {
+            PolicyFixture pf;
+            pf.modes[TrackId{ 1 }] = "auto";
+            pf.addCurrentDest(TrackId{ 1 }, "a");
+            pf.policy->tick();
+            pf.poweredOff.insert(TrackId{ 1 });
+            pf.edit(TrackId{ 1 }, "b");
+            pf.advance(proxy_policy::kAutoIdleDelayMs * 2.0);
+            expect(!pf.hasActiveJob(TrackId{ 1 }), "off-track: Auto never renders an Off track");
+            pf.modes[TrackId{ 1 }] = "manual";
+            expect(!pf.policy->renderNow(TrackId{ 1 }) && !pf.policy->retry(TrackId{ 1 })
+                       && !pf.hasActiveJob(TrackId{ 1 }),
+                   "off-track: Render now and Retry are refused while the track is Off");
+            pf.poweredOff.clear();
+            pf.fx.engine.holdRender = true;
+            expect(pf.policy->renderNow(TrackId{ 1 }) && pf.hasActiveJob(TrackId{ 1 }),
+                   "off-track: back On, Render now starts a job");
+            pf.poweredOff.insert(TrackId{ 1 });
+            pf.policy->tick();
+            pf.fx.engine.holdRender = false;
+            expect(pf.fx.pumpUntilTerminal(TrackId{ 1 })
+                       && pf.fx.sched->jobStatus(TrackId{ 1 }).phase == ProxyJobPhase::Cancelled,
+                   "off-track: switching Off cancels the running job");
+            pf.modes[TrackId{ 1 }] = "auto";
+            pf.poweredOff.clear();
+            pf.advance(1000.0);
+            expect(pf.status(TrackId{ 1 }).state == RS::WaitingForIdle
+                       && !pf.hasActiveJob(TrackId{ 1 }),
+                   "off-track: back On, a stale Auto destination waits a full idle window");
+            pf.advance(proxy_policy::kAutoIdleDelayMs);
+            expect(pf.hasActiveJob(TrackId{ 1 }) || pf.fx.sched->destinationState(TrackId{ 1 })
+                                                         == ProxyDestinationState::Current,
+                   "off-track: the re-armed Auto window renders when it elapses");
+        }
+
+        // Status model: Render now is unavailable with an explanation on an Off track.
+        {
+            proxy_status::ProxyStatusInputs in;
+            in.destinationState = ProxyDestinationState::Stale;
+            in.policy.mode = ProxyUpdateMode::Manual;
+            expect(proxy_status::buildProxyStatusView(in).canRenderNow,
+                   "off-track: a stale Manual destination offers Render now while On");
+            in.trackPoweredOff = true;
+            const auto v = proxy_status::buildProxyStatusView(in);
+            expect(!v.canRenderNow && v.renderNowTooltip.contains("Off")
+                       && v.tooltip.contains("Turn the track On"),
+                   "off-track: Render now is disabled and explained while the track is Off");
+        }
     }
 
     void testProxyPolicyOffModeAndFailureRearm()
@@ -9795,6 +9899,7 @@ int main()
     testProxyPolicyRecordingPausesEligibilityNotPlayback();
     testProxyPolicyOnSaveMode();
     testProxyPolicyManualMode();
+    testProxyPolicyOptInAndPoweredOffTrack();
     testProxyPolicyOffModeAndFailureRearm();
     testProxyPolicySnapshotEligibilityDefersCapture();
     testProxyPolicyProjectCloseAndReplacementDropRuntimeState();

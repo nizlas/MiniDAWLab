@@ -863,7 +863,7 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     persistedPrimaryStateBase64_.clear();
     hasProxyMetadata_ = false;
     proxyMetadata_ = {};
-    proxyUpdateMode_ = "auto";
+    proxyUpdateMode_ = "manual";
     hasSecondary_ = false;
     secondaryDescriptor_ = {};
     secondaryPluginBundlePath_.clear();
@@ -1437,7 +1437,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
     persistedPluginVersion_ = chosen.pluginVersion;
     hasProxyMetadata_ = chosen.hasProxy;
     proxyMetadata_ = chosen.hasProxy ? chosen.proxy : ProjectFileProxyMetadataV20{};
-    proxyUpdateMode_ = chosen.proxyUpdateMode.isNotEmpty() ? chosen.proxyUpdateMode : juce::String("auto");
+    proxyUpdateMode_ = chosen.proxyUpdateMode.isNotEmpty() ? chosen.proxyUpdateMode : juce::String("manual");
     // v21 Secondary restore (P2): reader-validated values; absent ⇒ unassigned. Restoring these
     // fields never touches the Primary restore state above.
     hasSecondary_ = chosen.hasSecondary;

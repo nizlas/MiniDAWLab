@@ -325,8 +325,8 @@ struct ProjectFileExperimentalInstrumentTrackV1
     bool hasProxy = false;
     ProjectFileProxyMetadataV20 proxy;
     /// v20+ optional (`proxyUpdateMode`): "auto" | "onSave" | "manual" | "off" (steering §18.1).
-    /// Absent or unrecognized loads as "auto"; the key is omitted on save when it equals "auto".
-    juce::String proxyUpdateMode { "auto" };
+    /// Absent or unrecognized loads as "manual"; the key is always written, "auto" included.
+    juce::String proxyUpdateMode { "manual" };
     /// v21+ optional (`secondary` object, P2 — steering §17, PID-008/PID-009): the OPTIONAL
     /// locally-available Secondary working instrument for machines where the Primary cannot
     /// load. Stored completely separately from the Primary identity/state fields above and from

@@ -424,12 +424,12 @@ public:
     /// [Message thread] P1H mode change (UI): persisted project state — the CALLER marks the
     /// project dirty on a true return (§18.3: dirties the project, never part of musical undo;
     /// the undo DTO strips it, see stripExperimentalInstrumentTrackPluginFieldsForUndo).
-    /// Unrecognized values repair to "auto" like the project reader. Returns true when changed.
+    /// Unrecognized values repair to "manual" like the project reader. Returns true when changed.
     bool setProxyUpdateModeFromUi(const juce::String& mode) noexcept
     {
-        const juce::String valid = (mode == "onSave" || mode == "manual" || mode == "off")
+        const juce::String valid = (mode == "auto" || mode == "onSave" || mode == "off")
                                        ? mode
-                                       : juce::String("auto");
+                                       : juce::String("manual");
         if (valid == proxyUpdateMode_)
         {
             return false;
@@ -822,7 +822,7 @@ private:
     /// write this record.
     mutable proxy_checkpoint::SavedPrimaryBlobRevisionRecord savedPrimaryBlob_;
     /// Per-destination update mode (steering §18.1): "auto" | "onSave" | "manual" | "off".
-    juce::String proxyUpdateMode_ { "auto" };
+    juce::String proxyUpdateMode_ { "manual" };
     juce::File proxyAssetSourceHint_; ///< P1H Save As rehoming (runtime-only, see accessor)
     /// v21 Secondary instrument configuration (P2; steering §17, PID-009). Fully independent of
     /// the Primary fields above and never a proxy-fingerprint input. The state blob is `mutable`

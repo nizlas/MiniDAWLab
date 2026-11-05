@@ -999,8 +999,9 @@ public:
                     = instrumentRuntimeCoordinator_ != nullptr
                           ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
                           : nullptr;
-                return c != nullptr ? c->getProxyUpdateMode() : juce::String("auto");
+                return c != nullptr ? c->getProxyUpdateMode() : juce::String("manual");
             };
+            polDeps.destinationPoweredOff = [this](const TrackId tid) { return isTrackPoweredOff(tid); };
             polDeps.identityForTrack = [this](const TrackId tid) {
                 proxy_policy::ProxyUpdatePolicyService::DestinationIdentity id;
                 if (proxyRenderEngine_ != nullptr)
@@ -1087,6 +1088,7 @@ public:
                     = c != nullptr ? c->getProxyMetadata() : nullptr;
                 in.hasMetadata = meta != nullptr;
                 in.silentGeneration = meta != nullptr && meta->silentGeneration;
+                in.trackPoweredOff = isTrackPoweredOff(tid);
                 return proxy_status::buildProxyStatusView(in);
             };
             proxyUi.setUpdateMode = [this](const TrackId tid, const int modeComboIndex) {
@@ -8386,6 +8388,14 @@ private:
     {
         return recorder_.isRecording()
                || (recordingCoordinator_ != nullptr && recordingCoordinator_->isMidiTakeActive());
+    }
+
+    /// The row is switched Off (Power) in the published snapshot.
+    [[nodiscard]] bool isTrackPoweredOff(const TrackId tid) const
+    {
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        const int index = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+        return index >= 0 && snap->getTrack(index).isTrackOff();
     }
 
     Transport& transport;
