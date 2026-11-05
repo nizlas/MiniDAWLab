@@ -16,7 +16,10 @@ result report for branch `claude/resource-saving`. Evidence extracts:
   numbers below were measured with the first, more permissive rule, under which instruments that
   had not received MIDI also rested: the stopped callback went from 3.2 ms to 0.75 ms before the
   first Play and to 1.5 ms after Play → Stop; process CPU from 0.69 to 0.40–0.49 core. With
-  revision 2 part of that gain is gone (section 5); it has not been re-measured.
+  revision 2, re-measured after stage 0 against the exact base (section 10): stopped callback
+  3.2 → 1.0 ms before the first Play and 3.3 → 1.8 ms after Stop; process CPU 0.71 → 0.51 core
+  before Play, 0.76 → 0.63 right after Stop, 0.66 → 0.56 thirty seconds later. Category-based
+  rest is a compatibility heuristic, not proof that a plug-in can never sound by itself.
 * **Not solved:** stages whose plug-ins report an infinite or no tail (Pro-R reports infinite,
   AmpliTube 4 reports 0) keep running after they have had input, by design. The message thread's
   idle cost (19 % of a core) is **observed but not explained** (section 6).
@@ -426,5 +429,85 @@ different order and a recomputed delay time (333.300049 vs 333.300018 ms) after 
 state bytes after Off → On differ from those captured at Off. That is the plug-in re-serialising,
 not DAL losing state; the test uses explicit non-synced states, as the existing Off test does.
 
-**Not done in stage 0:** CPU after rest revision 2 was not re-measured (needs the ASIO device; no
-second audio instance was started). The checks above ran in test fixtures, not in the running app.
+**Not done in stage 0:** CPU after rest revision 2 was not re-measured in that step; it was
+measured afterwards (section 10). The checks above ran in test fixtures, not in the running app.
+
+## 10. CPU re-measurement after stage 0 (2026-11-05, 21:26–21:34)
+
+**Builds.** Stage 0: `claude/resource-saving` build revision `dc8d9db` (branch head `6601175`
+only adds documents; `git diff dc8d9db 6601175 -- src CMakeLists.txt` is empty), exe linked
+20:21 after that commit. Baseline: the exact base `8472feb`, built for this run in a separate
+worktree. Neither build was changed.
+
+**Conditions**, logged by each run: ASIO "ASIO Fireface USB", 48 000 Hz, 512 samples (10.667 ms
+budget), in/out latency 535/552 samples; 7 render workers (the default here); Core Ultra 9 275HX,
+24 cores. Audio device settings, the original project and the user configuration were left as
+they were. No DAL or Cubase was running before each run; the runs were sequential, one process at
+a time. Each run opened its own file in a fresh temp copy of `TSE_pt2_261031`
+(`%TEMP%\dal-s0-cpu`). Command per run: `--stability-perf-profile <copy> --seconds 20 --warmup 5
+--idle --idle-gap 30`, profiler on, the same path and passage as section 5 (start at 0.00 s,
+cycle on, 20 s measured after 5 s warm-up). One run per build, so differences of a few hundredths
+of a core are within run-to-run noise. Log extracts: `docs/evidence/resource-saving-2026-11-05/s0cpu-*`.
+
+**Rows On as saved** (36 audio rows, 34 muted, 1 saved Off; 14 instruments; 58 insert instances):
+
+| Window | Callback ms mean / max, base → stage 0 | Process CPU, cores (Windows % of 24 cores), base → stage 0 |
+|---|---|---|
+| 1. Loaded, before the first Play | 3.24 / 6.01 → **1.01 / 1.79** | 0.71 (2.9 %) → **0.51 (2.1 %)** |
+| 2. Playing, same passage as section 5 | 0.93 / 1.41 → **0.80 / 1.27** | 0.92 (3.8 %) → **0.61 (2.5 %)** |
+| 3a. 0–20 s after Stop | 3.29 / 6.06 → **1.82 / 3.51** | 0.76 (3.2 %) → **0.63 (2.6 %)** |
+| 3b. 30–50 s after Stop | 3.17 / 6.47 → **1.71 / 3.38** | 0.66 (2.8 %) → **0.56 (2.3 %)** |
+
+* No overrun and no block above 70 % of the budget in any window of either build.
+* Memory, stopped: base 5.01 GB private / 4.72 GB working set; stage 0 4.99 GB / 4.70 GB. Rest
+  does not free memory.
+* Processed versus resting: base calls 30 of 72 registered instances (insert slots and
+  instruments) in every window. Stage 0 calls 19 before the first Play and 23 during and after
+  playback; 11 of 40 insert stages rest before the first Play, 7 after Stop. Instrument blocks
+  rested: 0 (instruments never rest under revision 2), against 114 237 under revision 1.
+* Insert stage blocks after Stop: 13 439 rested / 15 391 processed in window 3a, and 33 040 /
+  37 760 from the end of 3a to the end of 3b (gap plus window). About 47 % of stage blocks rest in
+  both, so nothing more came to rest during the 30 s gap.
+* Proxy: 0 destinations selected, 0 underruns; no proxy render job was logged (proxy rendering is
+  opt-in and the project's rows read as Manual).
+* Tails are not over at 3a: the master output peaked at 0.06 in the first window after Stop and
+  0.000 in the window 30 s later, in both builds. Stage 0 keeps every stage that had input and
+  reports a 0 or infinite tail running, so 3b is not lower because tails ended.
+* The playing window peaked at 0.612 at the master in both builds (the same passage).
+
+**What costs most after Stop in stage 0** (summed plug-in time per block, window 3a): VB3-II ×3
+1.32 ms, Pro-R ×5 1.03 ms, HALion Sonic ×9 0.25 ms, Groove Agent SE ×2 0.19 ms; Pro-Q 3 and DAL
+Mono Delay below 0.03 ms each. In the base the same window has Pro-R ×11 at 2.22 ms and AmpliTube
+4 at 0.28 ms. So the remaining stopped cost is the instruments (which never rest) and the five
+Pro-R that had input (infinite tail). Per thread, 8 s sample after the gap: ASIO callback thread
+16 % of a core (base 28 %), message thread 21 % (base 21 %).
+
+**4. Every source row saved Off, new process** (`TSE_pt2-alloff.dalproj`). The fixture was made
+without running DAL: a copy of the project file with `"off": true` added to the 36 audio, 14
+instrument and 1 MIDI rows and nothing else changed (checked by comparing the parsed JSON with
+that key removed). So no AmpliTube instance was created or destroyed to make it. Buses: there are
+no group buses; Stereo Out stays On and has no inserts.
+
+| Window | Callback ms mean / max | Process CPU, cores (Windows %) |
+|---|---|---|
+| 1. Before the first Play | 0.022 / 0.080 | 0.09 (0.4 %) |
+| 2. Playing | 0.035 / 0.107 | 0.09 (0.4 %) |
+| 3a. Right after Stop | 0.023 / 0.138 | 0.09 (0.4 %) |
+| 3b. 30 s after Stop | 0.020 / 0.132 | 0.07 (0.3 %) |
+
+Private 0.39 GB, working set 0.28 GB in every window (load peak: working set 0.31 GB, paged
+0.42 GB); 0 insert instances, 0 loaded instrument Primaries (14 empty hosts), 0 proxy readers,
+108 threads (301 with rows On). Message thread 4 % of a core here, against 21 % with rows On:
+that is an observation about the loaded plug-ins' presence, not a measured cause (section 6
+stands). Not run: a base comparison for this case (the base loads every plug-in of an Off row,
+so it equals the On baseline above) and switching Off in a running process (section 5 D), which
+would destroy the loaded AmpliTube instances again.
+
+**Revision 1 figures** in section 5 are history, not results for the current rule: before the
+first Play revision 1 measured 0.75 ms and 0.40 core, after Stop 1.54 ms and 0.49 core; on a
+different day's run of the same base.
+
+**Category rest is a compatibility heuristic.** It trusts the plug-in's own VST3 category. A
+plug-in that declares itself an EQ, reverb or distortion and still generates sound by itself
+without input, a parameter, state or transport change would be cut off while resting. DAL does
+not and cannot prove that this never happens.

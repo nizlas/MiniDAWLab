@@ -1,0 +1,12 @@
+﻿[21:33:31] after-gap window=8.0s processCoreEquiv=0.08 windowsTotalPct=0.3% threads=108 WS=281MB Private=390MB
+
+   Id Pct1Core Prio Desc Start                  
+   -- -------- ---- ---- -----                  
+52844      4.1   15      MiniDAWLab.exe+0x690AA0
+46888      1.6   15      nvwgf2umx.dll+0xE708F0 
+ 7336      1.2   15      ucrtbase.dll+0x2CD00   
+50636      0.6   13      ucrtbase.dll+0x2CD00   
+37860      0.4   14      ucrtbase.dll+0x2CD00   
+
+
+
