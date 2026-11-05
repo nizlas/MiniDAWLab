@@ -312,6 +312,9 @@ kernel stacks (ETW / WPA).
 | `AudioStripParallelFocusedTests` | 85 / 6 failures | the same 6 failures as an older `main` build (pre-existing); runs with rest suspended because it counts every block |
 | `ReadAheadPrototypeFocusedTests` | 217 / 39 failures | the same 39 as an older `main` build (pre-existing); runs with rest suspended |
 
+Rerun against the exact base `8472feb` (same toolchain and settings, two runs each): the same 6 and 39
+failing checks at base and on this branch. See `OFF_UNLOADING_AND_AMPLITUBE_ISOLATION_PLAN_2026-11-05.md` A.4.
+
 The Off commit was also built and tested on its own (without the rest commit):
 `InsertPersistenceFocusedTests` 143 / 0, `MiniDAWSelftests` 3 524 / 0, `ExportLevelFocusedTests` 76 / 0.
 

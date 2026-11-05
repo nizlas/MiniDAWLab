@@ -1,0 +1,61 @@
+# ReadAheadPrototypeFocusedTests: failing checks, identical in base 8472feb and PR 4ad4784, runs 1 and 2
+-- stable linear playback: flag-off vs read-ahead bit-identity, exactly-once stream --
+[FAIL] no misses, nothing discarded stale
+[FAIL] STOP (intent only, playhead kept) is a continuation point: no reset, no drain
+[FAIL] rows stay owned across the stop (resume would continue the queue)
+[FAIL] chain stream contiguous across adoption (no dup/loss/reorder)
+[FAIL] chain processed every played block, at most depth segments ahead at stop
+[FAIL] chain stream contiguous across adoption (no dup/loss/reorder)
+[FAIL] chain processed every played block, at most depth segments ahead at stop
+-- pause -> resume at the same position: queue CONTINUES (no discard, no re-feed) --
+[FAIL] pause + resume output BIT-IDENTICAL to the direct path (paused blocks silent in both)
+[FAIL] adopted ONCE — the pause did not re-adopt
+[FAIL] nothing discarded: the queue rode through the pause untouched
+[FAIL] every playing block after adoption consumed; paused blocks consumed nothing
+[FAIL] chain stream contiguous across pause/resume — ZERO duplicate positions (the v1 defect)
+[FAIL] state lead still bounded by depth
+-- persistent playback offset: audible-domain queue keys (v1 missed 100% here) --
+[FAIL] chain stream contiguous under the offset
+-- stop-button jump (stop + seek 0) -> replay: discard + documented visible residue --
+[FAIL] first run: chain state advanced at most depth segments past the stop
+[FAIL] exactly one stream break: the deliberate jump
+[FAIL] the jump performed exactly one discard reset per owned row
+[FAIL] the full ring of every row was discarded UNPLAYED at the jump (counted residue)
+-- seek while ahead: discard reset, re-adoption, stream restarts AT the target --
+[FAIL] the seek performed exactly one discard reset per owned row
+[FAIL] every queued segment discarded unplayed
+[FAIL] exactly one stream break (the seek)
+-- cycle: worker replicates the engine's wrap segmentation — bit-identity across passes --
+[FAIL] no discard across any wrap (prediction matched the engine exactly)
+[FAIL] every segment of every pass HIT by key — loop passes distinguished by sequence, not position
+[FAIL] direct path's call sequence is an exact prefix of the read-ahead sequence (positions + sizes)
+-- short loop (span < block): the 'land at R, go linear' production quirk replicated --
+[FAIL] no prediction divergence at the linear escape
+-- cycle toggle / locator move while owned: deliberate discontinuity, bounded + counted --
+[FAIL] each geometry edit performed exactly one discard reset per owned row — and nothing else did
+-- worker never runs: uncommitted primes decline, every block stays on the direct path --
+[FAIL] a declined prime is not a discontinuity reset
+[FAIL] the chain processed every playing block on the direct path
+-- transient single miss: stale discard of the late result, ownership retained --
+[FAIL] the late block-13 segment discarded UNPLAYED per row — never audio from a wrong time
+[FAIL] one miss is tolerated: no abandon, no reset, ownership retained
+[FAIL] the chain's input stream stayed contiguous through miss + stale discard (state aligned)
+[FAIL] rows still owned at the end
+-- Monitor enabled mid-run: IMMEDIATE discard handover, zero monitor-onset delay --
+[FAIL] exactly one discard reset: the monitored row's immediate handover
+[FAIL] the monitored row's full ring discarded unplayed (counted)
+-- insert chain removed while owned: ownership and queue SURVIVE the edit --
+[FAIL] chain edit forced NO reset — ownership survived (v2 improvement)
+-- save capture window: hold + gapless drain, zero state lead at capture, gapless resume --
+[FAIL] the save window discarded nothing and missed nothing
+[FAIL] chain stream contiguous through hold -> drain -> capture -> resume -> re-adoption
+-- save window FAILURE contract: stalled drain fails cleanly; Playing->Paused resolves --
+[ ok ] drain that cannot complete FAILS the window (no false success)
+[FAIL] whole scenario: no miss, no reset, nothing stale
+[FAIL] chain stream contiguous through the failed window AND the paused window
+-- guarded save: failed window => error + previous file + dirty kept; retry succeeds --
+[ ok ] save with a stalled drain FAILS (an error Result, never silent success)
+-- pause-ack timeout contract: no false exclusivity, no overlap, late-ack recovery --
+[ ok ] capture window FAILS while the pause cannot be acknowledged
+217 checks, 39 failure(s)
+exit=1
