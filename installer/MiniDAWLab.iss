@@ -18,6 +18,9 @@ AppId={{2F8C9A1B-0D3E-4F5A-8B2C-9E1D4A6F0B2C}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
+; Stamps the Setup.exe file version too (otherwise only ProductVersion is set).
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
 AppPublisher=MiniDAWLab
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
