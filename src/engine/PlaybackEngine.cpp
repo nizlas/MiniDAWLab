@@ -1735,9 +1735,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 continue;
             }
             const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
-            if (srcTr.getKind() != TrackKind::Audio)
+            if (srcTr.getKind() != TrackKind::Audio || srcTr.isTrackOff())
             {
-                continue;
+                continue; // an Off row has nothing to render ahead
             }
             if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
             {
@@ -2100,6 +2100,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
                 if (tr.isTrackOff())
                 {
+                    // An Off host is never processed, so MIDI routed to it this block (MIDI To,
+                    // live input, audition) would pile up and burst out when it is switched On.
+                    entry->host->audioThread_discardPendingMidi();
+                    if (entry->auditionHost != nullptr && entry->auditionHost != entry->host)
+                    {
+                        entry->auditionHost->audioThread_discardPendingMidi();
+                    }
                     fillPlayEdgePeekOnly("sessionOff");
                     continue;
                 }
@@ -3726,6 +3733,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
 
             if (tr.isTrackOff())
             {
+                entry->host->audioThread_discardPendingMidi(); // same as the realtime path
                 continue;
             }
             // Same as the realtime path: mute / fader −∞ are gain 0, the host still processes so

@@ -1504,6 +1504,7 @@ void InstrumentTrackController::audioThread_flushPendingTransportOffsInto(Experi
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* const*, int, int, float, float) noexcept {}
 void ExperimentalInstrumentHost::audioThread_renderGenerationStageForBlock(int) noexcept {}
 void ExperimentalInstrumentHost::audioThread_beginAudioBlock(int) noexcept {}
+void ExperimentalInstrumentHost::audioThread_discardPendingMidi() noexcept {}
 void ExperimentalInstrumentHost::audioThread_addMidiEventForCurrentBlock(int, const juce::MidiMessage&) noexcept {}
 void ExperimentalInstrumentHost::audioThread_noteProxyTimelineSegmentForCurrentBlock(std::int64_t, int, int) noexcept {}
 void ExperimentalInstrumentHost::audioThread_noteProxyLoopRangeForCurrentBlock(std::int64_t, std::int64_t) noexcept {}

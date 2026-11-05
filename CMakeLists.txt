@@ -62,6 +62,7 @@ target_sources(MiniDAWLab PRIVATE
     src/app/LiveMidiInputCoordinator.cpp
     src/engine/LiveMidiInputBus.cpp
     src/app/TrackLanesEditCoordinator.cpp
+    src/app/TrackPowerCoordinator.cpp
     src/app/TransportLayoutHelper.cpp
     src/app/TransportPlayPauseStopController.cpp
     src/app/Vst3PluginPickerCoordinator.cpp

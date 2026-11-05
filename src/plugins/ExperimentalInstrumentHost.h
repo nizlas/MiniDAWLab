@@ -255,6 +255,10 @@ public:
         return forcedMidiChannelForDelivery_.load(std::memory_order_relaxed);
     }
 
+    /// [Audio thread] Drops MIDI queued for this block without processing (the row is Off).
+    /// Allocation-free: the buffers keep their capacity.
+    void audioThread_discardPendingMidi() noexcept;
+
     /// [Audio thread] Must be called at the start of each device callback before any
     /// `audioThread_addMidiEventForCurrentBlock` (transport I3e scheduling). Sets the sample clamp
     /// window to match this block's `numSamples`.

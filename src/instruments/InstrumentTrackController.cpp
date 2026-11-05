@@ -601,6 +601,158 @@ void InstrumentTrackController::setPowerOn(const bool on) noexcept
     sendChangeMessage();
 }
 
+void InstrumentTrackController::syncPowerMirrorFromSession() noexcept
+{
+    if (session_ == nullptr || experimentalDomainTrackId_ == kInvalidTrackId)
+    {
+        return;
+    }
+    const auto snap = session_->loadSessionSnapshotForAudioThread();
+    const int ix = snap != nullptr ? snap->findTrackIndexById(experimentalDomainTrackId_) : -1;
+    if (ix < 0)
+    {
+        return;
+    }
+    const bool on = !snap->getTrack(ix).isTrackOff();
+    if (on == powerOn_)
+    {
+        return;
+    }
+    powerOn_ = on;
+    publishRenderSnapshot();
+    sendChangeMessage();
+}
+
+bool InstrumentTrackController::captureRetainedPrimaryRowForUnload()
+{
+    if (host_ == nullptr || !host_->hasInstrument())
+    {
+        return false;
+    }
+    const ProjectFileExperimentalInstrumentTrackV1 block = buildExperimentalInstrumentProjectBlock();
+    if (!block.pluginWasLoadedOnSave || block.pluginStateBase64.isEmpty())
+    {
+        juce::Logger::writeToLog("[experimental-instrument] Off: state capture empty for track "
+                                 + juce::String((juce::int64)experimentalDomainTrackId_)
+                                 + "; the instrument stays loaded");
+        return false;
+    }
+    // Only the plug-in fields matter; clips and every other field come from the live controller.
+    ProjectFileExperimentalInstrumentTrackV1 r;
+    r.instrumentKind = block.instrumentKind;
+    r.pluginBundlePath = block.pluginBundlePath;
+    r.pluginWasLoadedOnSave = true;
+    r.pluginStateBase64 = block.pluginStateBase64;
+    r.hasGenericVst3Descriptor = block.hasGenericVst3Descriptor;
+    r.genericVst3Descriptor = block.genericVst3Descriptor;
+    r.pluginVersion = block.pluginVersion;
+    r.hasProxy = block.hasProxy;
+    r.proxy = block.proxy;
+    retainedPrimaryRow_ = std::move(r);
+    return true;
+}
+
+bool InstrumentTrackController::retainedPrimaryRowNeedsLoad() const noexcept
+{
+    if (!retainedPrimaryRow_.has_value())
+    {
+        return false;
+    }
+    const auto& r = *retainedPrimaryRow_;
+    if (r.instrumentKind == "GenericVst3")
+    {
+        return r.hasGenericVst3Descriptor || r.pluginWasLoadedOnSave || r.pluginBundlePath.isNotEmpty();
+    }
+    return (r.instrumentKind == "GrooveAgentSE" || r.instrumentKind == "HALionSonic") && r.pluginWasLoadedOnSave;
+}
+
+bool InstrumentTrackController::deferPendingAutoloadWhileOff()
+{
+    if (loadWhileOff_ || session_ == nullptr || experimentalDomainTrackId_ == kInvalidTrackId)
+    {
+        return false;
+    }
+    const auto snap = session_->loadSessionSnapshotForAudioThread();
+    const int ix = snap != nullptr ? snap->findTrackIndexById(experimentalDomainTrackId_) : -1;
+    if (ix < 0 || !snap->getTrack(ix).isTrackOff())
+    {
+        return false;
+    }
+    const bool anyPending = pendingProjectGrooveAutoload_ || pendingProjectHalionSonicAutoload_
+                            || pendingProjectGenericVst3Autoload_;
+    if (anyPending)
+    {
+        ProjectFileExperimentalInstrumentTrackV1 r;
+        r.instrumentKind = pendingInstrumentKind_.isNotEmpty() ? pendingInstrumentKind_ : experimentalInstrumentKind_;
+        r.pluginBundlePath = pendingAdvisoryPluginBundlePath_;
+        r.pluginWasLoadedOnSave = pendingPluginWasLoadedOnSave_;
+        r.pluginStateBase64 = pendingPluginStateBase64_;
+        r.hasGenericVst3Descriptor = pendingGenericVst3DescriptorValid_;
+        r.genericVst3Descriptor = pendingGenericVst3Descriptor_;
+        r.pluginVersion = persistedPluginVersion_;
+        r.hasProxy = hasProxyMetadata_;
+        r.proxy = proxyMetadata_;
+        retainedPrimaryRow_ = std::move(r);
+        appendProjectLoadDiagnosticLine("load: instrument kept unloaded (track Off) trackId="
+                                        + juce::String((juce::int64)experimentalDomainTrackId_)
+                                        + " kind=" + retainedPrimaryRow_->instrumentKind);
+    }
+    pendingProjectGrooveAutoload_ = false;
+    pendingProjectHalionSonicAutoload_ = false;
+    pendingProjectGenericVst3Autoload_ = false;
+    pendingGenericVst3DescriptorValid_ = false;
+    pendingPluginStateBase64_.clear();
+    syncShellWithHostState();
+    return true;
+}
+
+bool InstrumentTrackController::reloadPrimaryFromRetainedRow(ExperimentalInstrumentHost& host,
+                                                            juce::String& outWarning)
+{
+    outWarning.clear();
+    if (!retainedPrimaryRowNeedsLoad())
+    {
+        retainedPrimaryRow_.reset();
+        return host.hasInstrument();
+    }
+    const ProjectFileExperimentalInstrumentTrackV1 r = *retainedPrimaryRow_;
+    pendingInstrumentKind_ = r.instrumentKind;
+    pendingAdvisoryPluginBundlePath_ = r.pluginBundlePath;
+    pendingPluginStateBase64_ = r.pluginStateBase64;
+    pendingPluginWasLoadedOnSave_ = r.pluginWasLoadedOnSave;
+    pendingProjectGrooveAutoload_ = r.pluginWasLoadedOnSave && r.instrumentKind == "GrooveAgentSE";
+    pendingProjectHalionSonicAutoload_ = r.pluginWasLoadedOnSave && r.instrumentKind == "HALionSonic";
+    pendingGenericVst3Descriptor_ = r.genericVst3Descriptor;
+    pendingGenericVst3DescriptorValid_ = r.hasGenericVst3Descriptor;
+    pendingProjectGenericVst3Autoload_ = r.instrumentKind == "GenericVst3"
+                                         && (r.hasGenericVst3Descriptor || r.pluginWasLoadedOnSave
+                                             || r.pluginBundlePath.isNotEmpty());
+    loadWhileOff_ = true;
+    if (r.instrumentKind == "GenericVst3")
+    {
+        runPendingGenericVst3ProjectAutoload(host, outWarning);
+    }
+    else if (r.instrumentKind == "HALionSonic")
+    {
+        runPendingHalionSonicProjectAutoload(host, outWarning);
+    }
+    else
+    {
+        runPendingGrooveAgentProjectAutoload(host, outWarning);
+    }
+    loadWhileOff_ = false;
+    if (host.hasInstrument())
+    {
+        retainedPrimaryRow_.reset();
+        return true;
+    }
+    if (outWarning.isEmpty())
+    {
+        outWarning = "The instrument could not be loaded.";
+    }
+    return false;
+}
+
 void InstrumentTrackController::refreshMidiOutputChannelFromSession()
 {
     // Notes already sounding keep the channel they started on; their note-offs are queued with that
@@ -854,6 +1006,8 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     pendingInstrumentKind_.clear();
     experimentalInstrumentKind_.clear();
     pendingPluginStateBase64_.clear();
+    pendingPluginWasLoadedOnSave_ = false;
+    retainedPrimaryRow_.reset();
     drumLabels_.clear();
     experimentalDomainTrackId_ = kInvalidTrackId;
     persistedPluginVersion_.clear();
@@ -1093,6 +1247,26 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         if (liveBlobCapturedThisBuild)
         {
             dto.proxy.primaryStateRevisionAtSave = (std::int64_t)revisionReadBeforeStateCapture;
+        }
+    }
+    // Track Off: the Primary is unloaded, so the fields above came from an empty host. Write the
+    // plug-in exactly as it was when it was unloaded (or as the project saved it, for a row that
+    // was loaded Off). A later live capture replaces the retained row.
+    if (retainedPrimaryRow_.has_value() && (host_ == nullptr || !host_->hasInstrument()))
+    {
+        const ProjectFileExperimentalInstrumentTrackV1& r = *retainedPrimaryRow_;
+        dto.pluginBundlePath = r.pluginBundlePath;
+        dto.pluginWasLoadedOnSave = r.pluginWasLoadedOnSave;
+        dto.pluginStateBase64 = r.pluginStateBase64;
+        dto.hasGenericVst3Descriptor = r.hasGenericVst3Descriptor;
+        dto.genericVst3Descriptor = r.genericVst3Descriptor;
+        if (r.pluginVersion.isNotEmpty())
+        {
+            dto.pluginVersion = r.pluginVersion;
+        }
+        if (dto.hasProxy && r.hasProxy)
+        {
+            dto.proxy.primaryStateRevisionAtSave = r.proxy.primaryStateRevisionAtSave;
         }
     }
     dto.proxyUpdateMode = proxyUpdateMode_;
@@ -1432,6 +1606,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
     pendingInstrumentKind_ = chosen.instrumentKind;
     experimentalInstrumentKind_ = chosen.instrumentKind;
     pendingPluginStateBase64_ = chosen.pluginStateBase64;
+    pendingPluginWasLoadedOnSave_ = chosen.pluginWasLoadedOnSave;
     // v20 proxy/identity round-trip (P1B): reader-validated values; malformed proxy metadata
     // already degraded to "no proxy" in ProjectFile (never a load failure, PI-025).
     persistedPluginVersion_ = chosen.pluginVersion;
@@ -1563,6 +1738,10 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
                                                                     juce::String& outWarning)
 {
     outWarning.clear();
+    if (deferPendingAutoloadWhileOff())
+    {
+        return; // track Off: keep the saved plug-in as data, load nothing
+    }
     if (!trackActive_ || !pendingProjectGrooveAutoload_ || pendingInstrumentKind_ != "GrooveAgentSE")
     {
         pendingProjectGrooveAutoload_ = false;
@@ -1765,6 +1944,10 @@ void InstrumentTrackController::runPendingHalionSonicProjectAutoload(Experimenta
                                                                      juce::String& outWarning)
 {
     outWarning.clear();
+    if (deferPendingAutoloadWhileOff())
+    {
+        return; // track Off: keep the saved plug-in as data, load nothing
+    }
     if (!trackActive_ || !pendingProjectHalionSonicAutoload_ || pendingInstrumentKind_ != "HALionSonic")
     {
         pendingProjectHalionSonicAutoload_ = false;
@@ -1965,6 +2148,10 @@ void InstrumentTrackController::runPendingGenericVst3ProjectAutoload(Experimenta
                                                                      juce::String& outWarning)
 {
     outWarning.clear();
+    if (deferPendingAutoloadWhileOff())
+    {
+        return; // track Off: keep the saved plug-in as data, load nothing
+    }
     const bool kindIsGeneric = experimentalInstrumentKind_ == "GenericVst3"
                                || pendingInstrumentKind_ == "GenericVst3";
     if (!trackActive_ || !pendingProjectGenericVst3Autoload_ || !kindIsGeneric)

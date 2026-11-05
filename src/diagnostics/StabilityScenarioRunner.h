@@ -145,7 +145,7 @@ enum class StabilityScenarioKind
     /// Sibling copy only.
     Mixer,
     /// `--stability-perf-profile <project> [--seconds N] [--warmup N] [--start-seconds S]
-    /// [--buffer N] [--mixer-open] [--profile-off] [--idle] [--idle-gap N]`: diagnostic — loads the project, documents the
+    /// [--buffer N] [--mixer-open] [--profile-off] [--idle] [--idle-gap N] [--all-off] [--save]`: diagnostic — loads the project, documents the
     /// runtime (build, CPU, device, ACTUAL buffer size after an optional request, loaded vs
     /// processed instruments / inserts / proxies), plays from `S` with the project's cycle state,
     /// discards a warm-up window, then measures `N` seconds: engine callback load (mean / max /
@@ -273,6 +273,10 @@ struct StabilityScenarioRequest
     /// after Stop (right away, and again after `perfIdleGapSeconds`). Same window contents.
     bool perfIdleWindows = false;
     int perfIdleGapSeconds = 30;
+    /// `--all-off`: switch every source row Off after load (before the windows); `--save` then
+    /// saves the project (use a temp copy).
+    bool perfAllSourcesOff = false;
+    bool perfSaveAfterAllOff = false;
     /// ReadAheadTransitions only: `--reopen-check` = fresh-process reopen of the saved test copy
     /// compared against the sidecar the transitions walk wrote (instead of the walk itself).
     bool readAheadReopenCheck = false;
@@ -783,6 +787,9 @@ struct StabilityRunnerHooks
         /// Track counts per kind; instrument hosts loaded / proxy-selected / Secondary loaded;
         /// insert plug-in instances; MIDI source rows.
         std::function<juce::String()> describeProjectLoad;
+        /// Switch every Audio, Instrument and MIDI row Off through the production Power path and
+        /// unload their plug-ins now; returns a one-line summary. Group buses and Stereo Out stay.
+        std::function<juce::String()> switchSourceTracksOff;
         std::function<void(bool)> setProfilerEnabled;
         /// Clear every measurement window (engine load, profiler, output peak hold, master meter).
         std::function<void()> resetMeasurementWindows;

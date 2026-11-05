@@ -1171,6 +1171,16 @@ void TrackLanesView::setOnDeleteTrackRequested(
     onDeleteTrackRequested_ = std::move(onDeleteTrackRequested);
 }
 
+bool TrackLanesView::requestTrackPowerOn(const TrackId tid)
+{
+    if (onRequestTrackPowerOn_ != nullptr)
+    {
+        return onRequestTrackPowerOn_(tid);
+    }
+    session_.setTrackOff(tid, false);
+    return true;
+}
+
 void TrackLanesView::setOnDeleteTracksRequested(
     std::function<void(const std::vector<TrackId>&)> onDeleteTracksRequested) noexcept
 {
@@ -1908,7 +1918,14 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     nowOff = !snap->getTrack(idx).isTrackOff();
                 }
             }
-            session_.setTrackOff(tid, nowOff);
+            if (nowOff)
+            {
+                session_.setTrackOff(tid, true);
+            }
+            else if (!requestTrackPowerOn(tid))
+            {
+                return false;
+            }
             onArm();
             session_.setActiveTrack(tid);
             if (onAudioHeaderActivated_ != nullptr)

@@ -1806,6 +1806,16 @@ void ExperimentalInstrumentHost::enqueueAllNotesOffFromMessageThread()
     }
 }
 
+void ExperimentalInstrumentHost::audioThread_discardPendingMidi() noexcept
+{
+    rtBlockMidi_.clear(); // keeps capacity: no allocation
+    if (midiIo_ != nullptr)
+    {
+        const juce::ScopedLock sl(midiIo_->midiLock);
+        midiIo_->uiPendingMidi.clear();
+    }
+}
+
 void ExperimentalInstrumentHost::audioThread_beginAudioBlock(int numSamples) noexcept
 {
     audioCallbackBlockSamples_ = juce::jmax(0, numSamples);

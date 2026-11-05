@@ -2403,7 +2403,14 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         {
             return false;
         }
-        ctl->setPowerOn(!ctl->isPowerOn());
+        if (ctl->isPowerOn())
+        {
+            ctl->setPowerOn(false);
+        }
+        else if (!trackLanes_.requestTrackPowerOn(laneTid))
+        {
+            return false;
+        }
         session_.setActiveTrack(laneTid);
         repaintExtras();
         return true;

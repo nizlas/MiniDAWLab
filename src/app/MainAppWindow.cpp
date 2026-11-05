@@ -70,6 +70,7 @@
 #include "instruments/ProxyPlaybackCoordinator.h"
 #include "instruments/ProxyStatusModel.h"
 #include "instruments/ProxyUpdatePolicyService.h"
+#include "app/TrackPowerCoordinator.h"
 #include "instruments/InstrumentTrackController.h"
 #include "instruments/ProxyAssetStore.h"
 #include "instruments/ProxyOfflineSequencer.h"
@@ -801,6 +802,7 @@ public:
             // P2 (steering §17): the Secondary fallback. Consulted only when neither Primary nor
             // a usable Current proxy can play — the ensure call lazily instantiates the Secondary
             // (message thread; existing safe load path) and latches per-descriptor failures.
+            pbDeps.destinationPoweredOff = [this](const TrackId tid) { return isTrackPoweredOff(tid); };
             pbDeps.secondaryUsable = [this](const TrackId tid) {
                 return instrumentRuntimeCoordinator_ != nullptr
                        && instrumentRuntimeCoordinator_->ensureSecondaryInstrumentLoadedForTrack(tid);
@@ -2191,6 +2193,10 @@ public:
                     {
                         proxyUpdatePolicyService_->noteProjectChanged();
                     }
+                    if (trackPowerCoordinator_ != nullptr)
+                    {
+                        trackPowerCoordinator_->noteProjectChanged();
+                    }
                 },
                 // P1H onProjectLoaded: capture asset source hints for later Save As rehoming.
                 [this](const juce::File& projectFolder) {
@@ -2337,6 +2343,87 @@ public:
                                            juce::Colours::white.withAlpha(0.25f));
         savingProjectToastLabel_.setInterceptsMouseClicks(false, false);
         addChildComponent(savingProjectToastLabel_);
+        trackPowerToastLabel_.setJustificationType(juce::Justification::centred);
+        trackPowerToastLabel_.setFont(juce::FontOptions(14.0f));
+        trackPowerToastLabel_.setColour(juce::Label::backgroundColourId, juce::Colour(0xee2a2a33));
+        trackPowerToastLabel_.setColour(juce::Label::textColourId, juce::Colours::white);
+        trackPowerToastLabel_.setColour(juce::Label::outlineColourId, juce::Colours::white.withAlpha(0.25f));
+        trackPowerToastLabel_.setInterceptsMouseClicks(false, false);
+        addChildComponent(trackPowerToastLabel_);
+
+        // Track Power: plug-in instances follow the Off flag (docs/RESOURCE_SAVING_2026-11-05.md §3).
+        {
+            pluginHost_.setTrackDormancyQuery([this](const TrackId tid) { return isTrackPoweredOff(tid); });
+            pluginHost_.setPowerLifecycleLog([](const juce::String& line) {
+                appendTrackPowerDiagnosticLine(line);
+                writeLastOperationBreadcrumb("track power: " + line);
+            });
+            TrackPowerCoordinator::Callbacks pc;
+            pc.loadSnapshot = [this] { return session.loadSessionSnapshotForAudioThread(); };
+            pc.setTrackOff = [this](const TrackId tid, const bool off) {
+                InstrumentTrackController* const ctl = instrumentRuntimeCoordinator_ != nullptr
+                                                           ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid)
+                                                           : nullptr;
+                if (ctl != nullptr)
+                {
+                    ctl->setPowerOn(!off);
+                }
+                else
+                {
+                    session.setTrackOff(tid, off);
+                }
+            };
+            pc.waitForAudioCallbackExit = [this] { return playbackEngine_.waitForAudioCallbackExit(250.0); };
+            pc.instrumentHost = [this](const TrackId tid) -> ExperimentalInstrumentHost* {
+                return instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid)
+                                                                : nullptr;
+            };
+            pc.instrumentController = [this](const TrackId tid) -> InstrumentTrackController* {
+                return instrumentRuntimeCoordinator_ != nullptr
+                           ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                           : nullptr;
+            };
+            pc.hasSecondaryInstance = [this](const TrackId tid) {
+                ExperimentalInstrumentHost* const h = instrumentRuntimeCoordinator_ != nullptr
+                                                          ? instrumentRuntimeCoordinator_->getSecondaryInstrumentHostForTrack(tid)
+                                                          : nullptr;
+                return h != nullptr && h->hasInstrument();
+            };
+            pc.retireSecondaryInstance = [this](const TrackId tid) {
+                if (instrumentRuntimeCoordinator_ != nullptr)
+                {
+                    instrumentRuntimeCoordinator_->removeSecondaryRuntimeForTrack(tid);
+                }
+            };
+            pc.transportBusy = [this] { return trackLanesView.isStructuralTimelineEditBlocked(); };
+            pc.onRuntimeChanged = [this] {
+                refreshInstrumentUi();
+                if (inspectorPanel_.isShowing())
+                {
+                    inspectorPanel_.repaint();
+                }
+            };
+            pc.showProgress = [this](const juce::String& text) {
+                trackPowerToastLabel_.setText(text, juce::dontSendNotification);
+                if (text.isEmpty())
+                {
+                    trackPowerToastLabel_.setVisible(false);
+                    return;
+                }
+                const int w = juce::jlimit(200, juce::jmax(200, getWidth() - 40),
+                                           juce::GlyphArrangement::getStringWidthInt(trackPowerToastLabel_.getFont(), text) + 40);
+                trackPowerToastLabel_.setBounds(juce::jmax(0, (getWidth() - w) / 2), 48, w, 34);
+                trackPowerToastLabel_.setVisible(true);
+                trackPowerToastLabel_.toFront(false);
+            };
+            pc.reportLoadProblem = [](const juce::String& text) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Track On", text);
+            };
+            trackPowerCoordinator_ = std::make_unique<TrackPowerCoordinator>(pluginHost_, std::move(pc));
+            trackLanesView.setOnRequestTrackPowerOn([this](const TrackId tid) {
+                return trackPowerCoordinator_ != nullptr ? trackPowerCoordinator_->requestPowerOn(tid) : false;
+            });
+        }
         addAndMakeVisible(inspectorPanel_);
         addAndMakeVisible(inspectorResizeSplitter_);
         addAndMakeVisible(rulerView);
@@ -6873,9 +6960,16 @@ private:
             }
             InstrumentTrackController* const ctl
                 = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
-            if (ctl != nullptr)
+            if (ctl != nullptr && ctl->isPowerOn())
             {
-                ctl->setPowerOn(!ctl->isPowerOn());
+                ctl->setPowerOn(false);
+            }
+            else if (ctl != nullptr)
+            {
+                if (!trackLanesView.requestTrackPowerOn(tid))
+                {
+                    return false;
+                }
             }
             else if (const auto snap = session.loadSessionSnapshotForAudioThread())
             {
@@ -6884,7 +6978,14 @@ private:
                 {
                     return false;
                 }
-                session.setTrackOff(tid, !snap->getTrack(idx).isTrackOff());
+                if (!snap->getTrack(idx).isTrackOff())
+                {
+                    session.setTrackOff(tid, true);
+                }
+                else if (!trackLanesView.requestTrackPowerOn(tid))
+                {
+                    return false;
+                }
             }
             activateTrackLikeHeaderClickForMixer(tid);
             return true;
@@ -7540,6 +7641,36 @@ private:
             detail = "was " + juce::String(was) + (err.isNotEmpty() ? " error: " + err : juce::String(" ok"))
                      + (now == requested ? " (applied)" : " (driver kept its own size)");
             return now;
+        };
+        P.switchSourceTracksOff = [this]() -> juce::String {
+            int switched = 0;
+            if (const auto snap = session.loadSessionSnapshotForAudioThread())
+            {
+                for (int i = 0; i < snap->getNumTracks(); ++i)
+                {
+                    const Track& t = snap->getTrack(i);
+                    const TrackKind k = t.getKind();
+                    if (t.isTrackOff() || (k != TrackKind::Audio && k != TrackKind::Instrument && k != TrackKind::Midi))
+                    {
+                        continue;
+                    }
+                    InstrumentTrackController* const ctl
+                        = instrumentRuntimeCoordinator_ != nullptr
+                              ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(t.getId())
+                              : nullptr;
+                    if (ctl != nullptr)
+                    {
+                        ctl->setPowerOn(false);
+                    }
+                    else
+                    {
+                        session.setTrackOff(t.getId(), true);
+                    }
+                    ++switched;
+                }
+            }
+            // The coordinator unloads one row per message-loop turn from here on.
+            return "switched Off: " + juce::String(switched) + " source rows";
         };
         P.describeProjectLoad = [this]() -> juce::String {
             juce::String s;
@@ -8472,6 +8603,10 @@ private:
     /// the instrument runtime so it is destroyed first: its destructor detaches the engine bus
     /// and unregisters the device callbacks while hosts and controllers still exist.
     std::unique_ptr<LiveMidiInputCoordinator> liveMidiInputCoordinator_;
+    /// Track Power: unloads an Off row's plug-ins and loads them back for On. Declared after the
+    /// instrument runtime so it is destroyed (and its timer stopped) first.
+    std::unique_ptr<TrackPowerCoordinator> trackPowerCoordinator_;
+    juce::Label trackPowerToastLabel_;
 
     /// When Audio Settings is open; auto-clears when the dialog-owned view is destroyed.
     juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;

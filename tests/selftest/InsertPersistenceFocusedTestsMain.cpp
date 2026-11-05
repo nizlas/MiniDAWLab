@@ -45,6 +45,9 @@
 #include <memory>
 #include <optional>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 namespace
 {
@@ -861,6 +864,311 @@ int run(const juce::File& delayBundle, const juce::File& otherBundle, const bool
     }
     return 0;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Track Off (Power): dormant inserts (docs/RESOURCE_SAVING_2026-11-05.md §3)
+// ---------------------------------------------------------------------------------------------
+[[nodiscard]] bool sameChain(const PluginTrackChain& a, const PluginTrackChain& b)
+{
+    if (a.slots.size() != b.slots.size())
+    {
+        return false;
+    }
+    for (size_t i = 0; i < a.slots.size(); ++i)
+    {
+        const auto& x = a.slots[i];
+        const auto& y = b.slots[i];
+        if (x.slotId != y.slotId || x.stage != y.stage || x.vst3AbsolutePath != y.vst3AbsolutePath
+            || x.pluginIdentifier != y.pluginIdentifier || x.opaqueState != y.opaqueState
+            || x.hostActive != y.hostActive || x.hostBypassed != y.hostBypassed)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+int runTrackOff(const juce::File& delayBundle, const juce::File& otherBundle)
+{
+    const juce::File work = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-track-off-tests");
+    (void)work.deleteRecursively();
+    (void)work.createDirectory();
+    const juce::File wav = writeToneWav(work, 1.0);
+    const juce::File proj = work.getChildFile("track-off.dalproj");
+    if (!delayBundle.exists() || !otherBundle.exists())
+    {
+        expect(false, "off: plug-in bundles present");
+        return 1;
+    }
+    PluginTrackChain chainBefore;
+    ImpulseResponse irBefore;
+    TrackId audio = kInvalidTrackId;
+    {
+        Session session;
+        Transport transport;
+        PluginInsertHost host;
+        host.prepareForDevice(kRate, kBlock, 2);
+        host.setTrackDormancyQuery([&session](const TrackId tid) {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int ix = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+            return ix >= 0 && snap->getTrack(ix).isTrackOff();
+        });
+        audio = session.getActiveTrackId();
+        expect(session.addRecordedTakeAtSample(wav, kRate, 0, audio, static_cast<std::int64_t>(kRate)).wasOk(),
+               "off: audio take added");
+        expect(host.addInsertFromVst3File(audio, InsertStage::Pre, delayBundle).wasOk()
+                   && host.addInsertFromVst3File(audio, InsertStage::Post, otherBundle).wasOk(),
+               "off: Pre Mono Delay + Post other effect on the audio row");
+        {
+            PluginTrackChain c = host.exportChain(audio);
+            c.slots[0].opaqueState = makeDelayStateBlob(delayBundle, DelaySettings{ 125.0f, 50.0f, 0.0f });
+            juce::String changed;
+            c.slots[1].opaqueState = makeOtherStateBlob(otherBundle, changed);
+            c.slots[1].hostBypassed = true; // a host flag must survive too
+            host.importChain(audio, c);
+        }
+        chainBefore = host.exportChain(audio);
+        irBefore = captureImpulseResponse(host, audio, 1.5, 1.0);
+        expect(host.liveInsertInstanceCount() == 2, "off: two live instances while On");
+
+        session.setTrackOff(audio, true);
+
+        // A worker that never acknowledges the pause: nothing is captured or destroyed.
+        int refusedCalls = 0;
+        host.setExclusiveInstanceAccess([&refusedCalls](std::function<void()>) { ++refusedCalls; });
+        expect(host.makeTrackInsertsDormant(audio) == PluginInsertHost::DormancyResult::NotDrained
+                   && refusedCalls == 1,
+               "off: without acknowledged exclusive access the unload is refused");
+        expect(host.liveInsertInstanceCount() == 2 && !host.hasDormantInserts(audio)
+                   && sameChain(host.exportChain(audio), chainBefore),
+               "off: a refused unload leaves both instances and their state untouched");
+
+        // Acknowledged access: capture, release, destroy.
+        int grantedCalls = 0;
+        host.setExclusiveInstanceAccess([&grantedCalls](std::function<void()> fn) {
+            ++grantedCalls;
+            fn();
+        });
+        expect(host.makeTrackInsertsDormant(audio) == PluginInsertHost::DormancyResult::Done && grantedCalls == 1,
+               "off: unload runs once under exclusive access");
+        expect(host.liveInsertInstanceCount() == 0 && host.countDormantInserts(audio) == 2
+                   && host.offRetiredInsertCount() == 2,
+               "off: no live instance, two dormant slots, two released instances awaiting destruction");
+        int destroyed = 0;
+        while (host.destroyNextOffRetiredInsert(0.0))
+        {
+            ++destroyed;
+        }
+        expect(destroyed == 2 && host.offRetiredInsertCount() == 0, "off: one destructor per call, then none left");
+        expect(sameChain(host.exportChain(audio), chainBefore),
+               "off: export of the dormant chain equals the live chain (identity, state, order, flags)");
+        const auto rows = host.getInsertRowsForTrack(audio);
+        expect(rows.size() == 2 && rows[0].displayName.endsWith("(Off)") && rows[1].displayName.endsWith("(Off)"),
+               "off: rows read \"(Off)\": " + describeRows(rows));
+        expect(host.makeTrackInsertsDormant(audio) == PluginInsertHost::DormancyResult::NothingToDo,
+               "off: a second unload has nothing to do");
+
+        expect(session.saveProjectToFile(transport, proj, kRate, &host).wasOk(), "off: project saved while Off");
+        host.removeAllPlugins();
+    }
+    {
+        const auto byTrack = readInsertsByTrack(proj);
+        const auto it = byTrack.find((juce::int64)audio);
+        expect(it != byTrack.end() && it->second.size() == 2
+                   && it->second[0].stateBase64 == juce::Base64::toBase64(chainBefore.slots[0].opaqueState.getData(), chainBefore.slots[0].opaqueState.getSize())
+                   && it->second[1].stateBase64 == juce::Base64::toBase64(chainBefore.slots[1].opaqueState.getData(), chainBefore.slots[1].opaqueState.getSize()),
+               "off: the file holds the states captured at Off");
+    }
+    {
+        Session session;
+        Transport transport;
+        PluginInsertHost host;
+        host.prepareForDevice(kRate, kBlock, 2);
+        host.setTrackDormancyQuery([&session](const TrackId tid) {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int ix = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+            return ix >= 0 && snap->getTrack(ix).isTrackOff();
+        });
+        juce::StringArray skipped;
+        juce::String note;
+        expect(session.loadProjectFromFile(transport, proj, kRate, skipped, note, &host).wasOk(),
+               "off reload: project loads");
+        pumpMessageLoop(400);
+        expect(host.liveInsertInstanceCount() == 0 && host.countDormantInserts(audio) == 2,
+               "off reload: a row saved Off creates no insert instance");
+        expect(sameChain(host.exportChain(audio), chainBefore), "off reload: dormant chain equals the saved chain");
+
+        // On: one plug-in per call, then the chain sounds as before.
+        session.setTrackOff(audio, false);
+        juce::String name;
+        juce::String err;
+        int wakes = 0;
+        while (host.wakeNextDormantInsert(audio, name, err))
+        {
+            ++wakes;
+            expect(err.isEmpty(), "on: " + name + " loaded");
+        }
+        expect(wakes == 2 && host.liveInsertInstanceCount() == 2 && !host.hasDormantInserts(audio),
+               "on: two wake steps bring both instances back");
+        expect(sameChain(host.exportChain(audio), chainBefore), "on: exact state, order and host flags restored");
+        const ImpulseResponse irAfter = captureImpulseResponse(host, audio, 1.5, 1.0);
+        const double diff = maxAbsDifference(irBefore.left, irAfter.left);
+        expect(diff < 1.0e-5, "on: the chain sounds as before (impulse response max diff " + juce::String(diff, 8) + ")");
+
+        // Repeated Off / On never grows the number of instances.
+        host.setExclusiveInstanceAccess([](std::function<void()> fn) { fn(); });
+        bool stable = true;
+        for (int cycle = 0; cycle < 8; ++cycle)
+        {
+            session.setTrackOff(audio, true);
+            stable = stable && host.makeTrackInsertsDormant(audio) == PluginInsertHost::DormancyResult::Done
+                     && host.liveInsertInstanceCount() == 0;
+            while (host.destroyNextOffRetiredInsert(0.0)) {}
+            session.setTrackOff(audio, false);
+            while (host.wakeNextDormantInsert(audio, name, err)) {}
+            stable = stable && host.liveInsertInstanceCount() == 2;
+        }
+        expect(stable && host.offRetiredInsertCount() == 0 && sameChain(host.exportChain(audio), chainBefore),
+               "cycles: 8 Off/On cycles keep exactly two instances and the same state");
+        host.removeAllPlugins();
+    }
+    (void)work.deleteRecursively();
+    return 0;
+}
+
+// Diagnostic probe (not part of the default run): load a real project's insert chains, then
+// unload them track by track the way Track Off does, in one of several pacings, to locate when a
+// plug-in crashes on destruction. `mode`: 0 = back to back, 1 = message loop pumped 200 ms
+// between tracks, 2 = blocks processed on a worker thread before the unload, 3 = mode 1 + 2.
+int probeUnload(const juce::File& project, const int mode, const juce::String& onlyName)
+{
+    Session session;
+    Transport transport;
+    PluginInsertHost host;
+    host.prepareForDevice(kRate, kBlock, 2);
+    juce::StringArray skipped;
+    juce::String note;
+    const bool loaded = session.loadProjectFromFile(transport, project, kRate, skipped, note, &host).wasOk();
+    pumpMessageLoop(3000);
+    info("probe: loaded=" + juce::String(loaded ? "yes" : "no") + " live instances=" + juce::String(host.liveInsertInstanceCount()));
+    std::vector<TrackId> tracks;
+    for (const auto& [tid, ptrs] : host.exportChainInstancePointersForDiagnostics())
+    {
+        bool match = onlyName.isEmpty();
+        for (const auto& row : host.getInsertRowsForTrack(tid))
+        {
+            match = match || row.displayName.containsIgnoreCase(onlyName);
+        }
+        if (!ptrs.empty() && match)
+        {
+            tracks.push_back(tid);
+        }
+    }
+    if (mode == 9)
+    {
+        // Reported tail / latency / MIDI input per insert (what the automatic rest can use).
+        std::map<juce::String, juce::String> seen;
+        for (const auto& [tid, ptrs] : host.exportChainInstancePointersForDiagnostics())
+        {
+            for (int i = 0; i < 16; ++i)
+            {
+                if (juce::AudioPluginInstance* inst = host.liveInstanceAtChainIndexForDiagnostics(tid, i))
+                {
+                    seen[inst->getName()] = "tail=" + juce::String(inst->getTailLengthSeconds(), 3) + " s latency="
+                                            + juce::String(inst->getLatencySamples()) + " acceptsMidi="
+                                            + (inst->acceptsMidi() ? "yes" : "no");
+                }
+            }
+        }
+        for (const auto& [name, text] : seen)
+        {
+            info("tail: " + name + " " + text);
+        }
+        host.removeAllPlugins();
+        return 0;
+    }
+    if (mode == 2 || mode == 3)
+    {
+        std::atomic<bool> stop { false };
+        std::thread audio([&] {
+            while (!stop.load())
+            {
+                for (const TrackId tid : tracks)
+                {
+                    host.audioThread_clearScratch(2, kBlock);
+                    host.audioThread_processChainForTrack(tid, InsertStage::Pre, kBlock);
+                    host.audioThread_processChainForTrack(tid, InsertStage::Post, kBlock);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        stop = true;
+        audio.join();
+    }
+    // Mode 4: blocks keep running on a worker for every track still published while the
+    // unload happens (the app's situation); exclusive access waits for the worker to leave.
+    std::atomic<bool> stop4 { false };
+    std::atomic<bool> inSection { false };
+    std::thread audio4;
+    if (mode == 4)
+    {
+        std::vector<TrackId> all;
+        for (const auto& [tid2, ptrs] : host.exportChainInstancePointersForDiagnostics())
+        {
+            juce::ignoreUnused(ptrs);
+            all.push_back(tid2);
+        }
+        audio4 = std::thread([&, all] {
+            while (!stop4.load())
+            {
+                inSection = true;
+                for (const TrackId tid2 : all)
+                {
+                    host.audioThread_clearScratch(2, kBlock);
+                    host.audioThread_processChainForTrack(tid2, InsertStage::Pre, kBlock);
+                    host.audioThread_processChainForTrack(tid2, InsertStage::Post, kBlock);
+                }
+                inSection = false;
+                std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            }
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        host.setExclusiveInstanceAccess([&](std::function<void()> fn) {
+            for (int i = 0; i < 1000 && inSection.load(); ++i)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            fn();
+        });
+    }
+    for (const TrackId tid : tracks)
+    {
+        info("probe: unloading track " + juce::String((juce::int64)tid) + " rows " + describeRows(host.getInsertRowsForTrack(tid)));
+        const auto r = host.makeTrackInsertsDormant(tid);
+        info("probe: result " + juce::String((int)r) + " live now " + juce::String(host.liveInsertInstanceCount()));
+        if (mode == 1 || mode == 3)
+        {
+            pumpMessageLoop(200);
+        }
+    }
+    pumpMessageLoop(2000);
+    if (mode == 4)
+    {
+        stop4 = true;
+        audio4.join();
+    }
+    info("probe: all unloaded, waking again");
+    for (const TrackId tid : tracks)
+    {
+        juce::String n, e;
+        while (host.wakeNextDormantInsert(tid, n, e)) {}
+    }
+    pumpMessageLoop(1000);
+    info("probe: done live=" + juce::String(host.liveInsertInstanceCount()));
+    host.removeAllPlugins();
+    return 0;
+}
 } // namespace
 
 /// Audio-only fixture for `MiniDAWLab.exe --stability-inserts <dir>\inserts-fixture.dalproj`: one
@@ -908,12 +1216,36 @@ int main(int argc, char** argv)
         {
             return makeInsertsFixture(juce::File(next()));
         }
+        if (a == "--probe-tail")
+        {
+            // Reported tail / latency of any VST3 bundle (instruments included), freshly prepared.
+            const juce::File bundle(next());
+            juce::String err;
+            auto inst = instantiateFirstType(bundle, err);
+            if (inst == nullptr)
+            {
+                std::printf("probe-tail: %s\n", err.toRawUTF8());
+                return 1;
+            }
+            inst->prepareToPlay(kRate, kBlock);
+            std::printf("probe-tail: %s tail=%.3f s latency=%d isInstrument=%s\n", inst->getName().toRawUTF8(),
+                        inst->getTailLengthSeconds(), inst->getLatencySamples(),
+                        inst->getPluginDescription().isInstrument ? "yes" : "no");
+            inst->releaseResources();
+            return 0;
+        }
+        if (a == "--probe-unload")
+        {
+            const juce::File f(next());
+            const int mode = next().getIntValue();
+            return probeUnload(f, mode, next());
+        }
         if (a == "--delay-vst3") { delayBundle = juce::File(next()); }
         else if (a == "--other-vst3") { otherBundle = juce::File(next()); }
         else if (a == "--keep") { keep = true; }
     }
 
-    const int rc = run(delayBundle, otherBundle, keep);
+    const int rc = run(delayBundle, otherBundle, keep) | runTrackOff(delayBundle, otherBundle);
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return (rc == 0 && failures == 0) ? 0 : 1;
 }
