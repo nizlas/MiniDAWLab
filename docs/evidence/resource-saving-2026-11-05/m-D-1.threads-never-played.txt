@@ -1,0 +1,12 @@
+﻿[17:36:40] never-played window=12.0s processCoreEquiv=0.10 windowsTotalPct=0.4% threads=109 WS=431MB Private=543MB
+
+   Id Pct1Core Prio Desc Start                  
+   -- -------- ---- ---- -----                  
+38888      5.6   15      MiniDAWLab.exe+0x68FAE0
+36508      2.9   15      ucrtbase.dll+0x2CD00   
+ 7140        1   15      nvwgf2umx.dll+0xE708F0 
+20644      0.3   15      ucrtbase.dll+0x2CD00   
+ 6316      0.3   13      ucrtbase.dll+0x2CD00   
+
+
+

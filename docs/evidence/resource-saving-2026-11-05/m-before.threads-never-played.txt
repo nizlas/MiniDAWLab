@@ -1,0 +1,14 @@
+﻿[17:20:29] never-played window=12.0s processCoreEquiv=0.65 windowsTotalPct=2.7% threads=303 WS=4,719MB Private=5,009MB
+
+   Id Pct1Core Prio Desc Start                       
+   -- -------- ---- ---- -----                       
+21824     29.2   26      fireface_asio_amd.dll+0x3010
+21496     18.9   15      MiniDAWLab.exe+0x67DD50     
+30896      2.7   15      ucrtbase.dll+0x2CD00        
+45888      1.7   15      nvwgf2umx.dll+0xE708F0      
+34972      1.7   24      ucrtbase.dll+0x2CD00        
+35520      1.4   24      ucrtbase.dll+0x2CD00        
+43256      1.4   24      ucrtbase.dll+0x2CD00        
+33168      1.2   24      ucrtbase.dll+0x2CD00        
+18096        1   24      ucrtbase.dll+0x2CD00        
+ 5640      0.9   24      ucrtbase.dll+0x2CD00        

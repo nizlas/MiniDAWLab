@@ -1,0 +1,15 @@
+﻿17:38:06 private=4MB ws=6MB peakWs=6MB peakPaged=4MB threads=1
+17:38:12 private=417MB ws=308MB peakWs=308MB peakPaged=418MB threads=108
+17:38:18 private=390MB ws=281MB peakWs=308MB peakPaged=418MB threads=108
+17:38:36 private=390MB ws=281MB peakWs=308MB peakPaged=418MB threads=108
+17:38:41 private=390MB ws=281MB peakWs=308MB peakPaged=418MB threads=107
+17:38:47 private=404MB ws=295MB peakWs=308MB peakPaged=418MB threads=107
+17:38:53 private=390MB ws=281MB peakWs=308MB peakPaged=418MB threads=107
+17:38:59 private=390MB ws=281MB peakWs=308MB peakPaged=418MB threads=107
+17:39:05 private=390MB ws=281MB peakWs=308MB peakPaged=418MB threads=107
+17:39:11 private=405MB ws=296MB peakWs=308MB peakPaged=418MB threads=107
+17:39:17 private=391MB ws=282MB peakWs=308MB peakPaged=418MB threads=107
+17:39:23 private=391MB ws=282MB peakWs=308MB peakPaged=418MB threads=107
+17:39:29 private=391MB ws=282MB peakWs=308MB peakPaged=418MB threads=107
+17:39:34 private=391MB ws=282MB peakWs=308MB peakPaged=418MB threads=107
+17:39:59 private=391MB ws=282MB peakWs=308MB peakPaged=418MB threads=107

@@ -1,0 +1,14 @@
+﻿[17:28:10] after-gap window=8.0s processCoreEquiv=0.53 windowsTotalPct=2.2% threads=294 WS=4,718MB Private=5,006MB
+
+   Id Pct1Core Prio Desc Start                         
+   -- -------- ---- ---- -----                         
+43100     20.7   15      MiniDAWLab.exe+0x68FAE0       
+40328       17   26      fireface_asio_amd.dll+0x3010  
+30592      5.5   24      ucrtbase.dll+0x2CD00          
+42448      2.5   15      ucrtbase.dll+0x2CD00          
+13712      1.6   15      nvwgf2umx.dll+0xE708F0        
+46200      1.4   15      ucrtbase.dll+0x2CD00          
+42108        1   14      mediaclient.dll+0x85270       
+46196        1   13      HALion Sonic.vst3+0x32011D0   
+31896      0.6   13      Groove Agent SE.vst3+0x320C810
+45712      0.4   15      mediaclient.dll+0x85270       

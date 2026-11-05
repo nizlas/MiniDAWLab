@@ -1,0 +1,12 @@
+﻿[17:39:46] after-gap window=8.0s processCoreEquiv=0.11 windowsTotalPct=0.5% threads=107 WS=282MB Private=391MB
+
+   Id Pct1Core Prio Desc Start                       
+   -- -------- ---- ---- -----                       
+31676      5.9   15      MiniDAWLab.exe+0x68FAE0     
+47156      2.7   15      ucrtbase.dll+0x2CD00        
+19620      1.2   26      fireface_asio_amd.dll+0x3010
+21496        1   15      nvwgf2umx.dll+0xE708F0      
+42240      0.4   13      ucrtbase.dll+0x2CD00        
+
+
+
