@@ -33,6 +33,7 @@
 #include "io/ProjectFile.h"
 #include "plugins/PluginInsertHost.h"
 #include "app/TrackPowerCoordinator.h"
+#include "plugins/isolation/IsolatedInsertHosting.h"
 #include "plugins/PluginTrackSlot.h"
 #include "transport/Transport.h"
 
@@ -953,7 +954,11 @@ int runTrackPowerWhileBusy(const juce::File& delayBundle, const juce::File& othe
     expect(unloaded && host.offRetiredInsertCount() == 2,
            "power busy: after Stop the row unloads; released instances are not destroyed while playing");
     busy = false;
-    pump(300);
+    // One per timer turn; ending an isolated helper (--isolate-delay) takes a little longer.
+    for (int i = 0; i < 30 && host.offRetiredInsertCount() > 0; ++i)
+    {
+        pump(100);
+    }
     expect(host.offRetiredInsertCount() == 0, "power busy: released instances are destroyed after Stop");
 
     // On: refused while busy; a load that is between two plug-ins when the transport starts
@@ -1335,6 +1340,20 @@ int main(int argc, char** argv)
             const juce::File f(next());
             const int mode = next().getIntValue();
             return probeUnload(f, mode, next());
+        }
+        if (a == "--isolate-delay")
+        {
+            // Run the whole suite with DAL Mono Delay in the shared helper (the AmpliTube path):
+            // load, Save / reopen, Off / On, busy guards through the real insert host.
+            mini_daw::isolation::IsolatedHostConnection::get().setHelperExecutable(juce::File(next()));
+            juce::OwnedArray<juce::PluginDescription> found;
+            juce::VST3PluginFormat().findAllTypesForFile(found, delayBundle.getFullPathName());
+            if (!found.isEmpty())
+            {
+                mini_daw::isolation::IsolatedPluginPolicy::setAdditionalIdentifierForTests(found[0]->createIdentifierString());
+                std::printf("isolating %s\n", found[0]->createIdentifierString().toRawUTF8());
+            }
+            continue;
         }
         if (a == "--delay-vst3") { delayBundle = juce::File(next()); }
         else if (a == "--other-vst3") { otherBundle = juce::File(next()); }
