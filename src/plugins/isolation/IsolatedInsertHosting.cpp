@@ -845,14 +845,7 @@ bool IsolatedHostConnection::call(const ControlKind kind,
         {
             // Alive but silent: treat as a hang. Audio is protected by its own deadlines; the user
             // decides whether to restart (the helper may hold newer state than DAL).
-            helperUnresponsive_ = true;
-            juce::Logger::writeToLog("[isolation] helper did not answer: " + what);
-            if (hooks_.showFailure)
-            {
-                hooks_.showFailure("The AmpliTube 4 host is not responding (" + what
-                                       + "). Restart it from the last saved plug-in state?",
-                                   [this] { restartUnresponsiveHelper(); });
-            }
+            reportUnresponsive("it did not answer: " + what);
         }
         return false;
     }
@@ -1090,6 +1083,10 @@ void IsolatedHostConnection::captureChangedWhileStopped()
         return;
     }
     const double now = juce::Time::getMillisecondCounterHiRes();
+    if (helperUnresponsive_)
+    {
+        return;
+    }
     for (IsolatedInsertInstance* i : instances_)
     {
         if (i->changedSinceCapture_ && !i->editorOpen_ && now - i->changedAtMs_ >= kChangeSettleMs)
@@ -1099,10 +1096,63 @@ void IsolatedHostConnection::captureChangedWhileStopped()
     }
 }
 
+void IsolatedHostConnection::reportUnresponsive(const juce::String& what)
+{
+    if (helperUnresponsive_)
+    {
+        return; // already reported for this helper; no repeated dialogs, no automatic restart
+    }
+    helperUnresponsive_ = true;
+    ++unresponsiveReports_;
+    juce::Logger::writeToLog("[isolation] helper unresponsive: " + what);
+    if (hooks_.showFailure)
+    {
+        hooks_.showFailure("The AmpliTube 4 host is not responding (" + what
+                               + "). Its stages are silent. Restart it from the last captured plug-in state?"
+                               " Changes made since that capture would be lost.",
+                           [this] { restartUnresponsiveHelper(); });
+    }
+}
+
+void IsolatedHostConnection::checkAudioHang()
+{
+    if (helperUnresponsive_ || !helperAlive_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+    const double now = juce::Time::getMillisecondCounterHiRes();
+    for (IsolatedInsertInstance* i : instances_)
+    {
+        const SharedBlockHeader* h = i->section_.header;
+        if (i->link() != IsolatedInsertInstance::Link::Ready || h == nullptr
+            || h->doneSeq.load(std::memory_order_acquire) == h->requestSeq.load(std::memory_order_acquire))
+        {
+            i->stallSinceMs_ = 0.0;
+            continue;
+        }
+        // A request is outstanding: the lanes send nothing new and output silence for this stage
+        // until the helper reports. Bounded by the helper's progress, not by a block count.
+        const std::uint32_t p = h->helperProgress.load(std::memory_order_relaxed);
+        if (i->stallSinceMs_ == 0.0 || p != i->stallProgress_)
+        {
+            i->stallProgress_ = p;
+            i->stallSinceMs_ = now;
+            continue;
+        }
+        if (now - i->stallSinceMs_ >= (double)audioHangLimitMs_)
+        {
+            reportUnresponsive("it stopped processing " + i->getName() + " for "
+                               + juce::String((int)((now - i->stallSinceMs_) / 1000.0 + 0.5)) + " s");
+            return;
+        }
+    }
+}
+
 void IsolatedHostConnection::timerCallback()
 {
     if (phase_ == Phase::Running)
     {
+        checkAudioHang();
         captureChangedWhileStopped();
     }
     else if (phase_ == Phase::WaitingForStop)

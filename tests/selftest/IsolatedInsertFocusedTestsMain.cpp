@@ -197,6 +197,8 @@ bool pump(const std::function<bool()>& pred, const int ms)
 }
 
 constexpr double kSr = 48000.0;
+int gFailureDialogs = 0;
+std::function<void()> gLastRetry;
 
 // -----------------------------------------------------------------------------
 void testDeterministicSameBlock(const juce::PluginDescription& delay)
@@ -469,6 +471,67 @@ void testCrashDuringPlaybackAndRestore(const juce::PluginDescription& delay)
           "both instances live again");
 }
 
+void testAudioHangReportedOnce(const juce::PluginDescription& delay)
+{
+    std::printf("[audio hang] processing stops, control channel alive: one report, Restart, no loop\n");
+    auto& host = iso::IsolatedHostConnection::get();
+    host.setAudioHangLimitMsForTests(500);
+    auto p = isolated(delay, kSr, 128);
+    auto q = isolated(delay, kSr, 128);
+    auto* ip = asIso(p.get());
+    const int dialogs0 = gFailureDialogs;
+    const int starts0 = host.helperStartsForDiagnostics();
+    const DWORD pid = host.helperPid();
+    check(host.sendTestFault(iso::TestFault::StallNextProcess, INT32_MAX, ip->helperInstanceId()), "endless stall armed");
+    double worstMs = 0.0;
+    bool allSilent = true;
+    bool otherHeard = true;
+    for (int k = 0; k < 200; ++k) // about 2.7 s of blocks while the message loop runs
+    {
+        juce::AudioBuffer<float> b(2, 128);
+        b.clear();
+        b.setSample(0, 3, 1.0f);
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        processLaneBlock(*p, b, kSr);
+        worstMs = juce::jmax(worstMs, juce::Time::getMillisecondCounterHiRes() - t0);
+        allSilent = allSilent && b.getMagnitude(0, 128) == 0.0f;
+        juce::AudioBuffer<float> c(2, 128);
+        c.clear();
+        c.setSample(0, 3, 1.0f);
+        processLaneBlock(*q, c, kSr);
+        otherHeard = otherHeard && c.getMagnitude(0, 128) > 0.0f;
+        pump([] { return false; }, 10);
+    }
+    check(worstMs < 4.0, "every lane wait stays bounded by its deadline (worst " + juce::String(worstMs, 2) + " ms)");
+    check(allSilent, "the hung stage is silent, never stale");
+    check(otherHeard, "the other instance in the same helper keeps processing");
+    check(ip->counters().requests.load() <= 2, "no new requests while the hung request is outstanding");
+    check(host.helperUnresponsive(), "the helper is reported unresponsive");
+    check(gFailureDialogs == dialogs0 + 1, "exactly one failure notice with Restart (" + juce::String(gFailureDialogs - dialogs0) + ")");
+    pump([] { return false; }, 1500);
+    check(gFailureDialogs == dialogs0 + 1, "no repeated notices while waiting for the user");
+    check(host.helperStartsForDiagnostics() == starts0 && processAlive(pid), "no automatic restart");
+    check(gLastRetry != nullptr, "the notice offers Restart");
+    if (gLastRetry)
+    {
+        gLastRetry();
+    }
+    check(pump([&] {
+              return host.helperStartsForDiagnostics() == starts0 + 1
+                     && host.phase() == iso::IsolatedHostConnection::Phase::Running
+                     && ip->link() == iso::IsolatedInsertInstance::Link::Ready;
+          },
+               30000),
+          "Restart ends the hung helper and restores both instances once");
+    check(!processAlive(pid), "the hung helper is gone");
+    juce::AudioBuffer<float> b(2, 128);
+    b.clear();
+    b.setSample(0, 3, 1.0f);
+    processLaneBlock(*p, b, kSr);
+    check(b.getMagnitude(0, 128) > 0.0f && !host.helperUnresponsive(), "the restored stage processes again");
+    host.setAudioHangLimitMsForTests(2000);
+}
+
 void testTeardownWithoutDestructor(const juce::PluginDescription& delay)
 {
     std::printf("[teardown] last instance / project close end the helper without destructors\n");
@@ -583,6 +646,11 @@ int main(int argc, char** argv)
     iso::IsolatedHostConnection::get().setHelperExecutable(helper);
     iso::IsolatedHostConnection::UiHooks hooks;
     hooks.transportBusy = [] { return false; };
+    hooks.showFailure = [](const juce::String& message, std::function<void()> retry) {
+        ++gFailureDialogs;
+        gLastRetry = std::move(retry);
+        info("failure notice: " + message);
+    };
     iso::IsolatedHostConnection::get().setUiHooks(hooks);
 
     const auto delay = describe("C:\\Program Files\\Common Files\\VST3\\DALMonoDelay.vst3");
@@ -601,6 +669,7 @@ int main(int argc, char** argv)
     testOffline(*delay);
     testCrashOnDestroyRecovers(*delay);
     testCrashDuringPlaybackAndRestore(*delay);
+    testAudioHangReportedOnce(*delay);
     testTeardownWithoutDestructor(*delay);
 
     if (const auto amp = describe("C:\\Program Files\\Common Files\\VST3\\AmpliTube 4.vst3"))

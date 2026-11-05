@@ -175,6 +175,9 @@ private:
     bool editorOpen_ = false;
     bool skipDestroyCapture_ = false;
     bool retiredForOff_ = false;
+    // Audio-side hang watch (message thread): progress seen while a request was outstanding.
+    std::uint32_t stallProgress_ = 0;
+    double stallSinceMs_ = 0.0;
     Counters counters_;
 };
 
@@ -216,6 +219,13 @@ public:
     [[nodiscard]] std::uint32_t helperPid() const noexcept { return helperPid_; }
     [[nodiscard]] int helperStartsForDiagnostics() const noexcept { return helperStarts_; }
     [[nodiscard]] juce::String lastRecoveryReport() const { return lastRecoveryReport_; }
+    /// True after the helper stopped answering (control) or stopped processing (audio). Cleared
+    /// only by `restartUnresponsiveHelper` (the user's Restart) or a new helper.
+    [[nodiscard]] bool helperUnresponsive() const noexcept { return helperUnresponsive_; }
+    /// Tests: how often the user was told about an unresponsive helper.
+    [[nodiscard]] int unresponsiveReportsForDiagnostics() const noexcept { return unresponsiveReports_; }
+    /// Tests: shorten the audio-side hang limit (default `kAudioHangMs`).
+    void setAudioHangLimitMsForTests(int ms) noexcept { audioHangLimitMs_ = ms; }
 
     /// [Message thread] Factory: a stand-in for `desc`, attached to the helper (started if needed).
     [[nodiscard]] std::unique_ptr<juce::AudioPluginInstance> createInstance(const juce::PluginDescription& desc,
@@ -285,6 +295,10 @@ private:
     /// helper when it was the last one.
     void retireInstance(IsolatedInsertInstance& inst);
     void endHelperProcess(bool expected);
+    /// Mark the helper unresponsive and tell the user once per helper, with Restart.
+    void reportUnresponsive(const juce::String& what);
+    /// [Message thread, timer] A request outstanding with no helper progress for too long.
+    void checkAudioHang();
 
     juce::File helperExe_;
     UiHooks hooks_;
@@ -315,5 +329,7 @@ private:
     juce::String lastRecoveryReport_;
     bool helperUnresponsive_ = false;
     bool testCrashOnRestoreCreate_ = false;
+    int unresponsiveReports_ = 0;
+    int audioHangLimitMs_ = 2000;
 };
 } // namespace mini_daw::isolation
