@@ -1,9 +1,14 @@
 # Plan: full Off unloading and one shared out-of-process host for AmpliTube 4 (2026-11-05)
 
-Status: **plan only.** Nothing in this document is implemented except what section A lists as
-current state. Base: branch `claude/resource-saving` at `4ad4784` (draft PR #12), which is
-`main` `8472feb` plus four commits (proxy opt-in, Off lifecycle, automatic rest, report). Result
-report for those commits: `docs/RESOURCE_SAVING_2026-11-05.md` ("the report" below).
+Status: **plan only for the isolation.** Stage 0 (Power guards, rest revision 2) is implemented
+on the same branch; everything from stage 1 on is not. Base: branch `claude/resource-saving`
+(draft PR #12), which is `main` `8472feb` plus the proxy opt-in, Off lifecycle, automatic rest,
+report and stage 0 commits. Result report: `docs/RESOURCE_SAVING_2026-11-05.md` ("the report").
+
+Revision 2 of this plan (after review) corrects: state capture without recurring silence (C.2,
+C.3), what the per-slot stand-in needs outside the instance factory (B.3), buffer ownership and
+one shared callback budget (D.2, D.3), offline hang handling (D.5), and the prototype's
+acceptance (E). "No added block latency" is a goal the prototype must verify, not a property.
 
 Each statement is marked by where it comes from:
 
@@ -15,14 +20,14 @@ Each statement is marked by where it comes from:
 
 **Short answer.**
 
-* Off already unloads and frees the row's plug-ins (report §3). What is missing for "full" Off:
-  decoded audio of Off-only rows, a Power guard on undo/redo, and a crash-safe way to destroy
-  AmpliTube 4.
+* Off already unloads and frees the row's plug-ins (report §3), and since stage 0 nothing is
+  created or destroyed because of Off while the transport runs. What is missing for "full" Off:
+  decoded audio of Off-only rows and a crash-safe way to destroy AmpliTube 4.
 * AmpliTube 4 moves to **one helper process per DAL session** that owns every AmpliTube 4
   instance. DAL keeps one small stand-in per insert slot that looks to the rest of DAL like an
   ordinary `juce::AudioPluginInstance`. Commands and state go over JUCE's existing child-process
-  IPC. Audio goes through shared memory, processed **in the same block**: no added block latency,
-  and AmpliTube rows do not move against other rows.
+  IPC. Audio goes through shared memory, processed **in the same block**. The goal is no added
+  block latency, so AmpliTube rows do not move against other rows; the prototype verifies it.
 * Destroying AmpliTube happens only in the helper. If the helper dies, DAL lives on, shows
   "Restoring plugins...", starts one new helper and reloads only the AmpliTube instances that
   should be On, from state captured before the destructive step. Project close and app exit end
@@ -46,7 +51,7 @@ Each statement is marked by where it comes from:
 | Slot shape | `LiveInsertSlot` (`src/plugins/PluginInsertHost.h:544`) | Owns `std::unique_ptr<juce::AudioPluginInstance>`. Dormant placeholder = `instance == nullptr` + `unavailableDescriptor` + `dormant`. |
 | Per-block processing | `PluginInsertHost::audioThread_processEntryChain` (`:2949`, `processBlock` at `:3039`) | Called from the callback, render-pool jobs and read-ahead. A row is processed by one lane per block. |
 | Instrument | `InstrumentTrackController` retained Primary row; `ExperimentalInstrumentHost::audioThread_discardPendingMidi` | An Off host holds no plug-in. MIDI addressed to it is discarded each block (`PlaybackEngine.cpp:2109`, `:3778`). |
-| MIDI editor | `MidiEditorPresenter::auditionHostForTrack` (`src/app/MidiEditorPresenter.cpp:174`) | Opens without a loaded instrument. Audition goes to the host, which discards it while Off, so audition is silent. **Not tried by hand [to prove].** |
+| MIDI editor | `MidiEditorPresenter::auditionHostForTrack` (`src/app/MidiEditorPresenter.cpp:174`) | Opens without a loaded instrument. Audition goes to the host, which discards it while Off, so audition is silent. Checked in the real editor window without an audio device (`MidiEditorCohortFocusedTests`, "off row") [measured]; not tried in the running app. |
 | Project load | `importChain` with `setTrackDormancyQuery`, `deferPendingAutoloadWhileOff` | Rows saved Off instantiate nothing. Tested in `InsertPersistenceFocusedTests` [measured]. |
 
 ### A.2 Is "Power only while stopped" enforced? [code]
@@ -61,54 +66,66 @@ Each statement is marked by where it comes from:
 | **Undo / redo** (`UndoRedoCoordinator::invokeUndoFromWindowShortcut`, `:67`) | Refused only while recording or counting in, **not while playing**. Because Off is part of the snapshot, undoing an edit made before a Power change flips Off during playback. `reconcileNow` then **unloads that row while playing** (no transport check on the unload branch), or starts a wake job that loads plug-ins while playing. |
 | Stability scenario `switchSourceTracksOff` (`MainAppWindow.cpp:7660`) | Diagnostic only; no guard. |
 
-Needed completion (stage 0):
+**Implemented in stage 0** [code, tested]:
 
-1. `reconcileNow`'s unload branch waits while `transportBusy` (a row that is Off is not processed
-   anyway, so waiting costs only memory).
-2. Wake jobs created by a snapshot restore wait for Stop before loading anything.
-3. Undo/redo whose restore changes any row's Off flag is refused while playing, with the same
-   message the Power button gives. This is narrower than blocking all undo during playback.
+1. `TrackPowerCoordinator::reconcileNow` does nothing while `transportBusy`; the snapshot is
+   reconciled after Stop. Deferred destruction of released Off instances also waits for Stop.
+2. Every wake step checks `transportBusy` first. A stepwise On load that is between two
+   plug-ins when the transport starts pauses there and resumes after Stop; the row stays Off
+   until everything is loaded. While busy the coordinator ticks at its idle interval.
+3. Undo / redo looks at the step it would restore (`SessionHistory::peekUndoTimelineSnapshot`)
+   and refuses it while playing when any row present in both snapshots would change Off
+   (`SessionSnapshot::anyTrackOffDiffers`). The history pointer and the model are not touched; a
+   toast says "Undo would switch a track On or Off. Stop the transport first." Undo / redo steps
+   that leave Power alone work as before during playback.
 
-With these, every path that can destroy or create a plug-in because of Off runs only while
-stopped. Deleting an insert or a track is already behind the same predicate.
+Every path that can destroy or create a plug-in because of Off now runs only while stopped.
+Deleting an insert or a track is already behind the same predicate. One plug-in load that is
+already running when the transport starts finishes (JUCE's load can run a nested message loop);
+the next one waits.
 
 ### A.3 Automatic rest: what is safe and what is missing [code]
 
-Implemented (`src/plugins/InsertChainRest.h`, report §4):
+**Correction.** The first rule (commit 2804928) let any unit rest after "never had input + latency
++ 2 silent blocks", instruments included. That proves nothing about future output: a
+transport-driven or free-running generator can stay silent for any number of blocks and start
+later without input, MIDI or a parameter change. Waking on transport, parameter and state
+changes does not fix that case.
 
-* **Finite reported tail.** Rest after 2 × tail + latency + 1 block of silent input and output. A
-  plug-in heard after its own tail ran out marks its stage unreliable for the session. Safe for
-  plug-ins that report honestly. The second tail is the check.
-* **Never had input.** Rest after latency + 2 blocks of silent output.
-* **Infinite or zero-reported tail** (Pro-R; AmpliTube, VB3-II, HALion, Groove Agent, DAL Tuner):
-  keeps running after the first input. This is why "after Stop" stays at 1.5 ms instead of
-  0.75 ms [measured, report §5].
+**Rest revision 2, implemented in stage 0** (`src/plugins/InsertChainRest.h`, report §4.2):
 
-Review of the "never had input" rule found three gaps where a resting stage is not woken:
+* **Who may rest:** only units whose active plug-ins all declare themselves audio-processing
+  effects (`categoryAllowsRest`: "Fx" plus EQ, Dynamics, Reverb, Delay, Distortion, Filter,
+  Modulation, Pitch Shift, Restoration, Mastering, Spatial or Analyzer; never Instrument, Synth,
+  Sampler, Drum, Piano, Generator, External, Tools, Network, OnlyARA or a plain "Fx"). This rests
+  on the plug-in's declaration, which DAL cannot verify. Every instrument keeps running.
+* **Rules for those units** (unchanged): never had input + latency + 2 silent blocks, or a finite
+  reported tail with 2 × tail + latency + 1 block of silence; infinite and zero-reported tails
+  keep running after input.
+* **Wake** (new): a parameter change from any thread (`AudioProcessorListener` on every live
+  insert, owned by the row's rest runtime for the host's lifetime), a state or preset load into
+  the same instance, transport start or stop, and a jump in play position (locate, cycle wrap).
 
-| Gap | Code | Effect | Fix (stage 0) |
-|---|---|---|---|
-| Transport start, locate or cycle wrap | `Params::generation` is bumped only by `updateRestParams` (signature: instance, epoch, bypass, tail, latency, kind, editor open) and by the instrument's `refreshRestParameters` | A plug-in that makes sound on its own when the transport starts (a transport-synced generator, an instrument arpeggiator or pattern without MIDI) stays asleep, because nothing feeds it input. | Bump the generation of every stage that has never had input on Play, locate and cycle wrap. The stage re-qualifies after latency + 2 blocks. Cost: about 2 blocks of processing per start. |
-| Parameter change without an open editor | The editor-open check covers editor edits. Changes from the generic parameter window are covered (`paramsWindows_`). Changes from DAL code (`setValueNotifyingHost` at `MainAppWindow.cpp:7388`) and from the plug-in itself are not. | A parameter that turns on a self-sounding mode is not heard until the next input. | Attach a `juce::AudioProcessorListener` per live instance. `audioProcessorParameterChanged` and `audioProcessorChanged` (latency, tail or program change) bump the stage generation with one atomic increment. This is safe from any thread. |
-| Preset or state load into the same instance | The instrument signature uses the owner pointer, which does not change on `setStateInformation`. For inserts, `instanceEpoch` is set only when an instance is placed (`PluginInsertHost.cpp:601`). Applying a preset (`setPreset` via `getExtensions`, `:887`) or restoring state in place keeps it unchanged. | A preset with a drone does not start until input. | Bump the generation after every `setStateInformation` / `setPreset` DAL performs. |
+In this project that covers Pro-Q 3, Pro-R, AmpliTube 4 and Pro-C 2. Excluded now: HALion Sonic,
+Groove Agent SE, VB3-II and BBC SO (instruments), DAL Mono Delay, DAL Tuner and BassEvening
+(plain "Fx"), VB3-II Remote Input ("Fx|Tools"). The CPU gain measured for revision 1 (report §5)
+included 114 237 rested instrument blocks; that part is gone. It was not re-measured (needs the
+ASIO device).
 
 Remaining work for heavy chains after Stop, with no arbitrary cutting of long echoes:
 
-* **Zero-reported tails (AmpliTube, instruments).** VST3 `kNoTail` (0) is the default and does
-  not reliably mean "no tail". JUCE's wrapper does not expose the plug-in's output silence flags:
+* **Zero-reported tails (AmpliTube).** VST3 `kNoTail` (0) is the default and does not reliably
+  mean "no tail". JUCE's wrapper does not expose the plug-in's output silence flags:
   `getTailLengthSeconds` reads `getTailSamples` (`juce_VST3PluginFormat.cpp:3199`), and input
-  silence flags are cleared [code]. Possible next step, **not a timeout**: an opt-in observation
-  that a stage's output stayed exactly zero for a full `latency + block` after the input went
-  silent, repeated on several stops, is still not proof. **No rule is proposed here.** It stays
-  "keeps running", and the remaining cost is reported.
-* **Infinite tails (Pro-R).** Nothing to do safely. Rest only when the user switches the row
-  Off.
-* **Instruments.** An instrument with no held notes still reports 0. It keeps running after its
-  first note. A rule based on the voice state would need the plug-in to report it, which VST3
+  silence flags are cleared [code]. **No rule is proposed.** It keeps running.
+* **Infinite tails (Pro-R).** Nothing to do safely. Rest only when the user switches the row Off.
+* **Instruments.** No rest. A rule would need the plug-in to report its voice state, which VST3
   does not standardise.
+* **Plain "Fx" plug-ins** such as DAL's own Mono Delay and Tuner: they would qualify if they
+  declared a processing sub-category. That is a change in those plug-ins' repositories, not done
+  here.
 * **Where the remaining cost runs.** The stopped callback still runs the non-resting stages
-  serially (1.5–1.8 ms). Dispatching them through the render pool while stopped is a valid,
-  separate optimisation. It is not proposed in this plan.
+  serially. Dispatching them through the render pool while stopped is a separate optimisation.
 
 ### A.4 Test failures compared with the exact base [measured]
 
@@ -128,6 +145,11 @@ run conditions. The failing checks are pool-dispatch and sample-coverage asserti
 blocks were dispatched to the pool", "insert chain covered every sample exactly once", read-ahead
 adoption and discard counts). Why they fail at base is a separate question this plan does not
 answer. Lists: `docs/evidence/resource-saving-2026-11-05/basecmp-*-failures.txt`.
+
+After stage 0 (two runs): `ReadAheadPrototypeFocusedTests` has the same 39 failures. In
+`AudioStripParallelFocusedTests` the base's two pool-dispatch failures passed (the pool got 1 and 4
+of 49 blocks instead of 0) and the other 4 remain; nothing new fails. The pool check depends on a
+measured cost threshold; the cause of the change is not established (report §9).
 
 ### A.5 Message thread: observations and conclusions
 
@@ -227,6 +249,17 @@ PluginInsertHost ── LiveInsertSlot.instance ──► juce::AudioPluginInsta
 * The saved project does not change. A slot stores the same descriptor and the same VST3 state
   bytes as in-process, so a project moves freely between builds with and without isolation.
 
+**What `processBlock` alone does not carry, and the changes outside the factory:**
+
+| Needed by the stand-in | How it gets there | Change outside the factory |
+|---|---|---|
+| Segment transport (position, playing, tempo, cycle) | Its own `getPlayHead()`, exactly like an in-process plug-in: DAL sets the chain's `InsertProcessPlayHead` per segment before processing. The stand-in copies `PositionInfo` into the request header. | None. |
+| The callback deadline | Not in `processBlock`. The engine publishes one absolute deadline per callback (D.3) in a small `IsolatedProcessDeadline` (an atomic QPC value per processing context: callback, read-ahead, offline). The stand-in reads it at the start of its wait. | `PlaybackEngine`: write the deadline at callback start and when read-ahead / offline start a segment. About ten lines; no new lock. |
+| Which lane calls it (for counters) | Not needed for correctness. | None. |
+| Batching adjacent isolated slots in one chain | Not possible from inside one `processBlock`. Concrete mechanism: in `PluginInsertHost::audioThread_processEntryChain`, the slot loop detects a run of consecutive slots whose processors are isolated on the same helper and calls `IsolatedHostConnection::processRun(slots, view)` once instead of `processBlock` per slot. | One branch in that slot loop, plus a "same helper" query on the slot. **Optional**, measured in stage 1 before it is built. |
+| Batching several segments of one callback | Not offered. Segments are processed one at a time by the engine with other rows' work between them; merging them would change the engine's segment loop. Each segment is one request. | None. |
+
+
 ### B.4 Two channels
 
 | Channel | Carries | Mechanism | Thread in DAL | Thread in helper |
@@ -275,32 +308,55 @@ are rebuilt.
 
 ### C.2 When state is captured
 
-The last good state must be fresh when something destructive happens. It is captured
-[control channel, helper message thread]:
+Two kinds of capture, so that capturing never makes audio stop during playback:
 
-* At every Save, Save As and autosave (DAL already calls `getStateInformation` here).
-* **Before any destructive helper operation**: for **every** isolated instance in the helper,
-  not only the one being destroyed, because a crash takes them all.
-* When an isolated editor closes, and after parameter activity has been quiet for one message-loop
-  turn (helper reports "dirty" from `audioProcessorParameterChanged`, DAL fetches state when idle).
-* At the plug-in undo recorder's existing capture points (`UndoRedoCoordinator::onPluginUndoRecord`).
+**Non-exclusive capture** (no pause, audio keeps running). `getStateInformation` on the helper's
+message thread while the instance keeps processing. That is what DAL does in-process today for
+Save and autosave, and what VST3 allows: `IComponent::getState` is called on the UI thread while
+`process` runs on the audio thread. It gives a fresh state but not a guaranteed consistent one if
+the plug-in breaks that rule. Used for:
+
+| Trigger | While stopped | While playing |
+|---|---|---|
+| Save, Save As, autosave | at once | at once (as today in-process; no pause) |
+| Editor closed | at once | deferred to Stop |
+| Parameter activity settled (helper reports "dirty", DAL captures when activity has stopped for a short debounce) | at once | deferred to Stop |
+| Plug-in undo recorder (`onPluginUndoRecord`) | at once | at once (as today) |
+| Transport stops | every dirty instance | — |
+
+Deferring to Stop keeps a long getState of a large plug-in off the helper's message thread while
+it may also be needed for the editor during playback. The debounce bounds how often a capture
+runs, not whether a state is correct.
+
+**Exclusive capture** (C.3): only before a destructive helper operation (Off, delete insert or
+track, recovery of others), for **every** isolated instance in the helper, because a crash takes
+them all. These operations happen only while stopped (A.2), so the brief pause of isolated stages
+does not silence playback; at most a tail after Stop is cut short.
+
+**What can still be lost after an unexpected helper crash:** parameter changes made since the last
+successful capture of that instance. That is at most:
+
+* while stopped: the changes in the debounce window before the crash, or in an open editor since
+  it was opened or last settled;
+* while playing: every change made during the current playback, since dirty captures are deferred
+  to Stop (Save and autosave during playback still capture).
+
+The recovery message names the instances that were dirty when the helper died.
 
 ### C.3 Exclusive access in the helper
 
-For a capture to count, no processing may be in flight on that instance:
+Only for the destructive operations of C.2, so only while stopped:
 
 1. DAL marks the isolated slots of the helper "paused". Their lanes output silence for those
    stages and send no request. This is a published flag read per block, like dormancy.
 2. DAL waits for its own drain (callback exit, render-pool idle for those rows, read-ahead paused
    and acknowledged). These are the existing mechanisms (`waitForAudioCallbackExit`,
    `pauseReadAheadWorkerAfterChainPublish`).
-3. The helper confirms per instance that `inFlight == 0` and its processing thread is parked.
-   **No acknowledgement means no capture and no destructive step.** The operation is cancelled
-   and the instances are resumed unchanged (same rule as `DormancyResult::NotDrained`).
-4. Capture, then resume or continue with the destructive step.
-
-Power changes happen while stopped (A.2), so pausing all isolated stages for the capture
-interrupts nothing audible except a tail after Stop.
+3. The helper confirms per instance that no request is outstanding (D.3) and that its processing
+   thread is parked. **No acknowledgement means no capture and no destructive step.** The
+   operation is cancelled and the instances are resumed unchanged (same rule as
+   `DormancyResult::NotDrained`).
+4. Capture all, then continue with the destructive step, then resume the others.
 
 ### C.4 Transitions
 
@@ -374,20 +430,21 @@ button.
 
 ## D. Audio, latency and real-time contract
 
-### D.1 Same-block processing gives zero added latency
+### D.1 Same-block processing: no added latency is the goal
 
 The lane that processes a row, at the isolated slot's position in the chain:
 
-1. writes the stage input (2 channels × n samples, float) into the slot's shared input buffer, plus
-   a small header: sequence number, n, `PositionInfo` per segment, sample rate generation;
-2. signals the slot's request event;
-3. waits for the done event (bounded, D.3);
+1. writes the stage input (2 channels × n samples, float) into the slot's shared input buffer,
+   plus a small header: sequence number, n, `PositionInfo` of the segment, sample-rate generation;
+2. publishes the sequence number and signals the slot's request event;
+3. waits for the slot's done sequence, bounded by the shared callback deadline (D.3);
 4. reads the output buffer into the chain's buffer and continues with the next slot.
 
-The audio comes back in the same block, so DAL adds **no samples of delay**. AmpliTube's own
-reported latency (7 samples [measured, report §4.1]) is unchanged: DAL has no project PDC and does
-not compensate it today, in-process or isolated. **AmpliTube rows do not move against other rows**
-compared with today.
+If the result arrives in time, it is used in the same block and DAL adds **no samples of delay**.
+AmpliTube's own reported latency (7 samples [measured, report §4.1]) is unchanged: DAL has no
+project PDC and does not compensate it today, in-process or isolated. AmpliTube rows then do not
+move against other rows. **This is the design goal; the prototype verifies it** with an impulse
+through the helper and in-process, which must line up to the sample (E).
 
 Rejected alternative: **pipelined processing** (send block k, return block k−1). It removes the
 wait but delays AmpliTube rows by one block (512 samples = 10.7 ms here) against all other rows.
@@ -395,48 +452,65 @@ Without project PDC that is an audible shift. Not accepted.
 
 ### D.2 Cost for the callback
 
-* Per isolated slot per processed block: two buffer copies (2 × 512 × 4 B = 4 KB each way), two
-  event operations, and two cross-process thread wakes. The wakes dominate. On Windows a wake is
-  usually microseconds, but its tail depends on power state and scheduling **[to prove; this is
-  the prototype's main number]**.
-* Mitigation: the lane spins on the shared "done" sequence for a short, measured period before
-  it sleeps on the event. The helper thread does the same on "request". The spin period is a
-  tuning constant chosen from the prototype's distribution, not a correctness timeout.
+* Per isolated slot per processed segment: two buffer copies (2 × n × 4 B each way), two event
+  operations, and two cross-process thread wakes. The wakes dominate; their distribution on
+  Windows depends on power state and scheduling **[to prove; this is the prototype's main
+  number]**.
+* Mitigation: the lane spins on the shared done sequence for a short, measured period before it
+  sleeps on the event; the helper thread does the same on "request". **Spinning costs CPU on
+  both sides**; the prototype measures CPU with and without it and the spin period is chosen from
+  those numbers. It is not a correctness timeout.
+* One helper thread per instance (B.5) costs a thread stack and a parked thread each; idle threads
+  cost no CPU unless they spin. The prototype counts both.
 * No allocation on either side per block. Buffers are sized at prepare for the maximum block
   size and reused. No pipe and no message queue on the audio path.
-* Adjacent isolated slots in the same chain and stage (AmpliTube → AmpliTube) are sent as **one
-  request**: the helper runs them in order on one thread. All segments of a callback block
-  (cycle wrap, sub-block segmentation) are sent in one request with per-segment `PositionInfo`.
-  So the number of round trips is one per contiguous isolated run per lane per block, never one
-  per segment.
-* A separate round trip per instance across **different rows** cannot be merged without delaying
-  rows, because each row's input is ready only when its earlier chain stages finish. Those round
-  trips run concurrently in different lanes instead of serially (D.4).
+* Round trips: one per isolated slot per segment. The optional run batching of B.3 can make it one
+  per run of adjacent isolated slots. Several segments are not merged. Round trips of different
+  rows cannot be merged without delaying rows, because each row's input is ready only when its
+  earlier stages finish; they run concurrently in different lanes instead (D.4).
 
-### D.3 Bounded waiting; a crash or hang during playback
+### D.3 Shared memory ownership, one callback budget, crash and hang
 
-* The audio-path wait is `WaitForMultipleObjects({done event, helper process handle}, deadline)`.
-  The deadline is derived from the block: the time left in this callback's budget minus a measured
-  margin for the rest of the graph. Read-ahead uses its own segment deadline. It is a real-time
-  bound, not a guess at plug-in behaviour.
-* **Deadline missed:** the stage outputs silence for that block, the late result is dropped by
-  sequence number, a counter increments, and the next request is not sent until the helper has
-  caught up. Silence is used rather than dry pass-through, because unprocessed DI guitar at full
-  level is worse than a gap.
-* **Process handle signalled (crash during playback):** every isolated stage goes "lost" at once,
-  silent. DAL and all other plug-ins keep playing. The transport is not stopped, but a banner
-  says "AmpliTube 4 host stopped". Restore (C.5) **starts when the transport stops**, because
-  loading plug-ins while playing conflicts with the Power rule. The user can also press Stop at
-  once.
-* **Hang without crash:** detected by a control-channel liveness request that does not return,
-  and by repeated missed deadlines with no progress counter movement in shared memory. Audio is
-  already protected by the deadline. DAL does not kill the helper on its own while it might still
-  hold newer state. It shows "AmpliTube 4 host is not responding" with **Restart host** (uses the
-  last captured state, says what may be lost) and **Wait**. A hang during a capture counts as a
-  failed capture, so the destructive step is cancelled (C.3).
-* The callback never waits without a bound. The message thread never waits on the helper without
-  a bound either: every control request has a limit per kind (create and load longest), after
-  which it is reported, never assumed done.
+**Ownership of a slot's buffers.** Each isolated slot has one request block (header, input,
+output) in the shared section and two counters: `requestSeq` (written by DAL) and `doneSeq`
+(written by the helper).
+
+* DAL owns the block while `doneSeq == requestSeq`. It writes input and header, then increments
+  `requestSeq` (release). From then on the **helper owns the block** until it sets
+  `doneSeq = requestSeq` (release) after writing the output.
+* A deadline miss does **not** return ownership. The slot enters "outstanding": DAL outputs
+  silence for that stage, does not touch the block and sends no new request until it sees
+  `doneSeq == requestSeq`. Then it discards that late output and resumes with the next segment.
+  A late helper therefore never writes into a block DAL has reused.
+* If the helper dies, its handle is signalled and the whole section is abandoned; recovery
+  creates a new section for the new helper.
+
+**One budget per callback.** At callback start the engine computes one absolute deadline:
+`start + budget − reserve`, where `budget` is the block duration and `reserve` is the measured
+time the callback still needs after the last isolated stage (mixing, master, output). Every wait
+in this callback, in any lane, waits only until that same absolute time
+(`WaitForMultipleObjects({done event, helper process}, deadline − now)`). Two isolated slots in
+one lane, or ten in ten lanes, never get a block budget each. Read-ahead sets its own deadline per
+segment from its lead time; offline has none (D.5).
+
+**Miss:** the stage outputs silence for that block, a counter increments. Silence rather than dry
+pass-through, because unprocessed DI guitar at full level is worse than a gap.
+
+**Crash during playback** (process handle signalled): every isolated stage goes "lost" at once,
+silent. DAL and all other plug-ins keep playing. A banner says "AmpliTube 4 host stopped".
+Restore (C.5) starts when the transport stops, because loading plug-ins while playing conflicts
+with the Power rule.
+
+**Hang without crash:** detected when a control request does not return within its per-kind limit,
+or when slots stay outstanding while the helper's progress counter (incremented by every helper
+processing thread and its message loop) does not move. Audio is already protected by the deadline.
+DAL does not kill the helper on its own while it might hold newer state. It shows "AmpliTube 4 host
+is not responding" with **Restart host** (uses the last captured state and names what may be
+lost) and **Wait**. A hang during a capture counts as a failed capture, so the destructive step is
+cancelled (C.3).
+
+The callback never waits without a bound, and the message thread never waits on the helper without
+a bound either.
 
 ### D.4 Parallelism, render pool and read-ahead
 
@@ -463,7 +537,7 @@ Without project PDC that is an audible shift. Not accepted.
 |---|---|
 | Device change, sample-rate or block-size change | DAL already calls `prepareToPlay` on the message thread with processing drained. The stand-in forwards it as a control request and reallocates the shared buffers for the new maximum block before the reply. Until the reply, the stage outputs silence. |
 | Transport, tempo, position, cycle | `PositionInfo` per segment is copied into the request header. The helper gives its instance a playhead that returns exactly that. Segments are not merged, so a cycle wrap is a segment boundary as today. |
-| Offline export | `setNonRealtime(true)` is forwarded. The audio-path deadline is replaced by "wait for done or process exit", and a stalled helper fails the export with a message instead of writing silence. An export is bit-identical to in-process only if AmpliTube itself is deterministic **[to prove]**. Identity is tested with a deterministic plug-in (DAL Mono Delay) forced into the helper in a test build. |
+| Offline export | `setNonRealtime(true)` is forwarded. There is no real-time deadline, but the wait is never unbounded: it waits in short slices and between slices checks (a) the helper process handle, (b) the export's existing cancel request (`AudioMixdownExporter`'s `cancelRequested`, fed by the progress window's Cancel), and (c) the helper's progress counter. A dead helper, a Cancel, or no progress for an offline hang limit ends the export with a message naming the helper; it never writes silence into the file. An export is bit-identical to in-process only if AmpliTube itself is deterministic **[to prove]**; identity is tested with a deterministic plug-in (DAL Mono Delay) forced into the helper in a test build. |
 | State access | Only on the helper's message thread, via control requests, under C.3. Preset get/set goes the same way. |
 | Editor | Opened on request in the helper as a **top-level window owned by the helper**, titled with the DAL track and slot. Not reparented into DAL's window. Microsoft documents that a cross-process `SetParent` forces a DPI-awareness reset of the child window's process (`SetParent`, Remarks). A cross-process parent/child pair is also widely reported to share input processing, so a hung helper could stall DAL's UI. That second point is not in the API reference and is **[to prove]** only if reparenting is ever reconsidered. DAL passes `AllowSetForegroundWindow` so the helper can bring the editor to front. Open/close state goes back to DAL, and an open isolated editor keeps the stage awake (rest rule). The editor dies with the helper and is not reopened automatically after a restore. Behaviour with AmpliTube's own windows (licensing dialogs, resize, high DPI) is **[to prove]**. |
 
@@ -476,32 +550,43 @@ depend on isolation.
 
 | # | Stage | Content | Done when |
 |---|---|---|---|
-| 0 | **PR #12 completion** | A.2 Power guards for undo/redo and reconcile. A.3 wake on transport start, parameter change and state load. Report §6 wording corrected (A.5). Manual checks: MIDI editor on an Off row, Save/reopen while Off, undo of Power. | Focused tests for each guard and wake. Selftests, InsertPersistence and InstrumentParallel green. Base comparison (A.4) unchanged. |
-| 1 | **Prototype (measure, not ship)** | Helper flag in the DAL exe. Shared section + event pair. A test-only `IsolatedInsertInstance` that runs one or N real AmpliTube 4 instances, and DAL Mono Delay for bit identity. Driven from a focused test harness, and from the app behind a diagnostic command-line flag only. No recovery, no editor. | Numbers for the stop criteria below. |
+| 0 | **PR #12 completion (done)** | A.2 Power guards for undo/redo, reconcile, wake steps and deferred destruction. A.3 rest revision 2: category policy, instruments never rest, wake on transport, parameter and state. Report §4 and §6 corrected. Fixture checks: MIDI editor on an Off row, Save/reopen while Off, Power undo. | See report §9. |
+| 1 | **Prototype (measure, not ship)** | Helper flag in the DAL exe. Shared section, event pair and the ownership and deadline rules of D.3. A test-only `IsolatedInsertInstance` that runs one or N real AmpliTube 4 instances, and DAL Mono Delay for bit identity. Editor smoke test only. Driven from a focused test harness, and from the app behind a diagnostic command-line flag only. No recovery. | The acceptance table below. |
 | 2 | Control plane and lifetime | `IsolatedHostConnection`, create, prepare, state, preset, destroy, exit-without-destroy, `IsolatedPluginPolicy`. The factory switch in `instantiateLiveSlot` and the add path. | Project with AmpliTube saves and reloads byte-identical state in and out of isolation. Project close and app exit never call AmpliTube's destructor. |
 | 3 | Audio path in the engine | Same-block requests, segment batching, adjacent-slot batching, bounded wait, lost and late states, pause flag for C.3. Read-ahead adoption excludes isolated rows. | Section F audio checks pass. |
 | 4 | Off, crash and hang recovery | C.3–C.5, `PluginRecoveryCoordinator`, UI toast and banner, command blocking, Retry. | Section F crash checks pass. |
 | 5 | Editor and read-ahead | Helper-owned editor windows. Isolated rows allowed into read-ahead after measurement. | Section F editor and read-ahead checks pass. |
 | 6 | Off-only decoded audio | `AudioClip` keeps metadata and a handle to resident PCM. A material store with reference counts from **On** rows only. The waveform pyramid is keyed by material, not by `AudioClip*`, and is kept. Wake re-decodes before the row comes On. Undo snapshots hold handles, not PCM. | Memory drops by the material of Off-only rows. Shared material is never released while an On row uses it. Waveforms stay visible. |
 
-**Stop criteria for stage 1** (on this machine, 48 kHz / 512, 10 AmpliTube 4 instances on 10 rows,
-TSE_pt2 temp copy, 10 minutes playing plus 10 minutes stopped, and again with one render worker):
+**Stage 1 scope.** Helper process with AmpliTube 4 loaded, authorised and processing; the shared
+section and events; the deadline wait with ownership as in D.3; a test-only stand-in. It also
+includes a **minimal editor smoke test**: on a test command the helper opens AmpliTube's editor as
+a helper-owned top-level window and closes it again. Editor integration in DAL's UI (menus, focus,
+state capture on close) stays in stage 5. Recovery stays in stage 4.
 
-* Added callback time per isolated slot: median ≤ 50 µs, 99.9th percentile ≤ 300 µs. Callback
-  maximum stays below 50 % of the block budget. **Zero** deadline misses and zero device
-  overruns.
-* Output of DAL Mono Delay through the helper is bit-identical to in-process. AmpliTube output
-  differs from in-process by no more than AmpliTube's own run-to-run difference.
-* Helper memory per AmpliTube instance is within 10 % of the in-process growth per instance,
-  plus a fixed helper baseline of at most 150 MB.
-* Ending the helper with 10 instances frees their memory (private bytes of the helper go to
-  zero, DAL unchanged), with no AmpliTube destructor called.
-* AmpliTube runs in the helper at all: authorisation, presets and the editor in a separate
-  process. If AmpliTube refuses to run in a second process, stop.
+**Acceptance for stage 1.** Always measured **together for DAL and helper** and compared with
+in-process AmpliTube under the same conditions: same machine, same temp copy of TSE_pt2 with its
+10 AmpliTube 4 instances, same device, same worker count.
 
-If the criteria fail: report the numbers. The fallback for AmpliTube Off is then report option 2
-(keep loaded, released, no processing) for the verified AmpliTube identity. That needs a decision
-from the user, because it is identity-based special handling.
+| Measure | Conditions | Accept when |
+|---|---|---|
+| Added block latency | impulse through one isolated and one in-process AmpliTube on two rows | the two outputs line up to the sample (the goal of D.1, verified) |
+| Deadline misses and device overruns | playing 10 min and stopped 10 min; buffer sizes 64, 128, 256 and 512 at 48 kHz | zero at 128, 256 and 512; at 64 reported, decision with the user |
+| Callback time | same | mean and max per buffer size; max stays below 50 % of the block budget at 128 and above |
+| Added time per isolated slot | same | median and 99.9th percentile reported per buffer size; 99.9th ≤ 10 % of the block budget at 128 and above |
+| First sound block | Play from silence with input on an AmpliTube row | first non-silent output block equals in-process |
+| CPU | process CPU of DAL + helper (sum), playing and stopped, with and without spinning | reported against in-process; the added total and the spinning share are stated, no threshold invented before the numbers exist |
+| Memory | private bytes of DAL + helper (sum) | within 150 MB of in-process for 10 instances |
+| Thread cost | helper threads, idle wakeups per second | reported |
+| Parallelism | 10 isolated rows over 7 workers and over 1 worker | per-block wall time grows by less than 10 × one round trip (shows overlap) |
+| Memory reclaim | end the helper with 10 instances | helper gone, no AmpliTube destructor called, DAL unchanged |
+| Runs at all | AmpliTube 4 in the helper | loads, authorises, processes; its editor opens and closes in the smoke test |
+
+One render worker on this machine is **not a simulation of Conny's laptop**; it only shows the
+critical path with fewer workers. If AmpliTube refuses to run or authorise in a second process,
+stage 1 stops there. If the misses, callback or per-slot criteria fail, the numbers are reported
+and the fallback for AmpliTube Off is report option 2 (keep loaded, released, no processing) for
+the verified AmpliTube identity, which needs the user's decision.
 
 ---
 
@@ -532,8 +617,8 @@ plug-in on this machine. Projects are temp copies only.
 
 **Can be finished in PR #12, no isolation needed:**
 
-* Stage 0 in full: Power guards (A.2), the three rest wake fixes (A.3), corrected message-thread
-  wording (A.5), this exact-base test comparison (A.4), and the manual Off checks.
+* Stage 0, done: Power guards (A.2), rest revision 2 with its wake triggers (A.3), corrected
+  report wording (A.5), the exact-base test comparison (A.4), and the fixture checks.
 * The proxy change stays as is: missing mode reads Manual, explicit choices are written, and Off
   rows never render.
 

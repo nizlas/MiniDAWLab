@@ -10,14 +10,16 @@ result report for branch `claude/resource-saving`. Evidence extracts:
 * **Off now frees memory and CPU.** With every source row Off, the same project runs at
   0.08–0.10 core and 0.39 GB private (fresh process opening the saved Off copy) instead of
   0.7 core and 5.0 GB. No plug-in instance of an Off row is alive.
-* **On rows rest automatically where it is provably safe.** Measured on the same copy and device:
-  the stopped callback went from 3.2 ms to 0.75 ms before the first Play and to 1.5 ms after
-  Play → Stop; process CPU from 0.69 to 0.40–0.49 core. With one render worker (what a 4-core
-  machine gets) the stopped callback went from 3.5 ms to 1.0–1.8 ms and playback from 1.65 ms to
-  0.93 ms.
+* **On rows rest automatically, but only plug-ins that declare themselves audio-processing
+  effects** (revision 2 of the rule, section 4.2). Silence so far never proves that a plug-in
+  cannot sound later, so instruments, generators, plain "Fx" and tool plug-ins keep running. The
+  numbers below were measured with the first, more permissive rule, under which instruments that
+  had not received MIDI also rested: the stopped callback went from 3.2 ms to 0.75 ms before the
+  first Play and to 1.5 ms after Play → Stop; process CPU from 0.69 to 0.40–0.49 core. With
+  revision 2 part of that gain is gone (section 5); it has not been re-measured.
 * **Not solved:** stages whose plug-ins report an infinite or no tail (Pro-R reports infinite,
-  AmpliTube 4 and the instruments report 0) keep running after they have had input, by design.
-  The message thread's idle cost is explained but not reduced (section 6).
+  AmpliTube 4 reports 0) keep running after they have had input, by design. The message thread's
+  idle cost (19 % of a core) is **observed but not explained** (section 6).
 * **Blocker for release: AmpliTube 4 can crash DAL when one of its instances is destroyed**
   (section 3.4). This is the long-known `AmpliTube 4.vpa+0x7675E` teardown crash; Off now hits
   it during normal use, not only at shutdown. A decision is needed.
@@ -45,7 +47,7 @@ result report for branch `claude/resource-saving`. Evidence extracts:
 | State | Meaning | Plug-in instances | Work per block |
 |---|---|---|---|
 | **Off** | The user switched the row off with Power (`Track::trackOff_`, persisted). | None. Inserts are dormant placeholders, the instrument is unloaded; all state is kept as data. | None for the row. MIDI addressed to it is discarded. |
-| **On, resting** | Internal. A stage has provably nothing to produce. | Loaded, prepared. | That stage's `processBlock` is skipped; its silent buffer passes through. A resting instrument gets no render-pool job. |
+| **On, resting** | Internal. A stage of declared audio-processing effects has silent input and nothing left to produce by its own report. | Loaded, prepared. | That stage's `processBlock` is skipped; its silent buffer passes through. A resting instrument gets no render-pool job. |
 | **On, working** | Input, MIDI, held notes, a tail still ringing, or a plug-in that cannot be judged. | Loaded. | As before. |
 
 Resting has no control and no UI. Mute keeps its meaning (the row still processes, gain 0) and is
@@ -178,12 +180,27 @@ never read, so DAL cannot get the plug-in's own silence report. The project's pl
 `acceptsMidi()` is true for Pro-R, Pro-Q and AmpliTube, but DAL sends inserts no MIDI (the MIDI
 scratch is cleared per slot), so it is not a reason to keep running.
 
-### 4.2 The rule (`src/plugins/InsertChainRest.h`)
+### 4.2 The rule (`src/plugins/InsertChainRest.h`, revision 2)
+
+**Who may rest at all.** Neither condition below proves that a plug-in cannot sound later: a
+transport-driven or free-running generator can stay silent for any number of blocks and then
+start without input, MIDI or a parameter change. So a unit may rest only when every active
+plug-in in it declares itself an audio-processing effect (`categoryAllowsRest`): its VST3
+sub-categories contain "Fx" and one of EQ, Dynamics, Reverb, Delay, Distortion, Filter,
+Modulation, Pitch Shift, Restoration, Mastering, Spatial or Analyzer, and none of Instrument,
+Synth, Sampler, Drum, Piano, Generator, External, Tools, Network or OnlyARA. That is the
+plug-in's own declaration, not something DAL verifies. In this project that covers Pro-Q 3
+(EQ), Pro-R (Reverb), AmpliTube 4 (Distortion) and Pro-C 2 (Dynamics). It excludes every
+instrument (HALion Sonic, Groove Agent SE, VB3-II, BBC SO), DAL Mono Delay, DAL Tuner and
+BassEvening (plain "Fx") and VB3-II Remote Input ("Fx|Tools").
+
+Revision 1 (commit 2804928) let any unit rest after two silent blocks if it had never had input,
+instruments included. That was wrong as a safety claim and is replaced.
 
 Unit: one insert stage (the Pre or the Post inserts of an audio, instrument, group or Stereo Out
-row), and each instrument's generation stage. A unit skips `processBlock` for a block when its
-input in that block is **digitally silent** (every sample 0; for an instrument: no MIDI and no
-held note or sustain pedal, tracked from the MIDI actually delivered) and:
+row). An instrument's generation stage never rests under revision 2. A unit that may rest skips
+`processBlock` for a block when its input in that block is **digitally silent** (every sample 0)
+and:
 
 * it has had no input since its plug-ins were prepared and its output has been silent for
   latency + 2 blocks (the loaded-never-played case), or
@@ -192,22 +209,34 @@ held note or sustain pedal, tracked from the MIDI actually delivered) and:
   1 block**. The second tail length is a check: a plug-in heard after its reported tail is
   marked unreliable and its unit never rests again in this session.
 
-An infinite or unreported tail, a plug-in that calls itself an instrument, or an open editor keeps
+An infinite or unreported tail, a category that does not allow rest, or an open editor keeps
 the unit running. Its uncertainty stays local; other units still rest. No time constant is
 involved except the plug-ins' own tails.
 
-**Wake.** Any input wakes the unit in the same block, before processing, so the first sample and
-the first note are processed (verified bit-identical to no rest). A chain change, Active/Bypass,
-a new instance or a changed reported tail wakes it too (re-read about once a second). Resting does
-not call `reset()`: a unit only rests after its output has already been silent, so no old echo can
-come back. Plug-in transport info keeps being set every block.
+**Wake.** Any input wakes the unit in the same block, before processing, so the first sample is
+processed (verified bit-identical to no rest). These also wake it and make it re-qualify from the
+start:
+
+* a parameter change from any source and thread, editor or not (`AudioProcessorListener` on every
+  live insert instance);
+* a state or preset load into the same instance (in-place undo, preset apply, slot restore);
+* the transport starting or stopping, and a jump in play position (locate, cycle wrap);
+* a chain change, Active/Bypass, a new instance or a changed reported tail (re-read about once a
+  second).
+
+A parameter or state wake keeps a tail already found unreliable marked unreliable. Resting does
+not call `reset()`: a unit only rests after its output has already been silent, so no old echo
+can come back. Plug-in transport info keeps being set every block. A plug-in that reports
+parameter changes continuously (for example a meter exposed as a parameter) therefore never
+rests; that costs CPU, not correctness.
 
 **Why digital silence.** Skipping a block whose input and recent output are exactly zero produces
 exactly what processing it would have, so output does not depend on which lane decided (callback
 block, render-pool job or read-ahead segment). Serial, pool and read-ahead output stay
 bit-identical. A plug-in that keeps emitting a noise floor or DC (VB3-II) never rests.
 
-**Scheduling.** A resting instrument with nothing queued gets no render-pool job. Read-ahead uses the
+**Scheduling.** A resting instrument with nothing queued would get no render-pool job; under
+revision 2 instruments do not rest, so every instrument keeps its job. Read-ahead uses the
 same chain function, so it follows the same rule on the rows it owns. An offline export suspends
 rest (`PlaybackEngine::setPluginRestSuspended`, also used by the offline render gate) so an export
 equals an uninterrupted render. Dispatching the remaining stopped tails through the render pool was
@@ -215,11 +244,12 @@ not done: after rest, the stopped callback is 1.5–1.8 ms, which does not justi
 
 ### 4.3 Known limits of rest
 
+* The category is the plug-in's own declaration. A plug-in declared as, say, "Fx|EQ" that makes
+  sound with silent input, later, and without any parameter, state or transport change, would
+  not be heard until something wakes it. DAL cannot detect that.
 * A plug-in that under-reports a finite tail and stays silent for more than twice that tail before
-  it sounds again would be cut. None of the project's plug-ins reports a finite tail except Pro-Q 3
-  and DAL Mono Delay.
-* A plug-in that generates sound on its own but stays silent for the first two blocks after prepare
-  (and is not flagged as an instrument) could rest before it starts.
+  it sounds again would be cut. In this project only Pro-Q 3 reports a finite tail among the
+  plug-ins that may rest.
 * Time-dependent internal state (an LFO phase) is frozen while resting; the output was digital
   silence at that time.
 
@@ -256,6 +286,12 @@ Rest counters after the four windows (7 workers): insert stage blocks rested 116
 (stages that never received input in the played range); the 11 Pro-R and the processing AmpliTube
 keep running because of their tail reports.
 
+**These A–C numbers are for rule revision 1.** Under revision 2 the 114 237 rested instrument
+blocks and the rested stages made only of DAL Mono Delay, DAL Tuner, BassEvening or VB3-II Remote
+Input are processed again. The phase A and B gain is therefore smaller, and the one-worker case
+loses most. It was not re-measured in this step, because that needs the ASIO device and a second
+audio instance was not started.
+
 **D–E: every source row Off** (audio, instrument and MIDI rows; there are no group buses, Stereo Out
 has no inserts)
 
@@ -276,14 +312,24 @@ as float), waveform caches and the 14 empty hosts and controllers.
 
 ## 6. Message thread
 
-Sampled with a stack sampler (dbghelp) and split by user / kernel time while stopped: **9 % user +
-11 % kernel** of one core. 90 % of user-mode samples wait in `NtUserGetMessage`. The active part is
-Direct2D frame start / present per vblank (≈5 %), timers (≈2 %: transport, live MIDI, Inspector
-channel strip, tooltip, playhead overlay, mixer), the scenario runner's own status label, and a
-security product hook (`bdhkm64.dll`) in the message loop. Kernel time is the D2D/DXGI present path
-and that hook. The meter and the playhead overlay only repaint on change. No unnecessary DAL repaint
-or model refresh was confirmed, so nothing was changed. A finer attribution needs a profiler with
-kernel stacks (ETW / WPA).
+**Observed** (user-mode stack sampler with dbghelp, and `GetThreadTimes`, while stopped): the
+message thread used **9 % user + 11 % kernel** of one core. In the user-mode samples:
+
+* 88.7 % are inside `NtUserGetMessage`, the thread waiting for a message. Frames of a security
+  product (`bdhkm64.dll`) sit above `GetMessageW` on 90 % of samples.
+* About 5 % are vblank-driven Direct2D painting (`onVBlank` → `handleDirect2DPaint` →
+  `startFrame`), 1–2 % DXGI / D3D11, 2.9 % `Label::valueChanged`, 1.7 % timer callbacks, and
+  under 1 % each Groove Agent SE, HALion Sonic, JUCE's VST3 parameter dispatcher and `atcuf64.dll`.
+
+**Not established.** Waiting samples show where the thread sleeps, not what costs CPU, so the
+security hook and `GetMessage` on those stacks do not explain the cost. The sampler saw no kernel
+stacks, so nothing is known about what the 11 % kernel time is.
+
+**Hypotheses, untested:** the kernel time may come from the Direct2D / DXGI present path, from
+the security product, or from timer and message traffic; the 2.9 % `Label::valueChanged` is
+probably the perf scenario's own status label. The test is an ETW capture with kernel stacks
+(WPR / WPA), with and without the window minimised and without the status label. Nothing was
+changed in DAL.
 
 ## 7. Open limits
 
@@ -292,14 +338,15 @@ kernel stacks (ETW / WPA).
   (and keeping waveform overviews) was not implemented; in this project it is under 83 MB.
 * **Proxy pairing after Off → On:** reloading the Primary bumps its semantic revision, so a proxy
   that was Current can read Stale afterwards. With the new Manual default nothing renders by itself.
-* **Off → On while playing:** Power stays refused while playing (unchanged). A load that finishes
-  while the transport runs waits for Stop before the row comes On.
-* **Not verified in the running app by hand:** MIDI editor on an Off row, Save / reopen while Off
-  through the UI, undo of a Power change, listening across rest / wake. These are covered by the
-  focused tests below only as far as stated there.
+* **Power while playing:** Power stays refused while playing. Since stage 0 no plug-in is created
+  or destroyed because of Off while the transport runs, and undo / redo that would change Power is
+  refused while playing (section 9).
+* **Not verified in the running app by hand:** MIDI editor on an Off row, Save / reopen and Power
+  undo were checked in test fixtures without an audio device (section 9), not in the running app.
+  Listening across rest and wake was not done.
 * **Conny's laptop:** nothing was measured there. Paging remains a hypothesis.
 
-## 8. Tests
+## 8. Tests (at commit 2804928, rest revision 1; stage 0 results are in section 9)
 
 | Suite | Result | Covers |
 |---|---|---|
@@ -314,6 +361,7 @@ kernel stacks (ETW / WPA).
 
 Rerun against the exact base `8472feb` (same toolchain and settings, two runs each): the same 6 and 39
 failing checks at base and on this branch. See `OFF_UNLOADING_AND_AMPLITUBE_ISOLATION_PLAN_2026-11-05.md` A.4.
+Stage 0 (Power guards, rest revision 2) and its tests: section 9.
 
 The Off commit was also built and tested on its own (without the rest commit):
 `InsertPersistenceFocusedTests` 143 / 0, `MiniDAWSelftests` 3 524 / 0, `ExportLevelFocusedTests` 76 / 0.
@@ -321,3 +369,62 @@ The Off commit was also built and tested on its own (without the rest commit):
 Not run: the stability matrix, `--stability-load-loop`, `--stability-delete-loop`,
 `--stability-mixdown` and the live-MIDI / proxy scenarios. They are recommended before a tester build
 because this branch touches plug-in lifetime, the audio callback and project load.
+
+## 9. Stage 0 (2026-11-05, after review)
+
+Plan: `OFF_UNLOADING_AND_AMPLITUBE_ISOLATION_PLAN_2026-11-05.md` (A.2, A.3).
+
+**Power only while stopped.**
+
+* Undo / redo first looks at the snapshot it would restore. While playing, a step that would switch
+  any row On or Off is refused: the history pointer and the model stay unchanged and a toast says
+  "Undo would switch a track On or Off. Stop the transport first." Steps that leave Power alone
+  work during playback as before.
+* `TrackPowerCoordinator` creates and destroys nothing while the transport is busy (playing,
+  recording, counting in, project load): reconciling, every wake step and the deferred destruction
+  of released instances wait for Stop. A stepwise On load that is between two plug-ins when the
+  transport starts pauses there; the row stays Off until all its plug-ins are loaded after Stop.
+  One load already in progress when the transport starts finishes.
+
+**Rest revision 2** (section 4.2): only declared audio-processing effects may rest; instruments
+never rest; parameter changes (any thread, no editor needed), state and preset loads, transport
+start / stop and play-position jumps wake a resting stage.
+
+Which rest cases are safe, and on what basis:
+
+| Case | Basis | Safe? |
+|---|---|---|
+| Declared processing effect, never had input, silent output for latency + 2 blocks | the plug-in's category says it turns input into output | as safe as that declaration; anything it would do on a parameter, state or transport change wakes it |
+| Declared processing effect after input, finite reported tail, 2 × tail of silence | the plug-in's tail report, checked once more | as safe as that report; a late sound marks it unreliable for the session |
+| Zero-reported or infinite tail after input (AmpliTube 4, Pro-R) | none | does not rest |
+| Instruments, generators, plain "Fx", "Fx\|Tools" | silence proves nothing about future output | do not rest |
+
+**Tests added** (all pass):
+
+| Suite | Checks |
+|---|---|
+| `MiniDAWSelftests` (3 543 / 0) | category policy table; a generator silent for 40 blocks keeps running and is heard from its first sounding block; a parameter change and a state load each wake a resting stage, the new sound is heard in the next block; transport start, stop and a position jump wake, contiguous playback lets it rest; a long tail with three echoes and silent gaps keeps every echo and rests only after 2 × tail |
+| `InsertAudibleFocusedTests` (86 / 0) | through the real insert host: late-starting generators declared "Fx\|Generator", "Instrument\|Synth", "Fx" and "Fx\|Reverb\|Generator" keep running and are heard at block 20; an "Fx\|EQ" effect rests after 2 blocks and processes the first input block; a parameter change without an editor wakes it; an in-place state load that turns sound on wakes it; Play wakes it in the first playing block |
+| `InstrumentParallelFocusedTests` (45 / 0) | instruments without MIDI keep processing every block and keep their pool jobs; an instrument that starts by itself after 10 silent blocks is heard, output identical to rest suspended |
+| `SoloFocusedTests` (111 / 0) | real `UndoRedoCoordinator`: undo without a Power change works while playing; undo that would switch a row On, and redo that would switch it Off, are refused while playing with history and model unchanged; both apply after Stop |
+| `InsertPersistenceFocusedTests` (153 / 0) | real DAL Mono Delay + BassEvening with `TrackPowerCoordinator`: no unload while busy, unload after Stop, no destruction while busy, Power On refused while busy, a stepwise load pauses between two plug-ins while busy with the row Off, completes after Stop with the states captured at Off; Save while Off and reopen (existing) |
+| `MidiEditorCohortFocusedTests` (ok) | real MIDI editor window without an audio device on an Off row holding no instrument: the clip opens and its note is shown, a note moves, audition is silent and loads nothing, undo and redo of the note edit work, the row stays Off |
+
+Unchanged and passing: `ExportLevelFocusedTests` 76 / 0, `ArrangementMidiEventFocusedTests` 87 / 0.
+Timing-sensitive suites, two runs each on this build, compared with the exact base `8472feb` runs
+of A.4: `ReadAheadPrototypeFocusedTests` 217 / 39 failures, the same 39 checks as the base.
+`AudioStripParallelFocusedTests` 85 / 4 failures: the 4 sample-coverage failures of the base remain,
+and the base's two pool-dispatch failures ("parallel: blocks were dispatched to the pool", "worker
+threads ran jobs") passed in both runs. Its own counters show why the outcome moved: the base and
+the earlier PR head dispatched 0 of 49 blocks to the pool in all four runs, this build 1 and 4.
+That check depends on a measured block cost against the pool's threshold. Why the measured cost
+changed is not established, so it is not counted as a fix. No check failed that passed at the
+base.
+
+Found while testing: a default DAL Mono Delay with tempo sync on writes its parameters in a
+different order and a recomputed delay time (333.300049 vs 333.300018 ms) after a reload, so its
+state bytes after Off → On differ from those captured at Off. That is the plug-in re-serialising,
+not DAL losing state; the test uses explicit non-synced states, as the existing Off test does.
+
+**Not done in stage 0:** CPU after rest revision 2 was not re-measured (needs the ASIO device; no
+second audio instance was started). The checks above ran in test fixtures, not in the running app.
