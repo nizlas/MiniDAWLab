@@ -2021,6 +2021,10 @@ PluginInsertHost::DormancyResult PluginInsertHost::makeTrackInsertsDormant(const
                       + juce::String((juce::int64)trackId));
         }
         r.instance->releaseResources();
+        if (auto* iso = dynamic_cast<mini_daw::isolation::IsolatedInsertInstance*>(r.instance.get()))
+        {
+            iso->markRetiredForOff();
+        }
         offRetired_.push_back({ std::move(r.instance), trackId, juce::Time::getMillisecondCounterHiRes() });
     }
     juce::Logger::writeToLog("[plugin] Off: unloaded " + juce::String((int)retiring.size())
@@ -2041,7 +2045,7 @@ bool PluginInsertHost::destroyNextOffRetiredInsert(const double minAgeMs)
         // instance in the helper. Capture them all first; a failed capture postpones destruction
         // with nothing lost (plan C.3). The last instance in the helper ends the helper instead.
         auto& host = mini_daw::isolation::IsolatedHostConnection::get();
-        if (host.liveInstanceCount() > 1 && iso->link() == mini_daw::isolation::IsolatedInsertInstance::Link::Ready)
+        if (host.liveOnInstanceCount() > 0 && iso->link() == mini_daw::isolation::IsolatedInsertInstance::Link::Ready)
         {
             juce::String failed;
             if (!host.captureAllLive(failed))

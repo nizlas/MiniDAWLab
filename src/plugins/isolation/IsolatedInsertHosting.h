@@ -126,6 +126,10 @@ public:
     [[nodiscard]] juce::MemoryBlock getPresetBytes(bool& ok);
     /// [Message thread] The caller just ran `captureAllLive`; the destructor need not capture again.
     void skipDestroyCaptureOnce() noexcept { skipDestroyCapture_ = true; }
+    /// [Message thread] The row went Off: its state is captured and it is no longer processed.
+    /// Recovery never restores it, and it does not keep the helper alive on its own.
+    void markRetiredForOff() noexcept { retiredForOff_ = true; }
+    [[nodiscard]] bool retiredForOff() const noexcept { return retiredForOff_; }
     [[nodiscard]] bool setPresetBytes(const juce::MemoryBlock& preset);
 
 private:
@@ -170,6 +174,7 @@ private:
     double changedAtMs_ = 0.0;
     bool editorOpen_ = false;
     bool skipDestroyCapture_ = false;
+    bool retiredForOff_ = false;
     Counters counters_;
 };
 
@@ -206,6 +211,8 @@ public:
     [[nodiscard]] bool isBlockingCommands() const noexcept { return phase_ == Phase::Restoring; }
     [[nodiscard]] bool helperRunning() const noexcept { return helperAlive_.load(std::memory_order_acquire); }
     [[nodiscard]] int liveInstanceCount() const noexcept;
+    /// Live instances of rows that are On (not retired for Off).
+    [[nodiscard]] int liveOnInstanceCount() const noexcept;
     [[nodiscard]] std::uint32_t helperPid() const noexcept { return helperPid_; }
     [[nodiscard]] int helperStartsForDiagnostics() const noexcept { return helperStarts_; }
     [[nodiscard]] juce::String lastRecoveryReport() const { return lastRecoveryReport_; }

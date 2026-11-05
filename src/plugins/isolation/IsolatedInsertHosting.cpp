@@ -671,6 +671,13 @@ int IsolatedHostConnection::liveInstanceCount() const noexcept
     });
 }
 
+int IsolatedHostConnection::liveOnInstanceCount() const noexcept
+{
+    return (int)std::count_if(instances_.begin(), instances_.end(), [](const IsolatedInsertInstance* i) {
+        return i->link() == IsolatedInsertInstance::Link::Ready && !i->retiredForOff_;
+    });
+}
+
 void IsolatedHostConnection::registerInstance(IsolatedInsertInstance* inst) { instances_.push_back(inst); }
 
 void IsolatedHostConnection::unregisterInstance(IsolatedInsertInstance* inst)
@@ -1002,8 +1009,9 @@ void IsolatedHostConnection::retireInstance(IsolatedInsertInstance& inst)
     {
         return;
     }
+    // Instances of rows that are Off do not keep the helper: their state is already captured.
     const bool last = std::none_of(instances_.begin(), instances_.end(), [&](const IsolatedInsertInstance* i) {
-        return i != &inst && i->link() == IsolatedInsertInstance::Link::Ready;
+        return i != &inst && i->link() == IsolatedInsertInstance::Link::Ready && !i->retiredForOff_;
     });
     inst.closeRemoteEditor();
     if (last)
@@ -1066,7 +1074,7 @@ bool IsolatedHostConnection::captureAllLive(juce::String& failedName)
     }
     for (IsolatedInsertInstance* i : instances_)
     {
-        if (i->link() == IsolatedInsertInstance::Link::Ready && !i->captureNow())
+        if (i->link() == IsolatedInsertInstance::Link::Ready && !i->retiredForOff_ && !i->captureNow())
         {
             failedName = i->getName();
             return false;
@@ -1151,7 +1159,7 @@ void IsolatedHostConnection::onHelperDied(const int generation, const bool unres
         finishRestore(false, "The plug-in host stopped again while restoring.");
         return;
     }
-    if (instances_.empty())
+    if (std::all_of(instances_.begin(), instances_.end(), [](const IsolatedInsertInstance* i) { return i->retiredForOff_; }))
     {
         setPhase(Phase::None); // nothing to restore: no helper is started
         if (hooks_.showProgress)
@@ -1177,9 +1185,9 @@ void IsolatedHostConnection::beginRestore()
     restoreQueue_.clear();
     for (IsolatedInsertInstance* i : instances_)
     {
-        if (i->link() != IsolatedInsertInstance::Link::Ready)
+        if (i->link() != IsolatedInsertInstance::Link::Ready && !i->retiredForOff_)
         {
-            restoreQueue_.push_back(i);
+            restoreQueue_.push_back(i); // desired On only; Off rows stay unloaded
         }
     }
     restoreTotal_ = (int)restoreQueue_.size();
