@@ -659,6 +659,11 @@ private:
     /// [Message thread] Release resources, set stereo I/O, `setBusesLayout` when supported, `prepareToPlay`.
     /// Returns whether main bus is 2-in / 2-out.
     [[nodiscard]] bool tryPrepareStereoInsert(juce::AudioPluginInstance& inst, double sr, int bs);
+    /// [Message thread] In-process instance, or a stand-in in the shared helper for isolated plug-ins.
+    [[nodiscard]] std::unique_ptr<juce::AudioPluginInstance> createInsertInstance(const juce::PluginDescription& desc,
+                                                                                double sr,
+                                                                                int bs,
+                                                                                juce::String& err);
     void logStereoLayoutFailure(TrackId trackId) const;
 
     /// [Message thread] Retires one track's live slots: moves them out of `chains_`, republishes the

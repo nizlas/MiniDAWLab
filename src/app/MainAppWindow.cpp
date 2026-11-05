@@ -65,6 +65,7 @@
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
 #include "plugins/PluginInsertHost.h"
+#include "plugins/isolation/IsolatedInsertHosting.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "app/AppProxyRenderEngine.h"
 #include "instruments/ProxyPlaybackCoordinator.h"
@@ -2437,6 +2438,51 @@ public:
             trackLanesView.setOnRequestTrackPowerOn([this](const TrackId tid) {
                 return trackPowerCoordinator_ != nullptr ? trackPowerCoordinator_->requestPowerOn(tid) : false;
             });
+
+            // The shared AmpliTube 4 helper: restore progress in the same toast as Power, a failure
+            // banner with Retry, and the transport rule (restore only while stopped).
+            {
+                namespace iso = mini_daw::isolation;
+                iso::IsolatedHostConnection::UiHooks h;
+                h.transportBusy = [this] {
+                    return anyRecordingInProgress()
+                           || (recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive())
+                           || transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+                };
+                h.showProgress = [this, showPowerToast](const juce::String& text) {
+                    showPowerToast(text);
+                    if (!text.startsWith("Restoring plugins"))
+                    {
+                        juce::Component::SafePointer<juce::Component> self(this);
+                        juce::Timer::callAfterDelay(6000, [self, this, text] {
+                            if (self != nullptr && trackPowerToastLabel_.getText() == text)
+                            {
+                                trackPowerToastLabel_.setVisible(false);
+                            }
+                        });
+                    }
+                };
+                h.hideProgress = [showPowerToast] { showPowerToast({}); };
+                h.showFailure = [](const juce::String& message, std::function<void()> retry) {
+                    juce::AlertWindow::showAsync(juce::MessageBoxOptions()
+                                                     .withIconType(juce::MessageBoxIconType::WarningIcon)
+                                                     .withTitle("AmpliTube 4 host")
+                                                     .withMessage(message)
+                                                     .withButton("Retry")
+                                                     .withButton("Later"),
+                                                 [retry](const int result) {
+                                                     if (result == 1 && retry)
+                                                     {
+                                                         retry();
+                                                     }
+                                                 });
+                };
+                h.blockingChanged = [this] {
+                    refreshInstrumentUi();
+                    repaint();
+                };
+                iso::IsolatedHostConnection::get().setUiHooks(std::move(h));
+            }
         }
         addAndMakeVisible(inspectorPanel_);
         addAndMakeVisible(inspectorResizeSplitter_);
@@ -2898,7 +2944,10 @@ public:
     /// start and track creation are refused until finalize released the gates.
     [[nodiscard]] bool isProjectLoadInProgress() const noexcept
     {
-        return projectIoCoordinator_ != nullptr && projectIoCoordinator_->isLoadInProgress();
+        // Restoring the isolated plug-in host after a crash takes the same gates as a project
+        // load: transport start, record, structural edits, Power, undo / redo, save, open.
+        return (projectIoCoordinator_ != nullptr && projectIoCoordinator_->isLoadInProgress())
+               || mini_daw::isolation::IsolatedHostConnection::get().isBlockingCommands();
     }
 
     void invokeUndoFromWindowShortcut() override

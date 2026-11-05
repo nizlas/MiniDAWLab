@@ -49,6 +49,7 @@
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
+#include "plugins/isolation/IsolatedProcessDeadline.h"
 #include "transport/Transport.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -1134,6 +1135,19 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     };
     const AudioCallbackSectionClear callbackSectionClear { audioCallbackInProcessingSection_,
                                                            audioCallbackPhase_ };
+
+    // One absolute deadline for every isolated-stage wait of this callback, in any lane (plan
+    // D.3): start + block duration − a reserve for the mixing that follows the last stage.
+    {
+        const double srForDeadline = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+        if (srForDeadline > 0.0 && numSamples > 0)
+        {
+            const double budgetSeconds = (double)numSamples / srForDeadline;
+            namespace dl = mini_daw::isolation::deadline;
+            dl::publishCallbackDeadline(dl::qpcNow()
+                                        + (std::int64_t)(budgetSeconds * 0.80 * (double)dl::qpcPerSecond()));
+        }
+    }
 
     // Load diagnostics: two clock reads per block, folded into relaxed counters on the way out
     // (covers the early-return offline-gate path as well). Never read for synchronization.

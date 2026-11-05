@@ -8,6 +8,7 @@
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "plugins/PluginEditorWindows.h"
 #include "plugins/Vst3PresetFile.h"
+#include "plugins/isolation/IsolatedInsertHosting.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -1268,6 +1269,20 @@ void PluginInsertHost::logStereoLayoutFailure(const TrackId trackId) const
         + " — VST3 processing bypassed (expected main bus 2/2).");
 }
 
+std::unique_ptr<juce::AudioPluginInstance> PluginInsertHost::createInsertInstance(const juce::PluginDescription& desc,
+                                                                                 const double sr,
+                                                                                 const int bs,
+                                                                                 juce::String& err)
+{
+    // The only place that decides in-process versus the shared helper (plan B.1). Everything
+    // after this handles a juce::AudioPluginInstance either way.
+    if (mini_daw::isolation::IsolatedPluginPolicy::shouldIsolate(desc))
+    {
+        return mini_daw::isolation::IsolatedHostConnection::get().createInstance(desc, sr, bs, err);
+    }
+    return std::unique_ptr<juce::AudioPluginInstance>(formatManager_.createPluginInstance(desc, sr, bs, err));
+}
+
 bool PluginInsertHost::tryPrepareStereoInsert(juce::AudioPluginInstance& inst, const double sr, const int bs)
 {
     // AudioProcessor stores this raw pointer. A fresh instance gets the host-lifetime default
@@ -1387,8 +1402,7 @@ juce::Result PluginInsertHost::addInsertFromVst3FileNoUndo(const TrackId trackId
 
     const double srU = effectiveSr(sampleRate_);
     const int bsU = effectiveBs(blockSize_);
-    std::unique_ptr<juce::AudioPluginInstance> inst(
-        formatManager_.createPluginInstance(desc, srU, bsU, err));
+    std::unique_ptr<juce::AudioPluginInstance> inst = createInsertInstance(desc, srU, bsU, err);
     if (inst == nullptr)
     {
         return juce::Result::fail(err.isNotEmpty() ? err : "createPluginInstance failed.");
@@ -1755,8 +1769,7 @@ std::optional<PluginInsertHost::LiveInsertSlot> PluginInsertHost::instantiateLiv
     const double srU = effectiveSr(sampleRate_);
     const int bsU = effectiveBs(blockSize_);
     const double createT0 = juce::Time::getMillisecondCounterHiRes();
-    std::unique_ptr<juce::AudioPluginInstance> inst(
-        formatManager_.createPluginInstance(pd, srU, bsU, err));
+    std::unique_ptr<juce::AudioPluginInstance> inst = createInsertInstance(pd, srU, bsU, err);
     const int createMs = phaseMs(createT0);
     if (inst == nullptr)
     {
@@ -1970,13 +1983,18 @@ PluginInsertHost::DormancyResult PluginInsertHost::makeTrackInsertsDormant(const
     // reach the new map, which no longer lists these instances.
     rebuildAudioThreadMapAndPublish();
 
+    bool isolatedCaptureFailed = false;
     const bool ran = withExclusiveInstanceAccess([&] {
         for (Retiring& r : retiring)
         {
             r.instance->getStateInformation(chain[r.index].unavailableDescriptor.opaqueState);
+            if (auto* iso = dynamic_cast<mini_daw::isolation::IsolatedInsertInstance*>(r.instance.get()))
+            {
+                isolatedCaptureFailed = isolatedCaptureFailed || !iso->lastCaptureOk();
+            }
         }
     });
-    if (!ran)
+    if (!ran || isolatedCaptureFailed)
     {
         // No acknowledged exclusive access: nothing was captured and nothing may be destroyed.
         // Put the live slots back; the row is still silenced by Off, and a later attempt retries.
@@ -1990,7 +2008,8 @@ PluginInsertHost::DormancyResult PluginInsertHost::makeTrackInsertsDormant(const
         }
         rebuildAudioThreadMapAndPublish();
         juce::Logger::writeToLog("[plugin] Off: inserts of track " + juce::String((juce::int64)trackId)
-                                 + " kept loaded (exclusive access not acknowledged)");
+                                 + (ran ? " kept loaded (an isolated plug-in did not return its state)"
+                                        : " kept loaded (exclusive access not acknowledged)"));
         return DormancyResult::NotDrained;
     }
     eraseLastHostAppliedStateForTrack(lastHostAppliedState_, trackId);
@@ -2015,6 +2034,27 @@ bool PluginInsertHost::destroyNextOffRetiredInsert(const double minAgeMs)
         || juce::Time::getMillisecondCounterHiRes() - offRetired_.front().releasedAtMs < minAgeMs)
     {
         return false;
+    }
+    if (auto* iso = dynamic_cast<mini_daw::isolation::IsolatedInsertInstance*>(offRetired_.front().instance.get()))
+    {
+        // Destroying it may run AmpliTube's destructor in the helper, and a crash there takes every
+        // instance in the helper. Capture them all first; a failed capture postpones destruction
+        // with nothing lost (plan C.3). The last instance in the helper ends the helper instead.
+        auto& host = mini_daw::isolation::IsolatedHostConnection::get();
+        if (host.liveInstanceCount() > 1 && iso->link() == mini_daw::isolation::IsolatedInsertInstance::Link::Ready)
+        {
+            juce::String failed;
+            if (!host.captureAllLive(failed))
+            {
+                offRetired_.front().releasedAtMs = juce::Time::getMillisecondCounterHiRes() + 10000.0;
+                if (powerLog_)
+                {
+                    powerLog_("Off: destruction postponed, state of \"" + failed + "\" could not be captured");
+                }
+                return false;
+            }
+            iso->skipDestroyCaptureOnce();
+        }
     }
     OffRetired r = std::move(offRetired_.front());
     offRetired_.erase(offRetired_.begin());
@@ -2197,6 +2237,9 @@ int PluginInsertHost::detachAllInstancesForProjectClose() noexcept
     {
         return (int) projectClosePending_.size();
     }
+    // Isolated instances leave with their helper, which is terminated: AmpliTube 4's destructor
+    // never runs at project close or switch (plan C.4). Their stand-ins then release nothing.
+    mini_daw::isolation::IsolatedHostConnection::get().terminateForTeardown("project close");
 
     for (const auto& kv : editorWindows_)
     {
@@ -2278,6 +2321,7 @@ bool PluginInsertHost::releaseNextDetachedInsertForProjectClose() noexcept
 
 void PluginInsertHost::removeAllPlugins() noexcept
 {
+    mini_daw::isolation::IsolatedHostConnection::get().terminateForTeardown("remove all plug-ins");
     offRetired_.clear(); // released and unpublished already
     for (const auto& kv : editorWindows_)
     {
@@ -2625,6 +2669,21 @@ void PluginInsertHost::openNativeEditor(const TrackId trackId, const InsertSlotI
         return;
     }
     juce::AudioProcessor& proc = *s->instance;
+    if (auto* iso = dynamic_cast<mini_daw::isolation::IsolatedInsertInstance*>(s->instance.get()))
+    {
+        // The real editor lives in the helper as its own top-level window (plan D.5). Closing it
+        // there comes back through onRemoteEditorClosed with the same undo diff as a local window.
+        juce::MemoryBlock snap;
+        proc.getStateInformation(snap);
+        editorOpenState_[key] = std::move(snap);
+        const InsertSlotId openedSlot = s->slotId;
+        iso->onRemoteEditorClosed = [this, trackId, openedSlot] { editorWindowClosing(trackId, openedSlot, false); };
+        if (!iso->openRemoteEditor(proc.getName() + " (isolated)"))
+        {
+            editorOpenState_.erase(key);
+        }
+        return;
+    }
     juce::AudioProcessorEditor* const rawEd = proc.createEditor();
     if (rawEd == nullptr)
     {
