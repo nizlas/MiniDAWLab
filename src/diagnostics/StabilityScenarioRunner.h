@@ -145,7 +145,7 @@ enum class StabilityScenarioKind
     /// Sibling copy only.
     Mixer,
     /// `--stability-perf-profile <project> [--seconds N] [--warmup N] [--start-seconds S]
-    /// [--buffer N] [--mixer-open] [--profile-off]`: diagnostic — loads the project, documents the
+    /// [--buffer N] [--mixer-open] [--profile-off] [--idle] [--idle-gap N]`: diagnostic — loads the project, documents the
     /// runtime (build, CPU, device, ACTUAL buffer size after an optional request, loaded vs
     /// processed instruments / inserts / proxies), plays from `S` with the project's cycle state,
     /// discards a warm-up window, then measures `N` seconds: engine callback load (mean / max /
@@ -269,6 +269,10 @@ struct StabilityScenarioRequest
     int perfRequestedBufferSize = 0;   ///< `--buffer N`: ask the device for this block size (0 = keep)
     bool perfMixerOpen = false;        ///< `--mixer-open`: measure with the mixer window shown
     bool perfProfilerOff = false;      ///< `--profile-off`: engine load only (profiler overhead check)
+    /// `--idle`: also measure with the transport stopped — once before the first Play, and twice
+    /// after Stop (right away, and again after `perfIdleGapSeconds`). Same window contents.
+    bool perfIdleWindows = false;
+    int perfIdleGapSeconds = 30;
     /// ReadAheadTransitions only: `--reopen-check` = fresh-process reopen of the saved test copy
     /// compared against the sidecar the transitions walk wrote (instead of the walk itself).
     bool readAheadReopenCheck = false;

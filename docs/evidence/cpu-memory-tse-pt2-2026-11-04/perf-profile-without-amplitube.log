@@ -1,0 +1,21 @@
+2026-11-04T23:16:58.063+01:00   === window: stopped/never-played ===
+2026-11-04T23:16:58.064+01:00   engine: blocks=1876 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.232/2.759/5.208 budget%(mean/max)=25.9/48.8 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-04T23:16:58.065+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=3056 serialBlocks=1 jobsByCallback=3710 jobsByWorkers=39088 joinKernelWaits=741 lastDispatchWallMs=0.485 lastJoinWaitMs=0.360 (cumulative since start)
+2026-11-04T23:16:58.065+01:00   process: cpu=64.4% of one core (2.7% of 24 cores) systemBusy=10.3% workingSet=1991.37 MB private=2137.67 MB pageFaultsInWindow=44 (soft+hard; 2.19846/s)
+2026-11-04T23:16:58.072+01:00   profile: by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 2.264 ms 82.1%] [VB3-II x3 0.953 ms 34.6%] [HALion Sonic x9 0.245 ms 8.9%] [Groove Agent SE x2 0.157 ms 5.7%] [Pro-Q 3 [Post] x2 0.032 ms 1.2%] [DAL Mono Delay [Post] x2 0.022 ms 0.8%]
+2026-11-04T23:17:21.339+01:00   === window: configured ===
+2026-11-04T23:17:21.340+01:00   engine: blocks=1877 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=0.359/0.583/3.157 budget%(mean/max)=5.5/29.6 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-04T23:17:21.342+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=5238 serialBlocks=1 jobsByCallback=13856 jobsByWorkers=102666 joinKernelWaits=958 lastDispatchWallMs=0.392 lastJoinWaitMs=0.040 (cumulative since start)
+2026-11-04T23:17:21.342+01:00   process: cpu=67.8% of one core (2.8% of 24 cores) systemBusy=10.5% workingSet=1992.59 MB private=2138.94 MB pageFaultsInWindow=80 (soft+hard; 3.99677/s)
+2026-11-04T23:17:21.349+01:00   profile: by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 2.533 ms 434.1%] [VB3-II x3 1.004 ms 172.1%] [Groove Agent SE x2 0.309 ms 53.0%] [HALion Sonic x9 0.277 ms 47.5%] [Pro-Q 3 [Post] x2 0.037 ms 6.4%] [DAL Mono Delay [Post] x2 0.031 ms 5.2%]
+2026-11-04T23:17:41.845+01:00   === window: stopped/right-after-stop ===
+2026-11-04T23:17:41.846+01:00   engine: blocks=1880 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.217/2.736/4.468 budget%(mean/max)=25.6/41.9 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-04T23:17:41.847+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=7160 serialBlocks=1 jobsByCallback=16097 jobsByWorkers=127793 joinKernelWaits=1304 lastDispatchWallMs=0.317 lastJoinWaitMs=0.000 (cumulative since start)
+2026-11-04T23:17:41.848+01:00   process: cpu=65.0% of one core (2.7% of 24 cores) systemBusy=10.6% workingSet=1992.88 MB private=2139.38 MB pageFaultsInWindow=23 (soft+hard; 1.14702/s)
+2026-11-04T23:17:41.856+01:00   profile: by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 2.239 ms 81.8%] [VB3-II x3 0.945 ms 34.5%] [HALion Sonic x9 0.249 ms 9.1%] [Groove Agent SE x2 0.210 ms 7.7%] [Pro-Q 3 [Post] x2 0.031 ms 1.1%] [DAL Mono Delay [Post] x2 0.022 ms 0.8%]
+2026-11-04T23:18:02.330+01:00   === window: stopped/after-gap ===
+2026-11-04T23:18:02.331+01:00   engine: blocks=1878 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.173/2.758/4.874 budget%(mean/max)=25.9/45.7 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-04T23:18:02.332+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=9081 serialBlocks=1 jobsByCallback=18475 jobsByWorkers=152309 joinKernelWaits=1807 lastDispatchWallMs=0.438 lastJoinWaitMs=0.313 (cumulative since start)
+2026-11-04T23:18:02.333+01:00   process: cpu=65.5% of one core (2.7% of 24 cores) systemBusy=10.4% workingSet=1992.89 MB private=2139.38 MB pageFaultsInWindow=1 (soft+hard; 0.0499358/s)
+2026-11-04T23:18:02.340+01:00   profile: by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 2.258 ms 81.9%] [VB3-II x3 0.967 ms 35.1%] [HALion Sonic x9 0.249 ms 9.0%] [Groove Agent SE x2 0.156 ms 5.7%] [Pro-Q 3 [Post] x2 0.031 ms 1.1%] [DAL Mono Delay [Post] x2 0.022 ms 0.8%]
+2026-11-04T23:18:03.397+01:00 RESULT: PASS scenario=perf-profile totalMs=103187

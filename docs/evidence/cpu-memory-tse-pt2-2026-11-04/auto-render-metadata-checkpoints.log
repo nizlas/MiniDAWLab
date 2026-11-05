@@ -1,0 +1,4 @@
+2026-11-04T23:24:30.830+01:00 save: target="C:\Users\nicla\AppData\Local\Temp\dal-perf-tse261031\TSE_pt2_261031\TSE_pt2.proxymeta-validate.tmp" bytes=2250940
+2026-11-04T23:24:31.060+01:00 proxy-metadata checkpoint trackId=3 generation=sha256:695369ce7bdcb91ef28e05ede5c3eac2364f159257fad1ec30bda21ffad842c5 ok (metadata-only atomic update)
+2026-11-04T23:24:34.368+01:00 save: target="C:\Users\nicla\AppData\Local\Temp\dal-perf-tse261031\TSE_pt2_261031\TSE_pt2.proxymeta-validate.tmp" bytes=2250940
+2026-11-04T23:24:34.664+01:00 proxy-metadata checkpoint trackId=25 generation=sha256:97bb5e1e349b799e7dfab2f8e4816df4a9ce53d51417a8f0d530f4dc7f863701 ok (metadata-only atomic update)

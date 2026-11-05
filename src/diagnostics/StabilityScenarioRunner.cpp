@@ -376,6 +376,19 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
         {
             req.perfProfilerOff = true;
         }
+        else if (a == "--idle")
+        {
+            req.perfIdleWindows = true;
+        }
+        else if (a == "--idle-gap")
+        {
+            if (i + 1 >= args.size())
+            {
+                errorOut = a + " requires a number";
+                return {};
+            }
+            req.perfIdleGapSeconds = juce::jlimit(0, 600, args[++i].getIntValue());
+        }
         else if (a == "--stability-load-progress")
         {
             if (!setKind(StabilityScenarioKind::LoadProgress)) { return {}; }
@@ -9111,6 +9124,8 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
     const bool profilerOn = !request.perfProfilerOff;
     using PerfGeneration = StabilityScenarioRequest::PerfGeneration;
     const PerfGeneration generation = request.perfGeneration;
+    const bool idleWindows = request.perfIdleWindows;
+    const int idleGapSeconds = request.perfIdleGapSeconds;
 
     auto say = [this](const juce::String& s) { appendStabilityRunLine("  " + s); };
     auto baseline = std::make_shared<PerfProcessSample>();
@@ -9174,33 +9189,6 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                return true;
                            },
                            mixerOpen ? 1500 : 300 });
-
-    const bool firstWindowSerial = generation != PerfGeneration::AsConfigured; // Serial or A of AB
-    steps_.push_back(Step{ "perf-profile: start playback (warm-up " + juce::String(warmupSeconds) + " s)",
-                           [this, say, startSeconds, profilerOn, firstWindowSerial](juce::String&) -> bool {
-                               const double sr = hooks_.getDeviceSampleRate ? hooks_.getDeviceSampleRate() : 48000.0;
-                               const auto startSample = (std::int64_t)(startSeconds * (sr > 0.0 ? sr : 48000.0));
-                               if (hooks_.seekTransportTo)
-                               {
-                                   hooks_.seekTransportTo(startSample);
-                               }
-                               if (hooks_.perf.setGenerationSerial)
-                               {
-                                   hooks_.perf.setGenerationSerial(firstWindowSerial);
-                               }
-                               say("start at " + juce::String(startSeconds, 2) + " s (sample " + juce::String(startSample)
-                                   + ") cycle=" + (hooks_.isCycleEnabled && hooks_.isCycleEnabled() ? "on" : "off")
-                                   + " profiler=" + (profilerOn ? "ON" : "off")
-                                   + " generation=" + (firstWindowSerial ? "SERIAL (forced)" : "as configured")
-                                   + (hooks_.perf.renderPoolText ? " | " + hooks_.perf.renderPoolText() : juce::String()));
-                               if (hooks_.perf.setProfilerEnabled)
-                               {
-                                   hooks_.perf.setProfilerEnabled(profilerOn);
-                               }
-                               hooks_.setPlaybackActive(true);
-                               return true;
-                           },
-                           juce::jmax(200, warmupSeconds * 1000) });
 
     // One measurement window = begin (reset) + collect. Appended once, or twice for the A/B mode
     // (A = serial forced, B = the configured pool) with a short re-warm-up between them.
@@ -9313,6 +9301,51 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                            200 });
     };
 
+    // Stopped transport before any Play (phase B): the project as it sits after loading.
+    if (idleWindows)
+    {
+        steps_.push_back(Step{ "perf-profile: transport stopped, never played (profiler on)",
+                               [this, say, profilerOn](juce::String&) -> bool {
+                                   if (hooks_.perf.setProfilerEnabled)
+                                   {
+                                       hooks_.perf.setProfilerEnabled(profilerOn);
+                                   }
+                                   say(juce::String("playing=") + (hooks_.load.isTransportPlaying && hooks_.load.isTransportPlaying() ? "yes" : "no")
+                                       + (hooks_.perf.renderPoolText ? " | " + hooks_.perf.renderPoolText() : juce::String()));
+                                   return true;
+                               },
+                               2000 });
+        appendWindow("stopped/never-played", false, false);
+    }
+
+    const bool firstWindowSerial = generation != PerfGeneration::AsConfigured; // Serial or A of AB
+    steps_.push_back(Step{ "perf-profile: start playback (warm-up " + juce::String(warmupSeconds) + " s)",
+                           [this, say, startSeconds, profilerOn, firstWindowSerial](juce::String&) -> bool {
+                               const double sr = hooks_.getDeviceSampleRate ? hooks_.getDeviceSampleRate() : 48000.0;
+                               const auto startSample = (std::int64_t)(startSeconds * (sr > 0.0 ? sr : 48000.0));
+                               if (hooks_.seekTransportTo)
+                               {
+                                   hooks_.seekTransportTo(startSample);
+                               }
+                               if (hooks_.perf.setGenerationSerial)
+                               {
+                                   hooks_.perf.setGenerationSerial(firstWindowSerial);
+                               }
+                               say("start at " + juce::String(startSeconds, 2) + " s (sample " + juce::String(startSample)
+                                   + ") cycle=" + (hooks_.isCycleEnabled && hooks_.isCycleEnabled() ? "on" : "off")
+                                   + " profiler=" + (profilerOn ? "ON" : "off")
+                                   + " generation=" + (firstWindowSerial ? "SERIAL (forced)" : "as configured")
+                                   + (hooks_.perf.renderPoolText ? " | " + hooks_.perf.renderPoolText() : juce::String()));
+                               if (hooks_.perf.setProfilerEnabled)
+                               {
+                                   hooks_.perf.setProfilerEnabled(profilerOn);
+                               }
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           juce::jmax(200, warmupSeconds * 1000) });
+
+
     if (generation == PerfGeneration::AB)
     {
         appendWindow("A/serial", true, false);
@@ -9321,6 +9354,27 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
     else
     {
         appendWindow(generation == PerfGeneration::Serial ? "serial" : "configured", firstWindowSerial, false);
+    }
+
+    // After Stop (phase C): right away, then again after a gap, with the profiler still on.
+    if (idleWindows)
+    {
+        steps_.push_back(Step{ "perf-profile: stop playback (profiler stays on)",
+                               [this, say](juce::String&) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   if (hooks_.perf.setGenerationSerial)
+                                   {
+                                       hooks_.perf.setGenerationSerial(false);
+                                   }
+                                   say("stopped; playhead=" + juce::String(hooks_.getTransportPlayheadSamples ? hooks_.getTransportPlayheadSamples() : -1));
+                                   return true;
+                               },
+                               200 });
+        appendWindow("stopped/right-after-stop", false, false);
+        steps_.push_back(Step{ "perf-profile: wait " + juce::String(idleGapSeconds) + " s stopped",
+                               [](juce::String&) -> bool { return true; },
+                               juce::jmax(200, idleGapSeconds * 1000) });
+        appendWindow("stopped/after-gap", false, false);
     }
 
     steps_.push_back(Step{ "perf-profile: stop playback, profiler off",

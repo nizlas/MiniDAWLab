@@ -1,0 +1,13 @@
+2026-11-04T23:19:59.617+01:00   === window: stopped/never-played ===
+2026-11-04T23:19:59.617+01:00   engine: blocks=1876 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.428/3.046/5.604 budget%(mean/max)=28.6/52.5 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-04T23:19:59.619+01:00   process: cpu=68.2% of one core (2.8% of 24 cores) systemBusy=10.2% workingSet=4718.5 MB private=5008.32 MB pageFaultsInWindow=23 (soft+hard; 1.14958/s)
+2026-11-04T23:20:22.971+01:00   === window: configured ===
+2026-11-04T23:20:22.972+01:00   engine: blocks=1879 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=0.501/0.703/1.364 budget%(mean/max)=6.6/12.8 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-04T23:20:22.974+01:00   process: cpu=78.5% of one core (3.3% of 24 cores) systemBusy=11.2% workingSet=4720.09 MB private=5010.06 MB pageFaultsInWindow=59 (soft+hard; 2.9426/s)
+2026-11-04T23:20:43.437+01:00   === window: stopped/right-after-stop ===
+2026-11-04T23:20:43.438+01:00   engine: blocks=1876 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.523/3.323/4.886 budget%(mean/max)=31.1/45.8 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-04T23:20:43.440+01:00   process: cpu=71.1% of one core (3.0% of 24 cores) systemBusy=13.9% workingSet=4719.96 MB private=5009.97 MB pageFaultsInWindow=2 (soft+hard; 0.0999488/s)
+2026-11-04T23:27:43.705+01:00   === window: stopped/after-gap ===
+2026-11-04T23:27:43.706+01:00   engine: blocks=1876 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.441/3.072/5.469 budget%(mean/max)=28.8/51.3 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-04T23:27:43.707+01:00   process: cpu=67.0% of one core (2.8% of 24 cores) systemBusy=10.3% workingSet=4720.78 MB private=5009.83 MB pageFaultsInWindow=0 (soft+hard; 0/s)
+2026-11-04T23:27:44.775+01:00 RESULT: PASS scenario=perf-profile totalMs=511431

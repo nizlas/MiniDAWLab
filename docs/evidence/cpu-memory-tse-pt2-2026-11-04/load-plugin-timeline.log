@@ -1,0 +1,72 @@
+2026-11-04T23:10:35.012+01:00 load: instrument instantiate+state ms=1003 kind=GrooveAgentSE
+2026-11-04T23:10:35.203+01:00 load: instrument instantiate+state ms=191 kind=GrooveAgentSE
+2026-11-04T23:10:35.872+01:00 load: instrument instantiate+state ms=667 kind=HALionSonic
+2026-11-04T23:10:36.060+01:00 load: instrument instantiate+state ms=188 kind=HALionSonic
+2026-11-04T23:10:36.239+01:00 load: instrument instantiate+state ms=178 kind=HALionSonic
+2026-11-04T23:10:36.424+01:00 load: instrument instantiate+state ms=183 kind=HALionSonic
+2026-11-04T23:10:36.602+01:00 load: instrument instantiate+state ms=177 kind=HALionSonic
+2026-11-04T23:10:36.780+01:00 load: instrument instantiate+state ms=177 kind=HALionSonic
+2026-11-04T23:10:36.985+01:00 load: instrument instantiate+state ms=204 kind=HALionSonic
+2026-11-04T23:10:37.187+01:00 load: instrument instantiate+state ms=201 kind=HALionSonic
+2026-11-04T23:10:38.212+01:00 load: instrument instantiate+state ms=174 kind=HALionSonic
+2026-11-04T23:10:38.214+01:00 load: instrument restore complete
+2026-11-04T23:10:38.261+01:00 load: insert instance trackId=28 name="Pro-R" outcome=loaded describeMs=6 createMs=37 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.272+01:00 load: insert instance trackId=32 name="Pro-R" outcome=loaded describeMs=0 createMs=9 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.283+01:00 load: insert instance trackId=31 name="Pro-R" outcome=loaded describeMs=0 createMs=9 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.296+01:00 load: insert instance trackId=30 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.308+01:00 load: insert instance trackId=35 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.321+01:00 load: insert instance trackId=44 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.332+01:00 load: insert instance trackId=38 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.343+01:00 load: insert instance trackId=39 name="Pro-R" outcome=loaded describeMs=0 createMs=9 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.355+01:00 load: insert instance trackId=43 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.369+01:00 load: insert instance trackId=8 name="DAL Mono Delay" outcome=loaded describeMs=7 createMs=5 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:38.372+01:00 load: insert instance trackId=26 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:38.375+01:00 load: insert instance trackId=45 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:38.378+01:00 load: insert instance trackId=40 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:38.381+01:00 load: insert instance trackId=46 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:38.384+01:00 load: insert instance trackId=57 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:38.388+01:00 load: insert instance trackId=54 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:38.391+01:00 load: insert instance trackId=65 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:38.404+01:00 load: insert instance trackId=47 name="Pro-R" outcome=loaded describeMs=0 createMs=11 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.416+01:00 load: insert instance trackId=70 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.429+01:00 load: insert instance trackId=69 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.441+01:00 load: insert instance trackId=68 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.454+01:00 load: insert instance trackId=67 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.465+01:00 load: insert instance trackId=66 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.477+01:00 load: insert instance trackId=64 name="Pro-R" outcome=loaded describeMs=0 createMs=9 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.489+01:00 load: insert instance trackId=63 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.502+01:00 load: insert instance trackId=62 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.514+01:00 load: insert instance trackId=61 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.526+01:00 load: insert instance trackId=60 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.538+01:00 load: insert instance trackId=58 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.550+01:00 load: insert instance trackId=56 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.562+01:00 load: insert instance trackId=55 name="Pro-R" outcome=loaded describeMs=0 createMs=9 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:38.573+01:00 load: insert instance trackId=53 name="Pro-R" outcome=loaded describeMs=0 createMs=10 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:41.739+01:00 load: insert instance trackId=12 name="AmpliTube 4" outcome=loaded describeMs=1265 createMs=1351 prepareMs=547 setStateMs=0 prepareAfterMs=0 stateBytes=7259
+2026-11-04T23:10:41.755+01:00 load: insert instance trackId=12 name="Pro-R" outcome=loaded describeMs=0 createMs=9 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:42.463+01:00 load: insert instance trackId=13 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=651 prepareMs=54 setStateMs=0 prepareAfterMs=0 stateBytes=7259
+2026-11-04T23:10:42.477+01:00 load: insert instance trackId=13 name="Pro-R" outcome=loaded describeMs=0 createMs=7 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:43.151+01:00 load: insert instance trackId=14 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=620 prepareMs=52 setStateMs=0 prepareAfterMs=0 stateBytes=7259
+2026-11-04T23:10:43.166+01:00 load: insert instance trackId=14 name="Pro-R" outcome=loaded describeMs=0 createMs=7 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:43.836+01:00 load: insert instance trackId=15 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=614 prepareMs=53 setStateMs=0 prepareAfterMs=0 stateBytes=7259
+2026-11-04T23:10:43.851+01:00 load: insert instance trackId=15 name="Pro-R" outcome=loaded describeMs=0 createMs=8 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:44.520+01:00 load: insert instance trackId=18 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=612 prepareMs=56 setStateMs=0 prepareAfterMs=0 stateBytes=7259
+2026-11-04T23:10:44.536+01:00 load: insert instance trackId=18 name="Pro-R" outcome=loaded describeMs=0 createMs=8 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:44.553+01:00 load: insert instance trackId=17 name="DAL Tuner" outcome=loaded describeMs=9 createMs=5 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=486
+2026-11-04T23:10:45.237+01:00 load: insert instance trackId=17 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=629 prepareMs=54 setStateMs=0 prepareAfterMs=0 stateBytes=7259
+2026-11-04T23:10:45.252+01:00 load: insert instance trackId=17 name="Pro-R" outcome=loaded describeMs=0 createMs=7 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:45.928+01:00 load: insert instance trackId=19 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=618 prepareMs=56 setStateMs=0 prepareAfterMs=0 stateBytes=7259
+2026-11-04T23:10:45.937+01:00 load: insert instance trackId=19 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:46.611+01:00 load: insert instance trackId=20 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=617 prepareMs=53 setStateMs=0 prepareAfterMs=0 stateBytes=7095
+2026-11-04T23:10:46.619+01:00 load: insert instance trackId=20 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:47.296+01:00 load: insert instance trackId=21 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=622 prepareMs=54 setStateMs=0 prepareAfterMs=0 stateBytes=7095
+2026-11-04T23:10:47.304+01:00 load: insert instance trackId=21 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:47.994+01:00 load: insert instance trackId=22 name="AmpliTube 4" outcome=loaded describeMs=0 createMs=635 prepareMs=53 setStateMs=0 prepareAfterMs=0 stateBytes=7095
+2026-11-04T23:10:48.003+01:00 load: insert instance trackId=22 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:48.012+01:00 load: insert instance trackId=22 name="Pro-R" outcome=loaded describeMs=0 createMs=8 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=677
+2026-11-04T23:10:48.035+01:00 load: insert instance trackId=5 name="Pro-Q 3" outcome=loaded describeMs=4 createMs=17 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=2189
+2026-11-04T23:10:48.045+01:00 load: insert instance trackId=23 name="Pro-Q 3" outcome=loaded describeMs=0 createMs=8 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=2195
+2026-11-04T23:10:48.054+01:00 load: insert instance trackId=9 name="Pro-Q 3" outcome=loaded describeMs=0 createMs=7 prepareMs=0 setStateMs=0 prepareAfterMs=0 stateBytes=2195
+2026-11-04T23:10:48.057+01:00 load: insert instance trackId=24 name="DAL Mono Delay" outcome=loaded describeMs=0 createMs=1 prepareMs=1 setStateMs=0 prepareAfterMs=0 stateBytes=832
+2026-11-04T23:10:48.058+01:00 load: deferred plugin insert restore complete
+2026-11-04T23:10:48.060+01:00 load: complete elapsedMs=14389
