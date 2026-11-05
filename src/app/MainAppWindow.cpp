@@ -2403,7 +2403,7 @@ public:
                     inspectorPanel_.repaint();
                 }
             };
-            pc.showProgress = [this](const juce::String& text) {
+            const auto showPowerToast = [this](const juce::String& text) {
                 trackPowerToastLabel_.setText(text, juce::dontSendNotification);
                 if (text.isEmpty())
                 {
@@ -2416,10 +2416,24 @@ public:
                 trackPowerToastLabel_.setVisible(true);
                 trackPowerToastLabel_.toFront(false);
             };
+            pc.showProgress = showPowerToast;
             pc.reportLoadProblem = [](const juce::String& text) {
                 juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Track On", text);
             };
             trackPowerCoordinator_ = std::make_unique<TrackPowerCoordinator>(pluginHost_, std::move(pc));
+            // Power changes only while stopped, also when undo / redo would switch a row On or Off.
+            undoRedoCoordinator_->setPowerChangeGuard(
+                [this] { return trackLanesView.isStructuralTimelineEditBlocked(); },
+                [this, showPowerToast](const juce::String& text) {
+                    showPowerToast(text);
+                    juce::Component::SafePointer<juce::Component> self(this);
+                    juce::Timer::callAfterDelay(3000, [self, this, text] {
+                        if (self != nullptr && trackPowerToastLabel_.getText() == text)
+                        {
+                            trackPowerToastLabel_.setVisible(false);
+                        }
+                    });
+                });
             trackLanesView.setOnRequestTrackPowerOn([this](const TrackId tid) {
                 return trackPowerCoordinator_ != nullptr ? trackPowerCoordinator_->requestPowerOn(tid) : false;
             });

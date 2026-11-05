@@ -8334,6 +8334,122 @@ namespace
             }
             expect(sim.processCalls == sim.blocks, "rest: a stage that sounds on its own keeps running");
         }
+        // 7. Which plug-ins may rest at all: only declared audio-processing effects.
+        {
+            using insert_rest::categoryAllowsRest;
+            expect(categoryAllowsRest("Fx|EQ") && categoryAllowsRest("Fx|Reverb") && categoryAllowsRest("Fx|Distortion")
+                       && categoryAllowsRest("Fx|Dynamics") && categoryAllowsRest("Fx|Delay|Stereo"),
+                   "rest policy: processing effects (EQ, Reverb, Distortion, Dynamics, Delay) may rest");
+            expect(!categoryAllowsRest("Fx") && !categoryAllowsRest("Fx|Tools") && !categoryAllowsRest("")
+                       && !categoryAllowsRest("Fx|Generator") && !categoryAllowsRest("Fx|Instrument")
+                       && !categoryAllowsRest("Instrument|Synth") && !categoryAllowsRest("Instrument|Drum")
+                       && !categoryAllowsRest("Fx|Reverb|Generator") && !categoryAllowsRest("Instrument|Synth|Sampler"),
+                   "rest policy: instruments, generators, plain or tool effects and unknown categories never rest");
+        }
+        // 8. A generator that is silent for its first blocks and starts later without input,
+        //    MIDI or a parameter change. Two silent blocks prove nothing: such a plug-in is not
+        //    allowed to rest (neverRest from its category) and its late start is heard.
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.params.neverRest = true;
+            const int startsAt = 40;
+            sim.plugin = [&](float, const std::int64_t b) { return b >= startsAt ? 0.1f : 0.0f; };
+            float firstHeardAt = -1.0f;
+            for (int i = 0; i < 60; ++i)
+            {
+                if (sim.run(0.0f) > 0.0f && firstHeardAt < 0.0f)
+                {
+                    firstHeardAt = (float)i;
+                }
+            }
+            expect(sim.processCalls == sim.blocks && firstHeardAt == (float)startsAt,
+                   "rest: a late-starting generator keeps running and is heard from its first sounding block");
+        }
+        // 9. Parameter change and state / preset load without an editor wake a resting stage; it
+        //    processes the next block and a sound the change turns on is heard there.
+        for (const char* what : { "parameter change", "state / preset load" })
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            bool on = false;
+            sim.plugin = [&](const float in, std::int64_t) { return in + (on ? 0.1f : 0.0f); };
+            for (int i = 0; i < 6; ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            const bool restedFirst = sim.state.resting;
+            on = true;
+            sim.params.wake.fetch_add(1); // what the listener / state load does
+            const float out = sim.run(0.0f);
+            expect(restedFirst && out > 0.05f && !sim.state.resting,
+                   std::string("rest: a ") + what + " wakes the stage and the new sound is heard in the next block");
+        }
+        // 10. Transport start and a jump in play position wake a resting stage; a contiguous play
+        //     position does not.
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.plugin = [](const float in, std::int64_t) { return in; };
+            std::int64_t pos = 0;
+            const auto step = [&](const bool playing) {
+                sim.state.noteTransport(playing, pos, sim.block);
+                (void)sim.run(0.0f);
+                pos += playing ? sim.block : 0;
+            };
+            for (int i = 0; i < 6; ++i)
+            {
+                step(false);
+            }
+            const bool restedStopped = sim.state.resting;
+            const std::int64_t callsBeforePlay = sim.processCalls;
+            step(true);
+            const bool wokeOnStart = sim.processCalls == callsBeforePlay + 1;
+            for (int i = 0; i < 6; ++i)
+            {
+                step(true);
+            }
+            const bool restedPlaying = sim.state.resting;
+            const std::int64_t callsBeforeJump = sim.processCalls;
+            pos = 48000 * 10; // locate / cycle wrap
+            step(true);
+            expect(restedStopped && wokeOnStart && restedPlaying && sim.processCalls == callsBeforeJump + 1,
+                   "rest: transport start and a position jump wake the stage; contiguous playback lets it rest");
+            const std::int64_t callsBeforeStop = sim.processCalls;
+            for (int i = 0; i < 6; ++i)
+            {
+                step(true);
+            }
+            step(false);
+            expect(sim.processCalls > callsBeforeStop, "rest: transport stop wakes the stage too");
+        }
+        // 11. A long finite tail with several echoes and silent gaps between them: no echo is
+        //     lost, the stage never rests between echoes, and it rests only 2 x tail after the last.
+        {
+            RestSim sim;
+            sim.setTail(2.0, TailKind::Finite);
+            const int gap = sim.blocksFor(0.6);
+            std::int64_t inputBlock = -1;
+            sim.plugin = [&](const float in, const std::int64_t b) {
+                if (in != 0.0f)
+                {
+                    inputBlock = b;
+                    return in;
+                }
+                const std::int64_t since = b - inputBlock;
+                return (inputBlock >= 0 && since > 0 && since % gap == 0 && since <= 3 * gap) ? 0.2f : 0.0f;
+            };
+            (void)sim.run(0.5f);
+            int echoes = 0;
+            bool restedEarly = false;
+            for (int i = 1; i < sim.blocksFor(8.0); ++i)
+            {
+                echoes += sim.run(0.0f) > 0.0f ? 1 : 0;
+                restedEarly = restedEarly || (i <= 3 * gap && sim.state.resting);
+            }
+            expect(echoes == 3 && !restedEarly && sim.state.resting,
+                   "rest: every echo of a long tail with silent gaps is heard; rest comes only after the tail");
+        }
         expect(insert_rest::classifyTail(2.0, TailKind::Finite) == TailKind::Finite
                    && insert_rest::classifyTail(0.0, TailKind::Finite) == TailKind::Unknown
                    && insert_rest::classifyTail(std::numeric_limits<double>::infinity(), TailKind::Unknown)

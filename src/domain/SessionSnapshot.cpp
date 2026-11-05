@@ -1943,6 +1943,20 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendEnabled(
                       previous.getProjectMusicalTime());
 }
 
+bool SessionSnapshot::anyTrackOffDiffers(const SessionSnapshot& live, const SessionSnapshot& target) noexcept
+{
+    for (int i = 0; i < target.getNumTracks(); ++i)
+    {
+        const Track& t = target.getTrack(i);
+        const int j = live.findTrackIndexById(t.getId());
+        if (j >= 0 && live.getTrack(j).isTrackOff() != t.isTrackOff())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
     const SessionSnapshot& previous,
     const TrackId trackId,

@@ -89,19 +89,40 @@ public:
     /// a value copy, so processors cannot retain mutable host state.
     [[nodiscard]] juce::Optional<PositionInfo> getPosition() const override;
 
+    /// [Same processing thread] The transport of the segment last set (automatic rest).
+    [[nodiscard]] bool isPlayingForRest() const noexcept { return playing_; }
+    [[nodiscard]] std::int64_t timelineSampleForRest() const noexcept { return timelineSample_; }
+
 private:
     juce::AudioPlayHead::PositionInfo position_;
+    bool playing_ = false;
+    std::int64_t timelineSample_ = 0;
 };
 
 // Immutable view exchanged with the audio callback (release-store / acquire-load).
 /// Automatic rest of one row's insert chain: Pre and Post stages separately (InsertChainRest.h).
 /// Co-owned by every published entry of the row so a republished map keeps the measured state.
-struct InsertChainRestRuntime
+/// Also listens to every instance of the row: a parameter or processor change, on any thread,
+/// wakes both stages. Kept for the host's lifetime: `restRuntimes_` is never erased, the host's
+/// destructor clears `chains_` and the pending closes before its members go, and `offRetired_` is
+/// declared after it, so every instance is gone before its listener.
+struct InsertChainRestRuntime final : juce::AudioProcessorListener
 {
     insert_rest::Params params[2]; ///< [0] = Pre, [1] = Post
     insert_rest::State state[2];
     /// [Message thread] What the params were computed from; a change bumps the generation.
     std::uint64_t signature[2] { 0, 0 };
+
+    /// [Any thread] Work again and re-measure (parameter, state or preset change).
+    void wake() noexcept
+    {
+        for (auto& p : params)
+        {
+            p.wake.fetch_add(1, std::memory_order_release);
+        }
+    }
+    void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override { wake(); }
+    void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails&) override { wake(); }
 };
 
 struct PluginAudioThreadMap

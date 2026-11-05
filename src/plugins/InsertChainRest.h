@@ -15,9 +15,20 @@
 //     `2 x tail + latency + 1 block`. The second tail length is a check: a plug-in heard after
 //     its reported tail ran out is marked unreliable and its stage never rests again.
 //
-// A stage that contains a plug-in which calls itself an instrument never rests, nor does one whose
-// editor is open. (Inserts receive no MIDI from DAL, so accepting MIDI is not a reason.) Any non-silent input wakes the stage in the SAME block, before
-// processing, so the first sample is never lost. Resting does not reset plug-ins: a stage only
+// Neither rule is a proof that a plug-in cannot sound later: a transport-driven or free-running
+// generator can stay silent for any number of blocks and then start without input, MIDI or a
+// parameter change. So a stage may rest at all only when every active plug-in in it declares
+// itself an audio-processing effect (`categoryAllowsRest`: an "Fx" with a processing
+// sub-category such as EQ, Dynamics, Reverb, Delay or Distortion, and no Instrument, Synth,
+// Sampler, Drum, Generator, Tools or plain "Fx"). Such a plug-in turns input into output; with
+// silent input its output is expected to stay silent. That is the plug-in's own declaration,
+// not something DAL can verify. Instruments therefore never rest, and neither does a stage
+// whose editor is open. (Inserts receive no MIDI from DAL, so accepting MIDI is not a reason.)
+//
+// Wake: any non-silent input wakes the stage in the SAME block, before processing, so the first
+// sample is never lost. A parameter change (from any thread), a state or preset load, the
+// transport starting or stopping and a jump in play position (locate, cycle wrap) wake it too and
+// make it re-qualify from the start (`Params::wake`, `noteTransport`). Resting does not reset plug-ins: a stage only
 // rests after its output has already been silent for longer than its tail, so nothing old can
 // come back. Skipping a stage leaves its buffer as it came in, which is silence.
 //
@@ -28,6 +39,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <string_view>
 
 namespace insert_rest
 {
@@ -76,18 +88,25 @@ struct Params
     std::atomic<int> tailKind { (int)TailKind::Empty };
     /// A plug-in that is an instrument, or an open editor.
     std::atomic<bool> neverRest { false };
-    /// Bumped on every change that must wake the stage (publish, Active/Bypass, state load).
+    /// Bumped on every change of the chain itself (publish, instance, Active/Bypass, tail report).
     std::atomic<std::uint32_t> generation { 0 };
+    /// Bumped by a parameter change, a state or preset load: the stage works again and re-measures,
+    /// but a tail report already found unreliable stays unreliable.
+    std::atomic<std::uint32_t> wake { 0 };
 };
 
 struct State
 {
     std::uint32_t seenGeneration = ~0u;
+    std::uint32_t seenWake = ~0u;
     bool resting = false;
     bool everHadInput = false;
     bool unreliable = false;
     std::int64_t silentInSamples = 0;
     std::int64_t silentOutSamples = 0;
+    bool transportKnown = false;
+    bool lastPlaying = false;
+    std::int64_t expectedSample = 0;
     /// Diagnostics (relaxed; read on the message thread).
     std::atomic<std::uint64_t> restedBlocks { 0 };
     std::atomic<std::uint64_t> processedBlocks { 0 };
@@ -107,6 +126,11 @@ struct State
             silentInSamples = 0;
             silentOutSamples = 0;
         }
+        if (const std::uint32_t w = p.wake.load(std::memory_order_acquire); w != seenWake)
+        {
+            seenWake = w;
+            wakeAndRequalify();
+        }
         if (!inputSilent || suspended)
         {
             resting = false; // wake in this block, before processing
@@ -118,6 +142,20 @@ struct State
         }
         processedBlocks.fetch_add(1, std::memory_order_relaxed);
         return false;
+    }
+
+    /// [Processing lane] Before `shouldSkip`, once per processed segment: the transport this
+    /// segment plays. Start, stop and a jump in play position (locate, cycle wrap) wake the stage,
+    /// because a transport-driven plug-in may start sounding there.
+    void noteTransport(const bool playing, const std::int64_t timelineSample, const int n) noexcept
+    {
+        if (transportKnown && (playing != lastPlaying || (playing && timelineSample != expectedSample)))
+        {
+            wakeAndRequalify();
+        }
+        transportKnown = true;
+        lastPlaying = playing;
+        expectedSample = timelineSample + n;
     }
 
     /// [Processing lane] After processing a block of `n` samples.
@@ -167,11 +205,57 @@ struct State
 
 
 private:
+    void wakeAndRequalify() noexcept
+    {
+        resting = false;
+        silentInSamples = 0;
+        silentOutSamples = 0;
+    }
+
     [[nodiscard]] static std::int64_t juce_max64(const std::int64_t a, const std::int64_t b) noexcept
     {
         return a > b ? a : b;
     }
 };
+
+/// [Message thread] May a plug-in with this declared category (`PluginDescription::category`, the
+/// VST3 sub-categories joined by '|') rest at all? Only an "Fx" with at least one processing
+/// sub-category and none that can make sound on its own or is too broad to judge.
+[[nodiscard]] inline bool categoryAllowsRest(const std::string_view category) noexcept
+{
+    constexpr std::string_view processing[] = { "EQ",         "Dynamics",    "Reverb",   "Delay",
+                                                "Distortion", "Filter",      "Modulation", "Pitch Shift",
+                                                "Restoration", "Mastering",  "Spatial",  "Analyzer" };
+    constexpr std::string_view generating[] = { "Instrument", "Synth", "Sampler", "Drum",   "Piano",
+                                                "Generator",  "External", "Tools", "Network", "OnlyARA" };
+    bool fx = false;
+    bool processes = false;
+    std::size_t start = 0;
+    while (start <= category.size())
+    {
+        const std::size_t bar = category.find('|', start);
+        const std::string_view token = category.substr(start, bar == std::string_view::npos ? std::string_view::npos
+                                                                                            : bar - start);
+        for (const std::string_view g : generating)
+        {
+            if (token == g)
+            {
+                return false;
+            }
+        }
+        fx = fx || token == "Fx";
+        for (const std::string_view s : processing)
+        {
+            processes = processes || token == s;
+        }
+        if (bar == std::string_view::npos)
+        {
+            break;
+        }
+        start = bar + 1;
+    }
+    return fx && processes;
+}
 
 /// [Message thread] Classify a stage from its active plug-ins' reported tails (seconds).
 [[nodiscard]] inline TailKind classifyTail(const double tailSeconds, TailKind soFar) noexcept

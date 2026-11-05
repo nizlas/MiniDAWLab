@@ -639,6 +639,69 @@ void testNarrowSoloMemoryUndo()
 }
 
 // ---------------------------------------------------------------------------------------------
+// Power only while stopped: an undo / redo step that would switch a row On or Off is refused
+// while playing (history and model unchanged); a step that leaves Power alone still works.
+// ---------------------------------------------------------------------------------------------
+void testPowerUndoRefusedWhilePlaying()
+{
+    auto f = makeSessionFixture();
+    Session& s = f->session;
+    PluginInsertHost pluginHost;
+    UndoRedoCoordinator::Callbacks cb;
+    UndoRedoCoordinator undo(s, pluginHost, std::move(cb));
+    bool playing = false;
+    juce::String refused;
+    undo.setPowerChangeGuard([&] { return playing; }, [&](const juce::String& text) { refused = text; });
+    const auto off = [&](const TrackId t) { return trackOf(*s.loadSessionSnapshotForAudioThread(), t).isTrackOff(); };
+    const auto muted = [&](const TrackId t) { return trackOf(*s.loadSessionSnapshotForAudioThread(), t).isMuted(); };
+
+    // Step 1 with A1 On; then Power A1 Off (not an undo step, as in the app); step 2 while Off.
+    undo.executeUndoableSessionEdit("Mute A2", [&] {
+        s.setTrackMuted(f->a2, true);
+        return true;
+    });
+    s.setTrackOff(f->a1, true);
+    undo.executeUndoableSessionEdit("Mute A1", [&] {
+        s.setTrackMuted(f->a1, true);
+        return true;
+    });
+    expect(undo.undoStackSizeForDiagnostics() == 2 && off(f->a1), "power undo: fixture (2 steps, A1 Off)");
+
+    playing = true;
+    undo.invokeUndoFromWindowShortcut(); // step 2 keeps A1 Off: allowed while playing
+    expect(!muted(f->a1) && off(f->a1) && refused.isEmpty() && undo.undoStackSizeForDiagnostics() == 1
+               && undo.redoStackSizeForDiagnostics() == 1,
+           "power undo: a step that does not change Power undoes while playing");
+
+    undo.invokeUndoFromWindowShortcut(); // step 1 would switch A1 back On: refused
+    expect(off(f->a1) && muted(f->a2) && undo.undoStackSizeForDiagnostics() == 1
+               && undo.redoStackSizeForDiagnostics() == 1 && refused.isNotEmpty(),
+           "power undo: a step that would switch a row On is refused while playing; history and model unchanged");
+
+    refused.clear();
+    undo.invokeRedoFromWindowShortcut(); // step 2 again: no Power change
+    expect(muted(f->a1) && off(f->a1) && refused.isEmpty() && undo.undoStackSizeForDiagnostics() == 2,
+           "power undo: redo of a step without a Power change works while playing");
+
+    playing = false;
+    undo.invokeUndoFromWindowShortcut();
+    undo.invokeUndoFromWindowShortcut();
+    expect(!off(f->a1) && !muted(f->a2) && !muted(f->a1) && undo.undoStackSizeForDiagnostics() == 0,
+           "power undo: the same steps undo once the transport is stopped (A1 On again)");
+
+    undo.invokeRedoFromWindowShortcut(); // step 1: A1 stays On
+    playing = true;
+    refused.clear();
+    undo.invokeRedoFromWindowShortcut(); // step 2 would switch A1 Off: refused
+    expect(!off(f->a1) && !muted(f->a1) && undo.undoStackSizeForDiagnostics() == 1
+               && undo.redoStackSizeForDiagnostics() == 1 && refused.isNotEmpty(),
+           "power undo: a redo that would switch a row Off is refused while playing; history and model unchanged");
+    playing = false;
+    undo.invokeRedoFromWindowShortcut();
+    expect(off(f->a1) && muted(f->a1), "power undo: the refused redo applies after Stop");
+}
+
+// ---------------------------------------------------------------------------------------------
 // UI geometry: the S cell in the production header + the memory strip at minimum width.
 // ---------------------------------------------------------------------------------------------
 void testUiGeometry()
@@ -745,6 +808,7 @@ int main()
     testMemorySemantics();
     testPersistence();
     testNarrowSoloMemoryUndo();
+    testPowerUndoRefusedWhilePlaying();
     testUiGeometry();
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

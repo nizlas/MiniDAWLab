@@ -387,6 +387,8 @@ void InsertProcessPlayHead::setContext(const PluginProcessTransportContext& cont
     // VST3 requires projectTimeSamples when a ProcessContext exists. JUCE maps these engaged
     // values directly to kTempoValid, kTimeSigValid and kProjectTimeMusicValid.
     position_.setTimeInSamples(timelineSample);
+    playing_ = context.isPlaying;
+    timelineSample_ = timelineSample;
     position_.setTimeInSeconds(elapsedSeconds);
     position_.setBpm(validBpm);
     position_.setTimeSignature(
@@ -648,6 +650,7 @@ void PluginInsertHost::restoreSlotOpaqueState(const TrackId trackId,
             continue;
         }
         slot.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+        restRuntimeForTrack(trackId)->wake(); // a loaded state may make the plug-in sound
         rememberHostAppliedState(trackId, slot.slotId, desc.opaqueState);
         ensureInsertRuntime(slot);
         break;
@@ -920,6 +923,7 @@ juce::Result PluginInsertHost::applyPresetBytes(const InsertInstanceToken token,
         slot->hostActive = hostActive;
         slot->hostBypassed = hostBypassed;
         ensureInsertRuntime(*slot);
+        restRuntimeForTrack(token.trackId)->wake(); // the preset may make the plug-in sound
         slot->vst3ClassId = live.classId;
 
         juce::MemoryBlock afterBlob;
@@ -1165,6 +1169,7 @@ PluginInsertHost::InPlaceRestore PluginInsertHost::tryInPlaceParameterStateResto
             if (desc.opaqueState.getSize() > 0 && desc.opaqueState.getSize() <= (size_t)std::numeric_limits<int>::max())
             {
                 live.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+                restRuntimeForTrack(trackId)->wake();
                 stateWritten = true;
                 if (live.instance->getMainBusNumInputChannels() != 2
                     || live.instance->getMainBusNumOutputChannels() != 2)
@@ -2392,6 +2397,7 @@ void PluginInsertHost::updateRestParams(const TrackId trackId, InsertChainRestRu
                     continue;
                 }
                 juce::AudioPluginInstance& inst = *live.instance;
+                inst.addListener(&rest); // idempotent; a parameter change wakes the row
                 const double t = inst.getTailLengthSeconds();
                 kind = insert_rest::classifyTail(t, kind);
                 if (std::isfinite(t) && t > 0.0)
@@ -2400,9 +2406,12 @@ void PluginInsertHost::updateRestParams(const TrackId trackId, InsertChainRestRu
                 }
                 latency += juce::jmax(0, inst.getLatencySamples());
                 // DAL sends inserts no MIDI (the scratch is cleared per slot), so a plug-in that
-                // merely accepts MIDI cannot be triggered; one that calls itself an instrument may
-                // still make sound on its own and never rests.
-                neverRest = neverRest || inst.getPluginDescription().isInstrument
+                // merely accepts MIDI cannot be triggered. Only a declared audio-processing
+                // effect may rest; anything that can make sound on its own, or whose category
+                // does not say, keeps running (InsertChainRest.h).
+                const juce::PluginDescription desc = inst.getPluginDescription();
+                neverRest = neverRest || desc.isInstrument
+                            || !insert_rest::categoryAllowsRest(desc.category.toStdString())
                             || editorWindows_.count({ trackId, live.slotId }) != 0
                             || paramsWindows_.count({ trackId, live.slotId }) != 0;
                 mix((std::uint64_t)(std::uintptr_t)live.instance.get());
@@ -3004,6 +3013,11 @@ void PluginInsertHost::audioThread_processEntryChain(const PluginAudioThreadMap:
     const int restIndex = stage == InsertStage::Pre ? 0 : 1;
     InsertChainRestRuntime* const rest = entry.rest.get();
     const bool inputSilent = rest != nullptr && insert_rest::isSilent(scratchChannels, kInsertChannels, n);
+    if (rest != nullptr && entry.playHead != nullptr)
+    {
+        rest->state[restIndex].noteTransport(entry.playHead->isPlayingForRest(),
+                                             entry.playHead->timelineSampleForRest(), n);
+    }
     if (rest != nullptr
         && rest->state[restIndex].shouldSkip(inputSilent, rest->params[restIndex],
                                              restSuspended_.load(std::memory_order_acquire)))

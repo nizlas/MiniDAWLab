@@ -32,6 +32,7 @@
 #include "io/MonoWavFileWriter.h"
 #include "io/ProjectFile.h"
 #include "plugins/PluginInsertHost.h"
+#include "app/TrackPowerCoordinator.h"
 #include "plugins/PluginTrackSlot.h"
 #include "transport/Transport.h"
 
@@ -888,6 +889,101 @@ int run(const juce::File& delayBundle, const juce::File& otherBundle, const bool
     return true;
 }
 
+// Power only while stopped: TrackPowerCoordinator creates and destroys nothing while the
+// transport is busy, and a stepwise On load that is between two plug-ins pauses until Stop.
+int runTrackPowerWhileBusy(const juce::File& delayBundle, const juce::File& otherBundle)
+{
+    if (!delayBundle.exists() || !otherBundle.exists())
+    {
+        expect(false, "power busy: plug-in bundles present");
+        return 1;
+    }
+    Session session;
+    PluginInsertHost host;
+    host.prepareForDevice(kRate, kBlock, 2);
+    host.setTrackDormancyQuery([&session](const TrackId tid) {
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        const int ix = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+        return ix >= 0 && snap->getTrack(ix).isTrackOff();
+    });
+    host.setExclusiveInstanceAccess([](std::function<void()> fn) { fn(); });
+    const TrackId audio = session.getActiveTrackId();
+    expect(host.addInsertFromVst3File(audio, InsertStage::Pre, delayBundle).wasOk()
+               && host.addInsertFromVst3File(audio, InsertStage::Post, otherBundle).wasOk(),
+           "power busy: two inserts on the row");
+    {
+        // Explicit, non-synced states (as in runTrackOff): a tempo-synced default Mono Delay
+        // re-serializes its derived delay time and parameter order differently after a reload.
+        PluginTrackChain c = host.exportChain(audio);
+        c.slots[0].opaqueState = makeDelayStateBlob(delayBundle, DelaySettings{ 180.0f, 35.0f, 0.0f });
+        juce::String changed;
+        c.slots[1].opaqueState = makeOtherStateBlob(otherBundle, changed);
+        c.slots[1].hostBypassed = true;
+        host.importChain(audio, c);
+    }
+    const PluginTrackChain before = host.exportChain(audio);
+
+    bool busy = false;
+    TrackPowerCoordinator::Callbacks cb;
+    cb.loadSnapshot = [&session] { return session.loadSessionSnapshotForAudioThread(); };
+    cb.setTrackOff = [&session](const TrackId tid, const bool off) { session.setTrackOff(tid, off); };
+    cb.waitForAudioCallbackExit = [] { return true; };
+    cb.transportBusy = [&busy] { return busy; };
+    TrackPowerCoordinator power(host, cb);
+    const auto isOff = [&](const TrackId tid) {
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        return snap->getTrack(snap->findTrackIndexById(tid)).isTrackOff();
+    };
+    const auto pump = [](const int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };
+
+    // Off while playing (as an undo restore could do): nothing is unloaded or destroyed until Stop.
+    busy = true;
+    session.setTrackOff(audio, true);
+    power.reconcileNow();
+    pump(300);
+    expect(host.liveInsertInstanceCount() == 2 && !host.hasDormantInserts(audio),
+           "power busy: reconcile does not unload a row while the transport runs");
+    busy = false;
+    power.reconcileNow();
+    const bool unloaded = host.liveInsertInstanceCount() == 0 && host.countDormantInserts(audio) == 2;
+    const PluginTrackChain dormant = host.exportChain(audio); // the states captured at Off
+    expect(sameChain(dormant, before), "power busy: the dormant chain holds the states and flags from before Off");
+    busy = true;
+    pump(300);
+    expect(unloaded && host.offRetiredInsertCount() == 2,
+           "power busy: after Stop the row unloads; released instances are not destroyed while playing");
+    busy = false;
+    pump(300);
+    expect(host.offRetiredInsertCount() == 0, "power busy: released instances are destroyed after Stop");
+
+    // On: refused while busy; a load that is between two plug-ins when the transport starts
+    // waits, and the row stays Off until everything is loaded after Stop.
+    busy = true;
+    expect(!power.requestPowerOn(audio) && isOff(audio), "power busy: Power On is refused while playing");
+    busy = false;
+    expect(power.requestPowerOn(audio), "power busy: Power On accepted while stopped");
+    for (int i = 0; i < 2000 && host.liveInsertInstanceCount() < 1; ++i)
+    {
+        pump(1);
+    }
+    busy = true;
+    const int liveAtStart = host.liveInsertInstanceCount();
+    pump(300);
+    expect(liveAtStart == 1 && host.liveInsertInstanceCount() == 1 && host.countDormantInserts(audio) == 1
+               && isOff(audio) && power.isWaking(audio),
+           "power busy: a stepwise load pauses between plug-ins while playing; the row stays Off");
+    busy = false;
+    for (int i = 0; i < 2000 && power.isWaking(audio); ++i)
+    {
+        pump(1);
+    }
+    expect(!isOff(audio) && host.liveInsertInstanceCount() == 2 && !host.hasDormantInserts(audio),
+           "power busy: after Stop the load completes and the row comes On");
+    expect(sameChain(host.exportChain(audio), dormant),
+           "power busy: the woken chain has the slots, order, host flags and states captured at Off");
+    return 0;
+}
+
 int runTrackOff(const juce::File& delayBundle, const juce::File& otherBundle)
 {
     const juce::File work = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-track-off-tests");
@@ -1245,7 +1341,8 @@ int main(int argc, char** argv)
         else if (a == "--keep") { keep = true; }
     }
 
-    const int rc = run(delayBundle, otherBundle, keep) | runTrackOff(delayBundle, otherBundle);
+    const int rc = run(delayBundle, otherBundle, keep) | runTrackOff(delayBundle, otherBundle)
+                   | runTrackPowerWhileBusy(delayBundle, otherBundle);
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return (rc == 0 && failures == 0) ? 0 : 1;
 }
@@ -1265,3 +1362,16 @@ InstrumentTrackController::buildExperimentalInstrumentProjectBlock() const
 }
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(
     float* const*, int, int, float, float) noexcept {}
+// TrackPowerCoordinator references these; this harness gives it no instrument host or controller.
+void InstrumentTrackController::syncShellWithHostState() { jassertfalse; }
+void InstrumentTrackController::syncPowerMirrorFromSession() noexcept { jassertfalse; }
+bool InstrumentTrackController::captureRetainedPrimaryRowForUnload() { jassertfalse; return false; }
+bool InstrumentTrackController::retainedPrimaryRowNeedsLoad() const noexcept { jassertfalse; return false; }
+bool InstrumentTrackController::reloadPrimaryFromRetainedRow(ExperimentalInstrumentHost&, juce::String&)
+{
+    jassertfalse;
+    return false;
+}
+bool ExperimentalInstrumentHost::unloadInstrumentAfterAcknowledgedDrain() { jassertfalse; return false; }
+bool ExperimentalInstrumentHost::hasInstrument() const noexcept { jassertfalse; return false; }
+juce::String ExperimentalInstrumentHost::getInstrumentNameForUi() const { jassertfalse; return {}; }

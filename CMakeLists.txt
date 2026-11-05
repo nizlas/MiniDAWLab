@@ -446,6 +446,7 @@ juce_generate_juce_header(EventEnvelopeFocusedTests)
 juce_add_console_app(InsertPersistenceFocusedTests PRODUCT_NAME "InsertPersistenceFocusedTests")
 target_sources(InsertPersistenceFocusedTests PRIVATE
     tests/selftest/InsertPersistenceFocusedTestsMain.cpp
+    src/app/TrackPowerCoordinator.cpp
     src/diagnostics/StabilityDiagnosticLog.cpp
     src/diagnostics/ProjectLoadDiagnosticLog.cpp
     src/diagnostics/UndoDiagnosticFileLog.cpp

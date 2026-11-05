@@ -174,6 +174,223 @@ void settle(PluginInsertHost& host, const TrackId tid, MixProbe* probe, const fl
     juce::ignoreUnused(probe);
 }
 
+// Automatic rest (InsertChainRest.h) end to end through the real insert host: a pass-through
+// effect whose declared category, parameter, state and transport behaviour can make it sound
+// without input.
+class RestProbe final : public juce::AudioPluginInstance
+{
+public:
+    struct Tone final : juce::AudioPluginInstance::HostedParameter
+    {
+        float value = 0.0f;
+        float getValue() const override { return value; }
+        void setValue(const float v) override { value = v; }
+        float getDefaultValue() const override { return 0.0f; }
+        juce::String getName(int) const override { return "Tone"; }
+        juce::String getLabel() const override { return {}; }
+        float getValueForText(const juce::String& t) const override { return t.getFloatValue(); }
+        juce::String getParameterID() const override { return "tone"; }
+    };
+
+    explicit RestProbe(juce::String category)
+        : juce::AudioPluginInstance(BusesProperties()
+                                        .withInput("In", juce::AudioChannelSet::stereo(), true)
+                                        .withOutput("Out", juce::AudioChannelSet::stereo(), true))
+        , category_(std::move(category))
+    {
+        auto p = std::make_unique<Tone>();
+        tone = p.get();
+        addHostedParameter(std::move(p));
+    }
+
+    void fillInPluginDescription(juce::PluginDescription& d) const override
+    {
+        d.name = "RestProbe";
+        d.pluginFormatName = "Test";
+        d.fileOrIdentifier = "rest-probe";
+        d.category = category_;
+    }
+    const juce::String getName() const override { return "RestProbe"; }
+    void prepareToPlay(double, int) override {}
+    void releaseResources() override {}
+    void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
+    {
+        bool playing = false;
+        if (auto* ph = getPlayHead())
+        {
+            if (const auto pos = ph->getPosition())
+            {
+                playing = pos->getIsPlaying();
+            }
+        }
+        // Sound without input: a late generator, the Tone parameter, a state flag, or "plays
+        // while the transport runs".
+        const bool sounds = (startsAtCall >= 0 && calls >= startsAtCall) || tone->value > 0.5f || stateTone
+                            || (soundsWhilePlaying && playing);
+        ++calls;
+        for (int c = 0; c < juce::jmin(2, buffer.getNumChannels()); ++c)
+        {
+            float* d = buffer.getWritePointer(c);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                d[i] += sounds ? 0.1f : 0.0f;
+            }
+        }
+    }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.0; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
+    void getStateInformation(juce::MemoryBlock& dest) override
+    {
+        const char v = stateTone ? '1' : '0';
+        dest.append(&v, 1);
+    }
+    void setStateInformation(const void* data, const int size) override
+    {
+        stateTone = size > 0 && static_cast<const char*>(data)[0] == '1';
+    }
+
+    Tone* tone = nullptr;
+    int calls = 0;
+    int startsAtCall = -1;
+    bool stateTone = false;
+    bool soundsWhilePlaying = false;
+
+private:
+    juce::String category_;
+};
+
+void testSafeRestAndWake()
+{
+    const auto newHost = [](PluginInsertHost& host, const juce::String& category) {
+        host.prepareForDevice(kRate, kBlock, 2);
+        auto owned = std::make_unique<RestProbe>(category);
+        RestProbe* const probe = owned.get();
+        expect(host.installInsertInstanceForTests(1, InsertStage::Post, std::move(owned)), "rest probe installs");
+        return probe;
+    };
+    std::vector<float> l(static_cast<size_t>(kBlock), 0.0f);
+    std::vector<float> r = l;
+    float* chans[2] = { l.data(), r.data() };
+    PluginProcessTransportContext ctx;
+    ctx.sampleRate = kRate;
+    const auto block = [&](PluginInsertHost& host, const float in) {
+        host.audioThread_setProcessTransportContext(ctx);
+        fill(l, r, in);
+        render(host, 1, InsertStage::Post, chans, kBlock);
+        if (ctx.isPlaying)
+        {
+            ctx.timelineSample += kBlock;
+        }
+        return lastOf(l);
+    };
+
+    // A generator that is silent for its first blocks and starts by itself later: it may not
+    // rest, and its late start is heard. Also for a plain "Fx" and an effect that adds Generator.
+    for (const char* category : { "Fx|Generator", "Instrument|Synth", "Fx", "Fx|Reverb|Generator" })
+    {
+        PluginInsertHost host;
+        RestProbe* const probe = newHost(host, category);
+        probe->startsAtCall = 20;
+        int firstHeard = -1;
+        for (int i = 0; i < 30; ++i)
+        {
+            if (block(host, 0.0f) > 0.05f && firstHeard < 0)
+            {
+                firstHeard = i;
+            }
+        }
+        const juce::String label = juce::String("late generator (") + category
+                                   + ") keeps running and is heard from block 20";
+        expect(probe->calls == 30 && firstHeard == 20, label.toRawUTF8());
+    }
+
+    // A declared processing effect rests after 2 silent blocks; the first block of input after
+    // the rest is processed in that block.
+    {
+        PluginInsertHost host;
+        RestProbe* const probe = newHost(host, "Fx|EQ");
+        for (int i = 0; i < 8; ++i)
+        {
+            (void)block(host, 0.0f);
+        }
+        expect(probe->calls == 2, "a processing effect that never had input rests after 2 silent blocks");
+        const float out = block(host, 0.3f);
+        expect(probe->calls == 3 && std::abs(out - 0.3f) < 1.0e-6f,
+               "the first block of input after the rest is processed in that block");
+    }
+
+    // A parameter change without an editor wakes the resting effect; the sound it turns on is
+    // heard in the next block.
+    {
+        PluginInsertHost host;
+        RestProbe* const probe = newHost(host, "Fx|EQ");
+        for (int i = 0; i < 8; ++i)
+        {
+            (void)block(host, 0.0f);
+        }
+        const int restedAt = probe->calls;
+        probe->tone->setValueNotifyingHost(1.0f);
+        const float out = block(host, 0.0f);
+        expect(restedAt == 2 && probe->calls == 3 && out > 0.05f,
+               "a parameter change without an editor wakes the stage; the new sound is heard in the next block");
+    }
+
+    // A state load that turns sound on wakes the resting effect (in-place state restore: the
+    // undo and preset path).
+    {
+        PluginInsertHost host;
+        RestProbe* const probe = newHost(host, "Fx|EQ");
+        for (int i = 0; i < 8; ++i)
+        {
+            (void)block(host, 0.0f);
+        }
+        PluginTrackChain chain = host.exportChain(1);
+        bool patched = false;
+        for (auto& slot : chain.slots)
+        {
+            if (slot.occupied)
+            {
+                const char on = '1';
+                slot.opaqueState = juce::MemoryBlock(&on, 1);
+                patched = true;
+            }
+        }
+        host.importChain(1, chain);
+        const bool sameInstance = host.getInsertRowsForTrack(1).size() == 1 && probe->stateTone;
+        const int before = probe->calls;
+        const float out = block(host, 0.0f);
+        expect(patched && sameInstance && probe->calls == before + 1 && out > 0.05f,
+               "a state load that turns sound on wakes the stage; the sound is heard in the next block");
+    }
+
+    // Transport: an effect that sounds while the transport runs is woken by Play.
+    {
+        PluginInsertHost host;
+        RestProbe* const probe = newHost(host, "Fx|EQ");
+        probe->soundsWhilePlaying = true;
+        ctx = {};
+        ctx.sampleRate = kRate;
+        for (int i = 0; i < 8; ++i)
+        {
+            (void)block(host, 0.0f);
+        }
+        const int restedAt = probe->calls;
+        ctx.isPlaying = true;
+        const float out = block(host, 0.0f);
+        expect(restedAt == 2 && out > 0.05f, "transport start wakes a resting stage in the first playing block");
+        ctx = {};
+        ctx.sampleRate = kRate;
+    }
+}
+
 void testAudibleMix()
 {
     PluginInsertHost host;
@@ -561,6 +778,7 @@ int main()
 {
     juce::ScopedJuceInitialiser_GUI juce;
     testAudibleMix();
+    testSafeRestAndWake();
     testTwoSlotsAndPaths();
     testLatencyAlign();
     testUndoDuplicateAndProject();

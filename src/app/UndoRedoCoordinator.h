@@ -113,6 +113,15 @@ public:
     void invokeUndoFromWindowShortcut();
     void invokeRedoFromWindowShortcut();
 
+    /// Power changes only while the transport is stopped: an undo / redo step whose restore would
+    /// switch any row On or Off is refused while `isTransportPlaying` returns true. The history
+    /// pointer and the model stay as they were and `reportRefused` gets a short explanation.
+    void setPowerChangeGuard(std::function<bool()> isTransportPlaying,
+                             std::function<void(const juce::String&)> reportRefused);
+
+    /// [Message thread] True when the next undo (or redo) step would be refused right now.
+    [[nodiscard]] bool wouldRefuseForPower(bool redo) const;
+
     void executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator);
 
     /// Record one history step for an edit that has already been published (a completed
@@ -197,8 +206,14 @@ public:
     void clearHistory() noexcept;
     /// [Diagnostics / stability] Current undo stack depth.
     [[nodiscard]] int undoStackSizeForDiagnostics() const noexcept { return sessionHistory_.undoStackSize(); }
+    [[nodiscard]] int redoStackSizeForDiagnostics() const noexcept { return sessionHistory_.redoStackSize(); }
 
 private:
+    std::function<bool()> isTransportPlayingForPower_;
+    std::function<void(const juce::String&)> reportPowerRefused_;
+    /// Refuses (and reports) a step that would change Power while playing.
+    [[nodiscard]] bool refuseIfStepChangesPowerWhilePlaying(bool redo);
+
     void refreshAfterSessionSnapshotRestore();
     void restoreArrangementSelectionFromBundle(const SessionHistoryRestoreBundle& bundle);
     void commitRecord(juce::String label,

@@ -4189,6 +4189,12 @@ void ExperimentalInstrumentHost::refreshRestParameters()
         kind = insert_rest::classifyTail(t, insert_rest::TailKind::Empty);
         tailSamples = kind == insert_rest::TailKind::Finite ? (std::int64_t)std::ceil(t * juce::jmax(1.0, sampleRate_)) : 0;
         latency = juce::jmax(0, owner->inst->getLatencySamples());
+        // An instrument can make sound without MIDI (a transport-driven pattern, a latched
+        // arpeggio, a drone that starts late), so silence so far proves nothing about the next
+        // block: only a plug-in declaring itself an audio-processing effect may rest
+        // (InsertChainRest.h). Every instrument keeps running.
+        const juce::PluginDescription desc = owner->inst->getPluginDescription();
+        neverRest = neverRest || desc.isInstrument || !insert_rest::categoryAllowsRest(desc.category.toStdString());
     }
     signature = (signature * 1099511628211ull) ^ (std::uint64_t)tailSamples;
     signature = (signature * 1099511628211ull) ^ (std::uint64_t)latency;

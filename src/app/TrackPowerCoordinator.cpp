@@ -25,7 +25,7 @@ TrackPowerCoordinator::~TrackPowerCoordinator()
 
 bool TrackPowerCoordinator::requestPowerOn(const TrackId tid)
 {
-    if (cb_.transportBusy && cb_.transportBusy())
+    if (transportBusy())
     {
         return false;
     }
@@ -162,8 +162,19 @@ bool TrackPowerCoordinator::unloadRow(const Track& tr)
     return complete;
 }
 
+bool TrackPowerCoordinator::transportBusy() const
+{
+    return cb_.transportBusy && cb_.transportBusy();
+}
+
 void TrackPowerCoordinator::reconcileNow()
 {
+    if (transportBusy())
+    {
+        // Power changes only while stopped: no plug-in is created or destroyed while playing,
+        // recording or counting in. The snapshot is reconciled again after Stop.
+        return;
+    }
     const auto snap = cb_.loadSnapshot ? cb_.loadSnapshot() : nullptr;
     if (snap == nullptr || (snap == lastReconciled_ && !retryPending_))
     {
@@ -244,9 +255,9 @@ void TrackPowerCoordinator::finishJob(const TrackId tid, WakeJob& job)
 
 void TrackPowerCoordinator::stepOneWakeJob()
 {
-    if (jobs_.empty())
+    if (jobs_.empty() || transportBusy())
     {
-        return;
+        return; // a stepwise load pauses between plug-ins while the transport runs
     }
     const auto snap = cb_.loadSnapshot ? cb_.loadSnapshot() : nullptr;
     const TrackId tid = jobs_.begin()->first;
@@ -304,16 +315,13 @@ void TrackPowerCoordinator::stepOneWakeJob()
         }
         return;
     }
-    if (cb_.transportBusy && cb_.transportBusy())
-    {
-        return; // everything is loaded; Power flips when the transport stops
-    }
     finishJob(tid, job);
 }
 
 void TrackPowerCoordinator::scheduleTimer()
 {
-    const int wanted = !jobs_.empty() ? kWakeStepIntervalMs
+    const int wanted = transportBusy() ? kReconcileIntervalMs
+                       : !jobs_.empty() ? kWakeStepIntervalMs
                                       : (retryPending_ || inserts_.offRetiredInsertCount() > 0 ? kUnloadStepIntervalMs
                                                                                                 : kReconcileIntervalMs);
     if (getTimerInterval() != wanted)
@@ -324,8 +332,9 @@ void TrackPowerCoordinator::scheduleTimer()
 
 void TrackPowerCoordinator::timerCallback()
 {
-    // Released Off instances are destroyed one per tick, never in the turn that released them.
-    if (inserts_.destroyNextOffRetiredInsert(0.0))
+    // Released Off instances are destroyed one per tick, never in the turn that released them,
+    // and never while the transport runs.
+    if (!transportBusy() && inserts_.destroyNextOffRetiredInsert(0.0))
     {
         scheduleTimer();
         return;

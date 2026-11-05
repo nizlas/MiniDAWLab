@@ -230,6 +230,10 @@ public:
         TrackId trackId,
         float stereoPan) noexcept;
 
+    /// True when a row present in both snapshots is Off in one and On in the other. Restoring
+    /// `target` over `live` would then create or destroy that row's plug-ins (Power).
+    [[nodiscard]] static bool anyTrackOffDiffers(const SessionSnapshot& live, const SessionSnapshot& target) noexcept;
+
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackOff(
         const SessionSnapshot& previous,
         TrackId trackId,

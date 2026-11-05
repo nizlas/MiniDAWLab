@@ -21,6 +21,9 @@
 //     plug-in).
 //   * A snapshot restore (undo / redo) that turns a row with unloaded plug-ins On is put back
 //     Off and woken the same way.
+//   * Nothing is created or destroyed while the transport is busy (playing, recording, counting
+//     in, project load): reconciling, every wake step and the deferred destruction wait for Stop.
+//     A wake job that is between two plug-ins when the transport starts resumes after Stop.
 //
 // Each wake job carries a token. Deleting the row, a project change or another request for the
 // same row abandons a stale job; a stale step never touches another row.
@@ -92,6 +95,7 @@ private:
     };
 
     void timerCallback() override;
+    [[nodiscard]] bool transportBusy() const;
     void stepOneWakeJob();
     bool unloadRow(const Track& tr);
     [[nodiscard]] bool rowHasLivePlugins(TrackId tid) const;
