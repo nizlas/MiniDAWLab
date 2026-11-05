@@ -184,6 +184,9 @@ public:
     /// hosts / scratch buffers. Returns true when this call made the gate active (depth 0 -> 1); the
     /// caller must then drain the in-flight callback via `isAudioCallbackInProcessingSection()`.
     bool beginOfflineRenderGate() noexcept;
+    /// [Message thread] Automatic plug-in rest off or back on (tests that count every block). An
+    /// offline render gate suspends it as well, independently of this setting.
+    void setPluginRestSuspended(bool suspended) noexcept;
     /// [Message thread] Decrements the gate depth. Returns true when realtime processing resumed
     /// (depth 1 -> 0).
     bool endOfflineRenderGate() noexcept;
@@ -685,6 +688,8 @@ private:
     RecorderService* const recorder_;
     CountInClickOutput* const countIn_;
     PluginInsertHost* const pluginHost_;
+    std::atomic<bool> pluginRestSuspendedByCaller_ { false };
+    void applyPluginRestSuspension() noexcept;
     /// Fixed worker pool + preallocated job descriptors for the generation stage (see the public
     /// section). The job array is written by the callback thread before each dispatch and never
     /// touched by workers outside a dispatch → join window.

@@ -55,6 +55,7 @@
 #include "instruments/ProxyRenderScheduler.h"
 #include "instruments/ProxyRenderTypes.h"
 #include "instruments/ProxyUpdatePolicyService.h"
+#include "plugins/InsertChainRest.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -8175,6 +8176,172 @@ namespace
         }
     }
 
+
+    //==========================================================================
+    // Automatic insert rest (InsertChainRest.h): a simulated stage driven block by block.
+    // `plugin` maps (input block) -> output block; the stage skips it while resting.
+    //==========================================================================
+    struct RestSim
+    {
+        insert_rest::Params params;
+        insert_rest::State state;
+        int block = 512;
+        double rate = 48000.0;
+        std::int64_t processCalls = 0;
+        std::int64_t blocks = 0;
+        /// Returns the output peak of one block whose input is `in` (constant level).
+        std::function<float(float in, std::int64_t blockIndex)> plugin;
+
+        float run(const float in)
+        {
+            std::vector<float> l((size_t)block, in), r((size_t)block, in);
+            float* ch[2] = { l.data(), r.data() };
+            const bool inSilent = insert_rest::isSilent(ch, 2, block);
+            float out = in;
+            if (!state.shouldSkip(inSilent, params))
+            {
+                ++processCalls;
+                out = plugin(in, blocks);
+                std::fill(l.begin(), l.end(), out);
+                std::fill(r.begin(), r.end(), out);
+                state.afterProcess(inSilent, insert_rest::isSilent(ch, 2, block), block, params);
+            }
+            ++blocks;
+            return out;
+        }
+        void setTail(const double seconds, const insert_rest::TailKind kind, const int latency = 0)
+        {
+            params.tailSamples = (std::int64_t)std::ceil(seconds * rate);
+            params.tailKind = (int)kind;
+            params.latencySamples = latency;
+            params.generation.fetch_add(1);
+        }
+        [[nodiscard]] int blocksFor(const double seconds) const { return (int)std::ceil(seconds * rate / block); }
+    };
+
+    void testInsertChainRest()
+    {
+        using insert_rest::TailKind;
+        // 1. Never played: rests after latency + 2 blocks of silence, wakes in the first block
+        //    of input and processes that block (the attack is not lost).
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.plugin = [](const float in, std::int64_t) { return in * 0.5f; };
+            for (int i = 0; i < 10; ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            expect(sim.processCalls == 2 && sim.state.resting,
+                   "rest: a stage that never had input rests after 2 silent blocks");
+            const std::int64_t before = sim.processCalls;
+            const float out = sim.run(0.3f);
+            expect(sim.processCalls == before + 1 && std::abs(out - 0.15f) < 1.0e-6f,
+                   "rest: the first block of input wakes the stage and is processed");
+        }
+        // 2. A delay with a silent gap and a reported finite tail: never rests inside the tail,
+        //    rests only after 2 x tail of silence, and every echo is heard.
+        {
+            RestSim sim;
+            sim.setTail(1.0, TailKind::Finite);
+            const int echoAt = sim.blocksFor(0.5);
+            std::int64_t lastInputBlock = -1;
+            sim.plugin = [&](const float in, const std::int64_t b) {
+                if (in != 0.0f)
+                {
+                    lastInputBlock = b;
+                    return in;
+                }
+                // One echo 0.5 s after the last input block, silence in between.
+                return (lastInputBlock >= 0 && b == lastInputBlock + echoAt) ? 0.25f : 0.0f;
+            };
+            (void)sim.run(0.5f);
+            bool echoHeard = false;
+            bool restedBeforeEcho = false;
+            for (int i = 1; i < sim.blocksFor(3.0); ++i)
+            {
+                const float out = sim.run(0.0f);
+                echoHeard = echoHeard || out > 0.0f;
+                restedBeforeEcho = restedBeforeEcho || (i < echoAt && sim.state.resting);
+            }
+            expect(echoHeard && !restedBeforeEcho, "rest: the echo after a silent gap is heard");
+            expect(sim.state.resting, "rest: a finite reported tail rests after twice its length");
+        }
+        // 3. Unknown (0) and infinite tails never rest once the stage has had input.
+        for (const TailKind kind : { TailKind::Unknown, TailKind::Infinite })
+        {
+            RestSim sim;
+            sim.setTail(0.0, kind);
+            sim.plugin = [](const float in, std::int64_t) { return in; };
+            (void)sim.run(0.5f);
+            for (int i = 0; i < sim.blocksFor(120.0); ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            expect(!sim.state.resting && sim.processCalls == sim.blocks,
+                   std::string("rest: a stage with an ") + (kind == TailKind::Unknown ? "unknown" : "infinite")
+                       + " tail keeps processing after input");
+        }
+        // 4. A plug-in heard after its reported tail is marked unreliable and never rests again.
+        {
+            RestSim sim;
+            sim.setTail(0.1, TailKind::Finite);
+            const int lateEcho = sim.blocksFor(0.15);
+            sim.plugin = [&](const float in, const std::int64_t b) {
+                return in != 0.0f ? in : (b == lateEcho ? 0.2f : 0.0f);
+            };
+            (void)sim.run(0.5f);
+            bool heard = false;
+            for (int i = 1; i < sim.blocksFor(5.0); ++i)
+            {
+                heard = sim.run(0.0f) > 0.0f || heard;
+            }
+            expect(heard && sim.state.unreliable && !sim.state.resting,
+                   "rest: sounding after the reported tail marks the stage unreliable; it keeps running");
+        }
+        // 5. A chain change wakes the stage; a never-rest stage (MIDI / editor) never rests.
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.plugin = [](const float in, std::int64_t) { return in; };
+            for (int i = 0; i < 5; ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            const std::int64_t before = sim.processCalls;
+            sim.params.generation.fetch_add(1);
+            (void)sim.run(0.0f);
+            expect(sim.state.resting == false || sim.processCalls == before + 1,
+                   "rest: a chain change processes the next block again");
+            RestSim never;
+            never.setTail(0.0, TailKind::Unknown);
+            never.params.neverRest = true;
+            never.plugin = [](const float in, std::int64_t) { return in; };
+            for (int i = 0; i < 20; ++i)
+            {
+                (void)never.run(0.0f);
+            }
+            expect(never.processCalls == never.blocks, "rest: a stage with an instrument plug-in or open editor never rests");
+        }
+        // 6. A plug-in that makes sound without input never rests (its output is not silent).
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.plugin = [](float, std::int64_t) { return 0.01f; };
+            for (int i = 0; i < 50; ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            expect(sim.processCalls == sim.blocks, "rest: a stage that sounds on its own keeps running");
+        }
+        expect(insert_rest::classifyTail(2.0, TailKind::Finite) == TailKind::Finite
+                   && insert_rest::classifyTail(0.0, TailKind::Finite) == TailKind::Unknown
+                   && insert_rest::classifyTail(std::numeric_limits<double>::infinity(), TailKind::Unknown)
+                          == TailKind::Infinite
+                   && insert_rest::classifyTail(90.0, TailKind::Empty) == TailKind::Unknown,
+               "rest: tail classification (finite, 0 = unknown, +inf, implausible)");
+    }
+
     void testProxyPolicyOffModeAndFailureRearm()
     {
         using RS = proxy_policy::ProxyPolicyRuntimeState;
@@ -9900,6 +10067,7 @@ int main()
     testProxyPolicyOnSaveMode();
     testProxyPolicyManualMode();
     testProxyPolicyOptInAndPoweredOffTrack();
+    testInsertChainRest();
     testProxyPolicyOffModeAndFailureRearm();
     testProxyPolicySnapshotEligibilityDefersCapture();
     testProxyPolicyProjectCloseAndReplacementDropRuntimeState();

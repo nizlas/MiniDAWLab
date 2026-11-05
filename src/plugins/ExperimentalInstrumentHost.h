@@ -40,6 +40,7 @@
 #include "instruments/PrimarySemanticRevision.h"
 #include "instruments/ProxyPlaybackMix.h"
 #include "instruments/ProxyPlaybackSource.h"
+#include "plugins/InsertChainRest.h"
 #include "plugins/Vst3ChildProcessScan.h"
 #include "util/AsyncLifetimeToken.h"
 
@@ -258,6 +259,26 @@ public:
     /// [Audio thread] Drops MIDI queued for this block without processing (the row is Off).
     /// Allocation-free: the buffers keep their capacity.
     void audioThread_discardPendingMidi() noexcept;
+    /// [Message thread] UI / audition MIDI still queued for this host (diagnostics, tests).
+    [[nodiscard]] int pendingUiMidiEventCountForDiagnostics() const;
+
+    /// [Message thread] Automatic rest (docs/RESOURCE_SAVING_2026-11-05.md §4): re-read the loaded
+    /// instrument's reported tail and whether its editor is open; a change wakes it. ~1 Hz.
+    void refreshRestParameters();
+    /// [Audio thread] True when the generation stage would skip `processBlock` this block (resting,
+    /// no MIDI queued, nothing held). The render pool then gets no job for this host.
+    [[nodiscard]] bool audioThread_restingAndIdle() noexcept;
+    /// Offline export: always process (see PluginInsertHost::setRestSuspended).
+    void setRestSuspended(const bool suspended) noexcept { rtRestSuspended_.store(suspended, std::memory_order_release); }
+    /// Rested / processed generation blocks since start (diagnostics, relaxed).
+    [[nodiscard]] std::uint64_t restedBlocksForDiagnostics() const noexcept
+    {
+        return rtRest_.restedBlocks.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t processedBlocksForDiagnostics() const noexcept
+    {
+        return rtRest_.processedBlocks.load(std::memory_order_relaxed);
+    }
 
     /// [Audio thread] Must be called at the start of each device callback before any
     /// `audioThread_addMidiEventForCurrentBlock` (transport I3e scheduling). Sets the sample clamp
@@ -518,6 +539,17 @@ private:
     void audioThread_renderGenerationStageImpl(int numSamples) noexcept;
     bool rtStageRendered_ = false;
     bool rtStageHasAudio_ = false;
+    /// Automatic rest of the generation stage. "Input" is MIDI delivered in the block plus notes
+    /// and sustain pedals still held from earlier blocks (tracked from the delivered MIDI itself,
+    /// so transport, routed, live and audition MIDI all count).
+    insert_rest::Params rtRestParams_;
+    insert_rest::State rtRest_;
+    std::atomic<bool> rtRestSuspended_ { false };
+    std::uint64_t restSignature_ = 0; ///< [message thread]
+    std::uint8_t rtHeldNotes_[16][128] {};
+    int rtHeldNoteCount_ = 0;
+    std::uint16_t rtSustainMask_ = 0;
+    void audioThread_trackHeldNotes(const juce::MidiBuffer& delivered) noexcept;
     int rtStageSamples_ = 0;
     /// Host-owned MIDI merge / remap buffers (capacity kept across blocks → allocation-free).
     juce::MidiBuffer rtMergedMidi_;

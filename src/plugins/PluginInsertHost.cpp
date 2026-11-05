@@ -2358,6 +2358,119 @@ std::shared_ptr<InsertProcessPlayHead> PluginInsertHost::chainPlayHeadForTrack(c
     return ph;
 }
 
+std::shared_ptr<InsertChainRestRuntime> PluginInsertHost::restRuntimeForTrack(const TrackId trackId)
+{
+    auto& slot = restRuntimes_[trackId];
+    if (slot == nullptr)
+    {
+        slot = std::make_shared<InsertChainRestRuntime>();
+    }
+    return slot;
+}
+
+void PluginInsertHost::updateRestParams(const TrackId trackId, InsertChainRestRuntime& rest, const bool forceWake)
+{
+    const auto it = chains_.find(trackId);
+    const double sr = effectiveSr(sampleRate_);
+    for (int stageIndex = 0; stageIndex < 2; ++stageIndex)
+    {
+        const InsertStage stage = stageIndex == 0 ? InsertStage::Pre : InsertStage::Post;
+        insert_rest::TailKind kind = insert_rest::TailKind::Empty;
+        double tailSeconds = 0.0;
+        int latency = 0;
+        bool neverRest = false;
+        std::uint64_t signature = 1469598103934665603ull;
+        const auto mix = [&signature](const std::uint64_t v) {
+            signature = (signature ^ v) * 1099511628211ull;
+        };
+        if (it != chains_.end())
+        {
+            for (const LiveInsertSlot& live : it->second)
+            {
+                if (live.instance == nullptr || live.stage != stage || !live.layoutOk || !live.hostActive)
+                {
+                    continue;
+                }
+                juce::AudioPluginInstance& inst = *live.instance;
+                const double t = inst.getTailLengthSeconds();
+                kind = insert_rest::classifyTail(t, kind);
+                if (std::isfinite(t) && t > 0.0)
+                {
+                    tailSeconds += t;
+                }
+                latency += juce::jmax(0, inst.getLatencySamples());
+                // DAL sends inserts no MIDI (the scratch is cleared per slot), so a plug-in that
+                // merely accepts MIDI cannot be triggered; one that calls itself an instrument may
+                // still make sound on its own and never rests.
+                neverRest = neverRest || inst.getPluginDescription().isInstrument
+                            || editorWindows_.count({ trackId, live.slotId }) != 0
+                            || paramsWindows_.count({ trackId, live.slotId }) != 0;
+                mix((std::uint64_t)(std::uintptr_t)live.instance.get());
+                mix((std::uint64_t)live.instanceEpoch);
+                mix((std::uint64_t)(live.hostBypassed ? 3 : 1));
+            }
+        }
+        const std::int64_t tailSamples = kind == insert_rest::TailKind::Finite
+                                             ? (std::int64_t)std::ceil(tailSeconds * sr)
+                                             : 0;
+        mix((std::uint64_t)tailSamples);
+        mix((std::uint64_t)latency);
+        mix((std::uint64_t)kind);
+        mix(neverRest ? 7u : 5u);
+        insert_rest::Params& p = rest.params[stageIndex];
+        if (!forceWake && signature == rest.signature[stageIndex])
+        {
+            continue;
+        }
+        rest.signature[stageIndex] = signature;
+        p.tailSamples.store(tailSamples, std::memory_order_relaxed);
+        p.latencySamples.store(latency, std::memory_order_relaxed);
+        p.tailKind.store((int)kind, std::memory_order_relaxed);
+        p.neverRest.store(neverRest, std::memory_order_relaxed);
+        p.generation.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void PluginInsertHost::refreshInsertRestParameters()
+{
+    for (auto& [tid, rest] : restRuntimes_)
+    {
+        if (rest != nullptr)
+        {
+            updateRestParams(tid, *rest, false);
+        }
+    }
+}
+
+juce::String PluginInsertHost::insertRestDiagnosticsText() const
+{
+    std::uint64_t rested = 0;
+    std::uint64_t processed = 0;
+    int restingNow = 0;
+    int stages = 0;
+    for (const auto& [tid, rest] : restRuntimes_)
+    {
+        if (rest == nullptr || !hasLiveInsertInstances(tid))
+        {
+            continue;
+        }
+        for (int s = 0; s < 2; ++s)
+        {
+            if ((insert_rest::TailKind)rest->params[s].tailKind.load() == insert_rest::TailKind::Empty)
+            {
+                continue;
+            }
+            ++stages;
+            rested += rest->state[s].restedBlocks.load(std::memory_order_relaxed);
+            processed += rest->state[s].processedBlocks.load(std::memory_order_relaxed);
+            restingNow += rest->state[s].resting ? 1 : 0; // racy read, diagnostics only
+        }
+    }
+    return "insert stages=" + juce::String(stages) + " restingNow=" + juce::String(restingNow)
+           + " stageBlocks rested=" + juce::String((juce::int64)rested) + " processed="
+           + juce::String((juce::int64)processed);
+}
+
 void PluginInsertHost::rebuildAudioThreadMapAndPublish()
 {
     auto next = std::make_shared<PluginAudioThreadMap>();
@@ -2373,6 +2486,8 @@ void PluginInsertHost::rebuildAudioThreadMapAndPublish()
         // Stage A1: the chain's own transport playhead, co-owned by the entry so an in-flight
         // callback holding this map keeps a valid pointer across any message-thread change.
         e.playHead = chainPlayHeadForTrack(kv.first);
+        e.rest = restRuntimeForTrack(kv.first);
+        updateRestParams(kv.first, *e.rest, false);
         e.slots.reserve(kv.second.size());
         for (const auto& live : kv.second)
         {
@@ -2884,6 +2999,18 @@ void PluginInsertHost::audioThread_processEntryChain(const PluginAudioThreadMap:
         insertLevelTapPreBlocks_.fetch_add(1, std::memory_order_relaxed);
     }
 
+    // Automatic rest (InsertChainRest.h): a stage whose input is silent and which has provably
+    // nothing left to produce skips processBlock; its silent buffer passes through unchanged.
+    const int restIndex = stage == InsertStage::Pre ? 0 : 1;
+    InsertChainRestRuntime* const rest = entry.rest.get();
+    const bool inputSilent = rest != nullptr && insert_rest::isSilent(scratchChannels, kInsertChannels, n);
+    if (rest != nullptr
+        && rest->state[restIndex].shouldSkip(inputSilent, rest->params[restIndex],
+                                             restSuspended_.load(std::memory_order_acquire)))
+    {
+        return;
+    }
+
     juce::AudioBuffer<float> view(scratchChannels, kInsertChannels, n);
     juce::ScopedNoDenormals noDenormals;
     audio_profiler::AudioThreadProfiler& profiler = audio_profiler::AudioThreadProfiler::get();
@@ -2919,6 +3046,11 @@ void PluginInsertHost::audioThread_processEntryChain(const PluginAudioThreadMap:
         laneInsertSlotIndex_[lane].store(-1, std::memory_order_relaxed);
         laneInsertStage_[lane].store(-1, std::memory_order_relaxed);
         midiScratch.clear();
+    }
+    if (rest != nullptr)
+    {
+        rest->state[restIndex].afterProcess(inputSilent, insert_rest::isSilent(scratchChannels, kInsertChannels, n), n,
+                                            rest->params[restIndex]);
     }
 
     // Diagnostics tap: level leaving the chain (after the last Post insert, before pan).

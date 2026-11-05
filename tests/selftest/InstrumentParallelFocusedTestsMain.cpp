@@ -124,6 +124,7 @@ public:
             const juce::MidiMessage m = meta.getMessage();
             if (m.isNoteOn())
             {
+                noteOnsReceived.fetch_add(1, std::memory_order_relaxed);
                 freq_ = 440.0 * std::pow(2.0, (m.getNoteNumber() - 69) / 12.0);
                 amp_ = 0.2 * (double)m.getVelocity() / 127.0;
                 phase_ = 0.0;
@@ -174,6 +175,7 @@ public:
     void getStateInformation(juce::MemoryBlock&) override {}
     void setStateInformation(const void*, int) override {}
 
+    std::atomic<int> noteOnsReceived { 0 };
     std::atomic<std::uint64_t> blocksProcessed{ 0 };
     [[nodiscard]] int inProcessForDiag() const noexcept { return inProcess_.load(std::memory_order_relaxed); }
 
@@ -591,6 +593,60 @@ void testLifetimeUnderRunningDevice()
     const auto st = h.engine.instrumentRenderPoolStats();
     expect(st.parallelBlocks > 0 && st.serialBlocks > 0, "stress covered both the parallel and the forced-serial path");
 }
+
+// Track Off and automatic rest (docs/RESOURCE_SAVING_2026-11-05.md §3.1, §4).
+void testOffRowMidiAndInstrumentRest()
+{
+    std::printf("\n-- Off row MIDI and instrument rest --\n");
+    constexpr int kBusy = 200;
+    // Audition MIDI addressed to the Off row is dropped, not queued for a burst at On.
+    {
+        Harness h;
+        h.buildStandardSession(kBusy);
+        h.noteOnAll(); // the Off row gets a note-on through the audition queue too
+        (void)h.runBlocks(8, false);
+        ExperimentalInstrumentHost* const offHost = h.rows[(size_t)h.offIndex].host.get();
+        expect(offHost->pendingUiMidiEventCountForDiagnostics() == 0,
+               "off: audition MIDI for an Off row is discarded each block (no pile-up)");
+        h.session.setTrackOff(h.rows[(size_t)h.offIndex].tid, false);
+        (void)h.runBlocks(4, false);
+        expect(h.rows[(size_t)h.offIndex].instrument->noteOnsReceived.load() == 0,
+               "off: switching the row On does not replay MIDI sent while it was Off");
+    }
+    // An instrument that never received MIDI rests after two silent blocks and gets no pool job;
+    // the first note after the rest sounds in its first block, bit-identical to no rest.
+    {
+        Harness rest;
+        rest.buildStandardSession(kBusy);
+        (void)rest.runBlocks(8, false);
+        bool allRested = true;
+        for (size_t i = 0; i < rest.rows.size(); ++i)
+        {
+            if (rest.rows[i].instrument != nullptr && (int)i != rest.offIndex)
+            {
+                allRested = allRested && rest.rows[i].instrument->blocksProcessed.load() <= 2;
+            }
+        }
+        expect(allRested, "rest: instruments that never received MIDI stop processing after 2 silent blocks");
+        const auto before = rest.engine.instrumentRenderPoolStats();
+        (void)rest.runBlocks(4, false);
+        const auto after = rest.engine.instrumentRenderPoolStats();
+        expect(after.jobsRunByCallback + after.jobsRunByWorkers
+                   <= before.jobsRunByCallback + before.jobsRunByWorkers + 4,
+               "rest: resting instruments get no render-pool job (at most the instrument-less host per block)");
+
+        Harness awake;
+        awake.engine.setPluginRestSuspended(true);
+        awake.buildStandardSession(kBusy);
+        (void)awake.runBlocks(12, false);
+        rest.noteOnAll();
+        awake.noteOnAll();
+        const std::vector<float> outRest = rest.runBlocks(6, false);
+        const std::vector<float> outAwake = awake.runBlocks(6, false);
+        expect(peakOf(outRest) > 0.05 && maxAbsDiff(outRest, outAwake) == 0.0,
+               "rest: the first notes after a rest sound from their first block, bit-identical to no rest");
+    }
+}
 } // namespace
 
 int main()
@@ -602,6 +658,7 @@ int main()
     testSmallWorkloadStaysSerialAndZeroWorkersOverride();
     testOfflinePathMatchesRealtime();
     testLifetimeUnderRunningDevice();
+    testOffRowMidiAndInstrumentRest();
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

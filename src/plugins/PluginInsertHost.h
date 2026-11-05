@@ -22,6 +22,7 @@
 // See `docs/PHASE_PLAN.md` Phase 8 and `docs/ARCHITECTURE_PRINCIPLES.md` Plugin host section.
 // =============================================================================
 
+#include "plugins/InsertChainRest.h"
 #include "plugins/InsertSlotRuntime.h"
 #include "plugins/PluginEditorWindows.h"
 #include "plugins/PluginTrackSlot.h"
@@ -93,6 +94,16 @@ private:
 };
 
 // Immutable view exchanged with the audio callback (release-store / acquire-load).
+/// Automatic rest of one row's insert chain: Pre and Post stages separately (InsertChainRest.h).
+/// Co-owned by every published entry of the row so a republished map keeps the measured state.
+struct InsertChainRestRuntime
+{
+    insert_rest::Params params[2]; ///< [0] = Pre, [1] = Post
+    insert_rest::State state[2];
+    /// [Message thread] What the params were computed from; a change bumps the generation.
+    std::uint64_t signature[2] { 0, 0 };
+};
+
 struct PluginAudioThreadMap
 {
     struct SlotProc
@@ -115,6 +126,8 @@ struct PluginAudioThreadMap
         /// This chain's transport playhead, installed on every instance of the entry and co-owned
         /// here so it outlives every published map that references it (Stage A1, see class note).
         std::shared_ptr<InsertProcessPlayHead> playHead;
+        /// Automatic rest of this row's stages (never null for a published entry).
+        std::shared_ptr<InsertChainRestRuntime> rest;
     };
     std::vector<Entry> entries;
 };
@@ -193,6 +206,15 @@ public:
 
     /// Remove instances without undo (e.g. track deleted from session).
     void evictPluginForTrackNoUndo(TrackId trackId) noexcept;
+
+    /// [Message thread] Re-read every active insert's reported tail, latency, MIDI input and open
+    /// editor into the rest parameters; a change wakes that stage. Cheap; call about once a second
+    /// (a plug-in's tail can change with its parameters).
+    void refreshInsertRestParameters();
+    /// Rested / processed stage blocks since start, and stages resting right now (diagnostics).
+    [[nodiscard]] juce::String insertRestDiagnosticsText() const;
+    /// Offline export: every stage processes (the export must equal an uninterrupted render).
+    void setRestSuspended(const bool suspended) noexcept { restSuspended_.store(suspended, std::memory_order_release); }
 
     // --- Track Off (Power): dormant inserts --------------------------------------------------
     // An Off track holds no insert instances. Each slot stays in the chain as a **dormant
@@ -626,6 +648,11 @@ private:
     std::unordered_map<TrackId, std::vector<LiveInsertSlot>> chains_;
     std::function<void()> realtimeDrainAfterPublish_;
     std::function<bool(TrackId)> dormancyQuery_;
+    std::unordered_map<TrackId, std::shared_ptr<InsertChainRestRuntime>> restRuntimes_;
+    std::atomic<bool> restSuspended_ { false };
+    std::shared_ptr<InsertChainRestRuntime> restRuntimeForTrack(TrackId trackId);
+    /// [Message thread] Recompute one row's rest params from its live slots; bump on change.
+    void updateRestParams(TrackId trackId, InsertChainRestRuntime& rest, bool forceWake);
     std::function<void(const juce::String&)> powerLog_;
     /// Parked by `detachAllInstancesForProjectClose` until released one at a time.
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> projectClosePending_;

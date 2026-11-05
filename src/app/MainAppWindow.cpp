@@ -6366,6 +6366,21 @@ private:
         inspectorView_.refreshFromSession();
         updateMainWindowTitleWithDirtyState();
         tickPlaybackUiLoadDiagnostics();
+        // Automatic insert rest: a plug-in's reported tail can follow its parameters (1 Hz).
+        if (++insertRestRefreshTicks_ >= 10)
+        {
+            insertRestRefreshTicks_ = 0;
+            pluginHost_.refreshInsertRestParameters();
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            for (int i = 0; snap != nullptr && instrumentRuntimeCoordinator_ != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                if (ExperimentalInstrumentHost* const h
+                    = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(snap->getTrack(i).getId()))
+                {
+                    h->refreshRestParameters();
+                }
+            }
+        }
     }
 
     /// Part E: one aggregated `playback-ui-load.log` line per second (audio callback cost + UI
@@ -7889,6 +7904,22 @@ private:
         P.renderPoolText = [this]() -> juce::String {
             const auto st = playbackEngine_.instrumentRenderPoolStats();
             juce::String s;
+            s << "rest: " << pluginHost_.insertRestDiagnosticsText();
+            {
+                std::uint64_t rested = 0, processed = 0;
+                const auto snap = session.loadSessionSnapshotForAudioThread();
+                for (int i = 0; snap != nullptr && instrumentRuntimeCoordinator_ != nullptr && i < snap->getNumTracks(); ++i)
+                {
+                    if (const ExperimentalInstrumentHost* const h
+                        = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(snap->getTrack(i).getId()))
+                    {
+                        rested += h->restedBlocksForDiagnostics();
+                        processed += h->processedBlocksForDiagnostics();
+                    }
+                }
+                s << " instrumentBlocks rested=" << (juce::int64)rested << " processed=" << (juce::int64)processed
+                  << " liveInserts=" << pluginHost_.liveInsertInstanceCount() << " | ";
+            }
             s << "workers=" << playbackEngine_.instrumentRenderWorkerCount()
               << " (threads incl. callback=" << (playbackEngine_.instrumentRenderWorkerCount() + 1) << ")"
               << " serialForced=" << (playbackEngine_.isInstrumentRenderSerialForDiagnostics() ? "yes" : "no")
@@ -8607,6 +8638,7 @@ private:
     /// instrument runtime so it is destroyed (and its timer stopped) first.
     std::unique_ptr<TrackPowerCoordinator> trackPowerCoordinator_;
     juce::Label trackPowerToastLabel_;
+    int insertRestRefreshTicks_ = 0;
 
     /// When Audio Settings is open; auto-clears when the dialog-owned view is destroyed.
     juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;
