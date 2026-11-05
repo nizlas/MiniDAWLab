@@ -2505,6 +2505,12 @@ public:
                         undoRedoCoordinator_->executeUndoableTrackDelete(label, std::move(mutator));
                     }
                 },
+                [this](const juce::String& label, std::function<bool(MultiTrackDeleteUndoSides&)> mutator) {
+                    if (undoRedoCoordinator_ != nullptr)
+                    {
+                        undoRedoCoordinator_->executeUndoableMultiTrackDelete(label, std::move(mutator));
+                    }
+                },
                 [this] { syncViewportFromSession(); },
                 [this](TrackId tid) { return instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid); },
                 [this](TrackId tid) {
@@ -9263,6 +9269,10 @@ void mini_daw_app_transport::TransportControlsContent::applyTimelineRulerFormatB
 
 void mini_daw_app_transport::TransportControlsContent::invokeDeleteSelectedPlacedClipFromWindowShortcut()
 {
+    if (trackLanesView.requestDeleteSelectedHeaderTracks())
+    {
+        return;
+    }
     if (clipPasteboardController_ != nullptr)
     {
         clipPasteboardController_->invokeDeleteSelectedPlacedClipFromWindowShortcut();

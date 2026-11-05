@@ -54,6 +54,11 @@ public:
                                std::optional<InstrumentTrackDeleteUndoSides>&)> mutator)>
             executeUndoableTrackDelete;
 
+        /// Routes through `UndoRedoCoordinator::executeUndoableMultiTrackDelete`: several tracks,
+        /// one undo step.
+        std::function<void(const juce::String& label, std::function<bool(MultiTrackDeleteUndoSides&)> mutator)>
+            executeUndoableMultiTrackDelete;
+
         std::function<void()> syncViewportFromSession;
 
         // Delete-track instrument branch hooks (must keep call order; see install()).
@@ -125,6 +130,13 @@ public:
     /// [Message thread] The undoable per-track channel edits `install()` built (the Inspector's
     /// handlers are these very functions). The mixer binds its strips to them with explicit ids.
     [[nodiscard]] const TrackEditActions& trackEditActions() const noexcept { return trackEditActions_; }
+
+    /// [Message thread] The Delete Track transaction for one row: undo capture, then teardown and
+    /// session removal under the realtime gate. False when the row is missing or Stereo Out. Runs
+    /// inside an undoable step; the caller records the sides.
+    [[nodiscard]] bool deleteOneTrackForUndoableStep(TrackId tid,
+                                                     std::optional<PluginUndoStepSides>& outPluginSides,
+                                                     std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentDelete);
 
     /// [Message thread] Undo of Delete Track (instrument): the session row is already restored from
     /// the timeline snapshot; recreate the runtime from the captured project row via the same

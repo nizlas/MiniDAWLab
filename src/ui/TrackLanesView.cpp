@@ -1171,8 +1171,58 @@ void TrackLanesView::setOnDeleteTrackRequested(
     onDeleteTrackRequested_ = std::move(onDeleteTrackRequested);
 }
 
+void TrackLanesView::setOnDeleteTracksRequested(
+    std::function<void(const std::vector<TrackId>&)> onDeleteTracksRequested) noexcept
+{
+    onDeleteTracksRequested_ = std::move(onDeleteTracksRequested);
+}
+
+std::vector<TrackId> TrackLanesView::deletableSelectedHeaderTrackIds() const
+{
+    std::vector<TrackId> out = selectedHeaderTrackIdsInVisibleOrder();
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    out.erase(std::remove_if(out.begin(), out.end(),
+                             [&snap](const TrackId tid) {
+                                 const int ix = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+                                 return ix < 0 || snap->getTrack(ix).getKind() == TrackKind::Master;
+                             }),
+              out.end());
+    return out;
+}
+
+bool TrackLanesView::requestDeleteSelectedHeaderTracks()
+{
+    std::vector<ArrangementEventId> events;
+    copyArrangementEventSelection(events);
+    if (!events.empty() || headerMultiSelection_.size() < 2)
+    {
+        return false;
+    }
+    if (!isStructuralTimelineEditBlocked() && onDeleteTracksRequested_ != nullptr)
+    {
+        onDeleteTracksRequested_(deletableSelectedHeaderTrackIds());
+    }
+    return true;
+}
+
+juce::String TrackLanesView::deleteTrackMenuItemText(const TrackId tid) const
+{
+    const std::vector<TrackId> ids = deletableSelectedHeaderTrackIds();
+    return ids.size() >= 2 && isHeaderMultiSelected(tid) ? "Delete " + juce::String((int) ids.size()) + " Tracks"
+                                                         : juce::String("Delete Track");
+}
+
 void TrackLanesView::requestDeleteTrackForHeaderMenu(const TrackId tid) noexcept
 {
+    if (onDeleteTracksRequested_ != nullptr && headerMultiSelection_.size() >= 2 && isHeaderMultiSelected(tid))
+    {
+        const std::vector<TrackId> ids = deletableSelectedHeaderTrackIds();
+        if (ids.size() >= 2)
+        {
+            onDeleteTracksRequested_(ids);
+            return;
+        }
+    }
     if (onDeleteTrackRequested_ != nullptr)
     {
         onDeleteTrackRequested_(tid);
@@ -1893,7 +1943,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             const bool editLocked = isStructuralTimelineEditBlocked();
             juce::PopupMenu::Item deleteItem;
             deleteItem.itemID = kDeleteTrackMenuId;
-            deleteItem.text = "Delete Track";
+            deleteItem.text = deleteTrackMenuItemText(tid);
             deleteItem.isEnabled = !editLocked;
             menu.addItem(deleteItem);
             menu.addItem(makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));
@@ -2450,7 +2500,7 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
             const bool editLocked = isStructuralTimelineEditBlocked();
             juce::PopupMenu::Item deleteItem;
             deleteItem.itemID = kDeleteTrackMenuId;
-            deleteItem.text = "Delete Track";
+            deleteItem.text = deleteTrackMenuItemText(tid);
             deleteItem.isEnabled = !editLocked;
             menu.addItem(deleteItem);
             menu.addItem(makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));
@@ -4468,6 +4518,11 @@ void TrackLanesView::handleHeaderSelectionClick(const TrackId tid, const bool sh
         for (int i = lo; i <= hi; ++i)
         {
             headerMultiSelection_.push_back(visibleTrackEntries_[(size_t) i].sessionTrackId);
+        }
+        // The newest selection owns Delete: a range of tracks replaces selected events.
+        if (headerMultiSelection_.size() >= 2)
+        {
+            setArrangementEventSelection({});
         }
     }
     repaint();

@@ -189,6 +189,11 @@ public:
         std::function<bool(std::optional<PluginUndoStepSides>& outPluginSides,
                            std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentDelete)> mutator);
 
+    /// [Message thread] Delete several tracks as one undo step. `mutator` deletes them and hands
+    /// back each row's insert chain and instrument row.
+    void executeUndoableMultiTrackDelete(const juce::String& label,
+                                         std::function<bool(MultiTrackDeleteUndoSides& outSides)> mutator);
+
     void clearHistory() noexcept;
     /// [Diagnostics / stability] Current undo stack depth.
     [[nodiscard]] int undoStackSizeForDiagnostics() const noexcept { return sessionHistory_.undoStackSize(); }
@@ -204,12 +209,15 @@ private:
                       std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete = std::nullopt,
                       std::optional<SoloMemoryUndoSides> soloMemorySides = std::nullopt,
                       std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides = std::nullopt,
-                      std::optional<TrackColourUndoSides> trackColourSides = std::nullopt);
+                      std::optional<TrackColourUndoSides> trackColourSides = std::nullopt,
+                      std::optional<MultiTrackDeleteUndoSides> multiTrackDelete = std::nullopt);
     void discardArrangementSelectionNote() noexcept;
     /// Instrument-runtime side of a structural step (Delete / Duplicate Track): recreate when the
     /// restored timeline contains the row, retire when it does not.
     void applyInstrumentTrackRuntimeSides(const InstrumentTrackDeleteUndoSides& sides,
                                           const SessionSnapshot& restoredTimeline);
+    /// Per-row sides of a multi-track delete, same order as the single-track step.
+    void applyMultiTrackDeleteSides(const SessionHistoryRestoreBundle& bundle);
     void onPluginUndoRecord(const juce::String& label, const PluginUndoStepSides& sides);
 
     /// C callback for `PluginInsertHost::setUndoRecorder` (must be a plain function pointer).

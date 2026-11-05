@@ -2462,7 +2462,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         const bool editLocked = trackLanes_.isStructuralTimelineEditBlocked();
         juce::PopupMenu::Item deleteItem;
         deleteItem.itemID = kDeleteTrackMenuId;
-        deleteItem.text = "Delete Track";
+        deleteItem.text = trackLanes_.deleteTrackMenuItemText(laneTid);
         deleteItem.isEnabled = !editLocked;
         menu.addItem(deleteItem);
         menu.addItem(TrackLanesView::makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));

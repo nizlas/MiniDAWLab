@@ -51,6 +51,15 @@ struct InstrumentTrackDeleteUndoSides
     ProjectFileExperimentalInstrumentTrackV1 row;
 };
 
+/// Delete-Track undo payload for several rows in one step, any mix of kinds: the insert chain and
+/// instrument row of each deleted track. Applied after the timeline, plugins first, like the
+/// single-track sides.
+struct MultiTrackDeleteUndoSides
+{
+    std::vector<PluginUndoStepSides> plugins;
+    std::vector<InstrumentTrackDeleteUndoSides> instruments;
+};
+
 /// Narrow Solo-memory undo payload (Solo spec §7): the content change of ONE persistent Solo
 /// memory. Deliberately decoupled from the timeline — a solo-memory step records the SAME
 /// snapshot pointer for before/after, so undoing a memory edit restores exactly that memory's
@@ -129,6 +138,8 @@ struct SessionHistoryRestoreBundle
     /// Arrangement event selection for this step. Apply `before` on undo and `after` on redo,
     /// after the model restore has cleared transient UI selection. Never written to the project.
     std::optional<ArrangementSelectionUndoSides> arrangementSelection {};
+    /// Delete of several tracks: plugin and instrument sides per row.
+    std::optional<MultiTrackDeleteUndoSides> multiTrackDelete {};
     /// True: popped from redo stack (apply `pluginSides->after`), false: undo (apply `before`).
     bool isRedo = false;
 };
@@ -155,7 +166,8 @@ public:
                 = std::nullopt,
                 std::optional<TrackColourUndoSides> trackColourSides = std::nullopt,
                 std::optional<ArrangementSelectionUndoSides> arrangementSelection
-                = std::nullopt) noexcept;
+                = std::nullopt,
+                std::optional<MultiTrackDeleteUndoSides> multiTrackDelete = std::nullopt) noexcept;
 
     /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
     /// restore (`pluginSides` present — caller applies `before` chain).
@@ -181,6 +193,7 @@ private:
         std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides;
         std::optional<TrackColourUndoSides> trackColourSides;
         std::optional<ArrangementSelectionUndoSides> arrangementSelection;
+        std::optional<MultiTrackDeleteUndoSides> multiTrackDelete;
     };
 
     int maxSteps_;

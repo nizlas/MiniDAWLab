@@ -295,7 +295,19 @@ public:
     void setOnDeleteTrackRequested(std::function<void(TrackId)> onDeleteTrackRequested) noexcept;
 
     /// Same handler as wired by `setOnDeleteTrackRequested` (`Main` invokes from instrument-shell headers).
+    /// When `tid` is part of a header multi-selection the whole selection is deleted.
     void requestDeleteTrackForHeaderMenu(TrackId tid) noexcept;
+
+    // [Message thread] Wired once by `Main`: delete several tracks as one undo step.
+    void setOnDeleteTracksRequested(std::function<void(const std::vector<TrackId>&)> onDeleteTracksRequested) noexcept;
+
+    /// [Message thread] Delete key: a header multi-selection of two or more rows, unless arrangement
+    /// events are selected. A single selected header is only the active row and is never deleted
+    /// by the key. Returns true when the key belonged to the selection (also while edits are blocked).
+    [[nodiscard]] bool requestDeleteSelectedHeaderTracks();
+
+    /// "Delete Track", or "Delete N Tracks" when `tid` is part of a header multi-selection.
+    [[nodiscard]] juce::String deleteTrackMenuItemText(TrackId tid) const;
 
     // [Message thread] Wired once by `Main`: header context menu "Duplicate Track" invokes this with
     // the clicked track id (explicit source, independent of the active track).
@@ -583,6 +595,8 @@ public:
     void applyHeaderRightClickSelectionPolicy(TrackId clickedTid) noexcept;
     /// Current multi-selection in VISIBLE row order (diagnostics + group creation).
     [[nodiscard]] std::vector<TrackId> selectedHeaderTrackIdsInVisibleOrder() const;
+    /// The same list without Stereo Out, which cannot be deleted.
+    [[nodiscard]] std::vector<TrackId> deletableSelectedHeaderTrackIds() const;
 
     /// True when the current multi-selection qualifies for "Create collapsible group…": ≥2
     /// existing tracks, adjacent in session order, none Stereo Out, none already grouped.
@@ -810,6 +824,7 @@ private:
     /// Header multi-selection (visual-group creation): selected ids + the shift anchor. UI-only —
     /// never session state, never clip selection, never the active track.
     std::vector<TrackId> headerMultiSelection_;
+    std::function<void(const std::vector<TrackId>&)> onDeleteTracksRequested_;
     TrackId headerSelectionAnchorTid_ = kInvalidTrackId;
 
     Session& session_;

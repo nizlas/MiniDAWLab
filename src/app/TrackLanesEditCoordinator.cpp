@@ -164,136 +164,49 @@ void TrackLanesEditCoordinator::install()
             "Delete track",
             [this, tid](std::optional<PluginUndoStepSides>& outPluginSides,
                         std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentDelete) -> bool {
-                const std::shared_ptr<const SessionSnapshot> snap
-                    = session_.loadSessionSnapshotForAudioThread();
-                if (snap == nullptr || snap->findTrackIndexById(tid) < 0)
-                {
-                    appendTrackDeleteDiagnosticLine("delete abort (track not found) trackId="
-                                                    + juce::String((juce::int64)tid));
-                    return false;
-                }
-                const int ix = snap->findTrackIndexById(tid);
-                if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Master)
-                {
-                    appendTrackDeleteDiagnosticLine("delete abort (master track) trackId="
-                                                    + juce::String((juce::int64)tid));
-                    return false;
-                }
-                const Track& delTrack = snap->getTrack(ix);
-                const bool hasInstrumentRuntime = callbacks_.getInstrumentHostForTrack
-                                                  && callbacks_.getInstrumentHostForTrack(tid) != nullptr;
-                const bool hasInserts = pluginHost_.hasAnyInsertOnTrack(tid);
-                appendTrackDeleteDiagnosticLine(
-                    "delete begin trackId=" + juce::String((juce::int64)tid)
-                    + " kind=" + trackKindDiagnosticName(delTrack.getKind())
-                    + " name=\"" + delTrack.getName() + "\""
-                    + " instrumentRuntime=" + (hasInstrumentRuntime ? "yes" : "no")
-                    + " inserts=" + (hasInserts ? "yes" : "no"));
-                writeLastOperationBreadcrumb("track delete start id=" + juce::String((juce::int64)tid)
-                                             + " kind=" + trackKindDiagnosticName(delTrack.getKind()));
+                return deleteOneTrackForUndoableStep(tid, outPluginSides, outInstrumentDelete);
+            });
+    });
 
-                // ---- Undo capture (before any teardown) --------------------------------------
-                appendTrackDeleteDiagnosticLine("undo capture begin trackId="
-                                                + juce::String((juce::int64)tid));
-                if (hasInserts)
-                {
-                    PluginUndoStepSides sides;
-                    sides.trackId = tid;
-                    sides.before = pluginHost_.exportChain(tid);
-                    sides.after = PluginTrackChain{};
-                    appendTrackDeleteDiagnosticLine(
-                        "undo capture: insert chain slots="
-                        + juce::String(static_cast<int>(sides.before.slots.size())));
-                    outPluginSides = std::move(sides);
-                }
-                if ((delTrack.getKind() == TrackKind::Instrument
-                     || delTrack.getKind() == TrackKind::Midi)
-                    && callbacks_.getInstrumentControllerForTrack)
-                {
-                    InstrumentTrackController* const ctl = callbacks_.getInstrumentControllerForTrack(tid);
-                    if (ctl != nullptr && ctl->hasInstrumentTrack())
-                    {
-                        InstrumentTrackDeleteUndoSides s;
-                        s.trackId = tid;
-                        s.row = ctl->buildExperimentalInstrumentProjectBlock();
-                        if (s.row.enabled)
-                        {
-                            s.row.trackId = tid;
-                            appendTrackDeleteDiagnosticLine(
-                                "undo capture: instrument row kind=" + s.row.instrumentKind
-                                + " clips=" + juce::String(static_cast<int>(s.row.clips.size()))
-                                + " stateBase64Len=" + juce::String(s.row.pluginStateBase64.length())
-                                + " descriptor=" + (s.row.hasGenericVst3Descriptor ? "yes" : "no")
-                                + " pluginWasLoaded=" + (s.row.pluginWasLoadedOnSave ? "yes" : "no"));
-                            outInstrumentDelete = std::move(s);
-                        }
-                        else
-                        {
-                            appendTrackDeleteDiagnosticLine(
-                                "undo capture: instrument row unavailable (controller inactive); "
-                                "undo will restore session row without runtime");
-                        }
-                    }
-                    else
-                    {
-                        appendTrackDeleteDiagnosticLine(
-                            "undo capture: no instrument controller; undo will restore session row "
-                            "without runtime");
-                    }
-                }
-                appendTrackDeleteDiagnosticLine(
-                    "undo capture end trackId=" + juce::String((juce::int64)tid)
-                    + " insertChain=" + (outPluginSides.has_value() ? "yes" : "no")
-                    + " instrumentRow=" + (outInstrumentDelete.has_value() ? "yes" : "no"));
-
-                if (callbacks_.disarmRecorderIfTrack)
-                {
-                    callbacks_.disarmRecorderIfTrack(tid);
-                }
-
-                // Stability Slice 3: silence + drain the realtime callback for the whole teardown
-                // transaction (editor closes, insert eviction, session mutation, runtime removal).
+    trackLanesView_.setOnDeleteTracksRequested([this](const std::vector<TrackId>& ids) {
+        if (callbacks_.isRecording() || callbacks_.isCountInActive() || ids.empty())
+        {
+            return;
+        }
+        if (ids.size() == 1)
+        {
+            trackLanesView_.requestDeleteTrackForHeaderMenu(ids.front());
+            return;
+        }
+        if (!callbacks_.executeUndoableMultiTrackDelete)
+        {
+            return;
+        }
+        callbacks_.executeUndoableMultiTrackDelete(
+            "Delete tracks",
+            [this, ids](MultiTrackDeleteUndoSides& outSides) -> bool {
+                // One silent span for the whole selection; each row's own gate nests inside it.
                 const ScopedTrackDeleteRealtimeGate realtimeGate(playbackEngine_);
-
-                if (ix >= 0
-                    && (snap->getTrack(ix).getKind() == TrackKind::Instrument
-                        || snap->getTrack(ix).getKind() == TrackKind::Midi))
+                bool deletedAny = false;
+                for (const TrackId tid : ids)
                 {
-                    if (ExperimentalInstrumentHost* mh = callbacks_.getInstrumentHostForTrack(tid))
+                    std::optional<PluginUndoStepSides> pluginSides;
+                    std::optional<InstrumentTrackDeleteUndoSides> instrumentSides;
+                    if (!deleteOneTrackForUndoableStep(tid, pluginSides, instrumentSides))
                     {
-                        appendTrackDeleteDiagnosticLine("phase: close native plugin editor");
-                        mh->closeNativeEditor();
+                        continue;
                     }
-                    appendTrackDeleteDiagnosticLine("phase: detach MIDI editor booking");
-                    callbacks_.resetMidiEditorBookingIfOpenOnTrack(tid);
-                    appendTrackDeleteDiagnosticLine("phase: tear down instrument timeline UI");
-                    callbacks_.tearDownInstrumentTimelineUiForTrack(tid);
-                    appendTrackDeleteDiagnosticLine("phase: evict inserts (publish-before-destroy)");
-                    pluginHost_.evictPluginForTrackNoUndo(tid);
-                    appendTrackDeleteDiagnosticLine("phase: remove session track row");
-                    session_.removeTrack(tid);
-                    appendTrackDeleteDiagnosticLine(
-                        "phase: retire instrument runtime (bridge republish + drain)");
-                    callbacks_.removeInstrumentRuntimeForTrack(tid);
-                    callbacks_.refreshInstrumentUi();
+                    deletedAny = true;
+                    if (pluginSides.has_value())
+                    {
+                        outSides.plugins.push_back(std::move(*pluginSides));
+                    }
+                    if (instrumentSides.has_value())
+                    {
+                        outSides.instruments.push_back(std::move(*instrumentSides));
+                    }
                 }
-                else
-                {
-                    appendTrackDeleteDiagnosticLine("phase: evict inserts (publish-before-destroy)");
-                    pluginHost_.evictPluginForTrackNoUndo(tid);
-                    appendTrackDeleteDiagnosticLine("phase: remove session track row");
-                    session_.removeTrack(tid);
-                }
-                callbacks_.syncViewportFromSession();
-                trackLanesView_.syncTracksFromSession();
-                rulerView_.repaint();
-                trackLanesView_.repaint();
-                inspectorView_.refreshFromSession();
-                appendTrackDeleteDiagnosticLine("delete end ok trackId=" + juce::String((juce::int64)tid));
-                writeLastOperationBreadcrumb("track delete end ok id=" + juce::String((juce::int64)tid));
-                // Stability C3: verify runtime invariants right after the delete completed.
-                (void) stability_invariants::runRegisteredStabilityInvariantsCheck("track-delete-end");
-                return true;
+                return deletedAny;
             });
     });
 
@@ -943,6 +856,143 @@ void TrackLanesEditCoordinator::install()
             playbackEngine_.setTrackInputMonitoringEnabled(
                 tid, !playbackEngine_.isTrackInputMonitoringEnabled(tid));
         });
+}
+
+bool TrackLanesEditCoordinator::deleteOneTrackForUndoableStep(
+    const TrackId tid,
+    std::optional<PluginUndoStepSides>& outPluginSides,
+    std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentDelete)
+{
+    const std::shared_ptr<const SessionSnapshot> snap
+        = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr || snap->findTrackIndexById(tid) < 0)
+    {
+        appendTrackDeleteDiagnosticLine("delete abort (track not found) trackId="
+                                        + juce::String((juce::int64)tid));
+        return false;
+    }
+    const int ix = snap->findTrackIndexById(tid);
+    if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Master)
+    {
+        appendTrackDeleteDiagnosticLine("delete abort (master track) trackId="
+                                        + juce::String((juce::int64)tid));
+        return false;
+    }
+    const Track& delTrack = snap->getTrack(ix);
+    const bool hasInstrumentRuntime = callbacks_.getInstrumentHostForTrack
+                                      && callbacks_.getInstrumentHostForTrack(tid) != nullptr;
+    const bool hasInserts = pluginHost_.hasAnyInsertOnTrack(tid);
+    appendTrackDeleteDiagnosticLine(
+        "delete begin trackId=" + juce::String((juce::int64)tid)
+        + " kind=" + trackKindDiagnosticName(delTrack.getKind())
+        + " name=\"" + delTrack.getName() + "\""
+        + " instrumentRuntime=" + (hasInstrumentRuntime ? "yes" : "no")
+        + " inserts=" + (hasInserts ? "yes" : "no"));
+    writeLastOperationBreadcrumb("track delete start id=" + juce::String((juce::int64)tid)
+                                 + " kind=" + trackKindDiagnosticName(delTrack.getKind()));
+
+    // ---- Undo capture (before any teardown) --------------------------------------
+    appendTrackDeleteDiagnosticLine("undo capture begin trackId="
+                                    + juce::String((juce::int64)tid));
+    if (hasInserts)
+    {
+        PluginUndoStepSides sides;
+        sides.trackId = tid;
+        sides.before = pluginHost_.exportChain(tid);
+        sides.after = PluginTrackChain{};
+        appendTrackDeleteDiagnosticLine(
+            "undo capture: insert chain slots="
+            + juce::String(static_cast<int>(sides.before.slots.size())));
+        outPluginSides = std::move(sides);
+    }
+    if ((delTrack.getKind() == TrackKind::Instrument
+         || delTrack.getKind() == TrackKind::Midi)
+        && callbacks_.getInstrumentControllerForTrack)
+    {
+        InstrumentTrackController* const ctl = callbacks_.getInstrumentControllerForTrack(tid);
+        if (ctl != nullptr && ctl->hasInstrumentTrack())
+        {
+            InstrumentTrackDeleteUndoSides s;
+            s.trackId = tid;
+            s.row = ctl->buildExperimentalInstrumentProjectBlock();
+            if (s.row.enabled)
+            {
+                s.row.trackId = tid;
+                appendTrackDeleteDiagnosticLine(
+                    "undo capture: instrument row kind=" + s.row.instrumentKind
+                    + " clips=" + juce::String(static_cast<int>(s.row.clips.size()))
+                    + " stateBase64Len=" + juce::String(s.row.pluginStateBase64.length())
+                    + " descriptor=" + (s.row.hasGenericVst3Descriptor ? "yes" : "no")
+                    + " pluginWasLoaded=" + (s.row.pluginWasLoadedOnSave ? "yes" : "no"));
+                outInstrumentDelete = std::move(s);
+            }
+            else
+            {
+                appendTrackDeleteDiagnosticLine(
+                    "undo capture: instrument row unavailable (controller inactive); "
+                    "undo will restore session row without runtime");
+            }
+        }
+        else
+        {
+            appendTrackDeleteDiagnosticLine(
+                "undo capture: no instrument controller; undo will restore session row "
+                "without runtime");
+        }
+    }
+    appendTrackDeleteDiagnosticLine(
+        "undo capture end trackId=" + juce::String((juce::int64)tid)
+        + " insertChain=" + (outPluginSides.has_value() ? "yes" : "no")
+        + " instrumentRow=" + (outInstrumentDelete.has_value() ? "yes" : "no"));
+
+    if (callbacks_.disarmRecorderIfTrack)
+    {
+        callbacks_.disarmRecorderIfTrack(tid);
+    }
+
+    // Stability Slice 3: silence + drain the realtime callback for the whole teardown
+    // transaction (editor closes, insert eviction, session mutation, runtime removal).
+    const ScopedTrackDeleteRealtimeGate realtimeGate(playbackEngine_);
+
+    if (ix >= 0
+        && (snap->getTrack(ix).getKind() == TrackKind::Instrument
+            || snap->getTrack(ix).getKind() == TrackKind::Midi))
+    {
+        if (ExperimentalInstrumentHost* mh = callbacks_.getInstrumentHostForTrack(tid))
+        {
+            appendTrackDeleteDiagnosticLine("phase: close native plugin editor");
+            mh->closeNativeEditor();
+        }
+        appendTrackDeleteDiagnosticLine("phase: detach MIDI editor booking");
+        callbacks_.resetMidiEditorBookingIfOpenOnTrack(tid);
+        appendTrackDeleteDiagnosticLine("phase: tear down instrument timeline UI");
+        callbacks_.tearDownInstrumentTimelineUiForTrack(tid);
+        appendTrackDeleteDiagnosticLine("phase: evict inserts (publish-before-destroy)");
+        pluginHost_.evictPluginForTrackNoUndo(tid);
+        appendTrackDeleteDiagnosticLine("phase: remove session track row");
+        session_.removeTrack(tid);
+        appendTrackDeleteDiagnosticLine(
+            "phase: retire instrument runtime (bridge republish + drain)");
+        callbacks_.removeInstrumentRuntimeForTrack(tid);
+        callbacks_.refreshInstrumentUi();
+    }
+    else
+    {
+        appendTrackDeleteDiagnosticLine("phase: evict inserts (publish-before-destroy)");
+        pluginHost_.evictPluginForTrackNoUndo(tid);
+        appendTrackDeleteDiagnosticLine("phase: remove session track row");
+        session_.removeTrack(tid);
+    }
+    callbacks_.syncViewportFromSession();
+    trackLanesView_.syncTracksFromSession();
+    rulerView_.repaint();
+    trackLanesView_.repaint();
+    inspectorView_.refreshFromSession();
+    appendTrackDeleteDiagnosticLine("delete end ok trackId=" + juce::String((juce::int64)tid));
+    writeLastOperationBreadcrumb("track delete end ok id=" + juce::String((juce::int64)tid));
+    // Stability C3: verify runtime invariants right after the delete completed.
+    (void) stability_invariants::runRegisteredStabilityInvariantsCheck("track-delete-end");
+    return true;
 }
 
 void TrackLanesEditCoordinator::restoreDeletedInstrumentTrackForUndo(

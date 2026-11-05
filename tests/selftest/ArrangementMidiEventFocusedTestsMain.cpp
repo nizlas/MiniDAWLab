@@ -78,6 +78,8 @@ struct Harness
     PlaybackEngine engine;
     PluginInsertHost plugins;
     std::unique_ptr<UndoRedoCoordinator> undo;
+    std::vector<TrackId> runtimesRestored;
+    std::vector<TrackId> runtimesRetired;
     std::unique_ptr<InstrumentRuntimeCoordinator> runtime;
     std::unique_ptr<InspectorView> inspector;
     std::unique_ptr<TrackLanesView> lanes;
@@ -128,6 +130,12 @@ struct Harness
                           ctl.applyExperimentalInstrumentMusicalUndoBlock(tracks);
                       });
               };
+        undoCallbacks.restoreDeletedInstrumentTrackRuntime = [this](const InstrumentTrackDeleteUndoSides& sides) {
+            runtimesRestored.push_back(sides.trackId);
+        };
+        undoCallbacks.teardownDeletedInstrumentTrackRuntimeForRedo = [this](const TrackId tid) {
+            runtimesRetired.push_back(tid);
+        };
         undo = std::make_unique<UndoRedoCoordinator>(session, plugins, std::move(undoCallbacks));
 
         InstrumentTimelineRowCoordinator::Callbacks rowCallbacks;
@@ -907,6 +915,89 @@ void testSnappedRulerSeek(Harness& h)
     expect(free % kQuarter != 0 && std::abs(free - (20 * kBar + 30000)) < 400, "snap off: current time is free");
 }
 
+// Shift-range over headers of different kinds, then the Delete key and the header menu.
+void testMultiTrackDelete(Harness& h)
+{
+    std::vector<TrackId> requested;
+    h.lanes->setOnDeleteTracksRequested([&requested](const std::vector<TrackId>& ids) { requested = ids; });
+
+    TrackId audioTrack = kInvalidTrackId;
+    TrackId masterTrack = kInvalidTrackId;
+    const auto before = h.session.loadSessionSnapshotForAudioThread();
+    for (int i = 0; i < before->getNumTracks(); ++i)
+    {
+        const Track& track = before->getTrack(i);
+        audioTrack = track.getKind() == TrackKind::Audio ? track.getId() : audioTrack;
+        masterTrack = track.getKind() == TrackKind::Master ? track.getId() : masterTrack;
+    }
+    expect(audioTrack != kInvalidTrackId, "multi-delete fixture has an audio track");
+
+    // One selected header is the active row, not a request to delete it.
+    h.lanes->handleHeaderSelectionClick(h.trackA, false);
+    expect(!h.lanes->requestDeleteSelectedHeaderTracks() && requested.empty(), "one selected header ignores Delete");
+    expect(h.lanes->deleteTrackMenuItemText(h.trackA) == "Delete Track", "one selected header keeps the menu text");
+
+    // The range replaces a selected event, so Delete goes to the tracks.
+    InstrumentTrackController& ctl = *h.controller(h.trackA);
+    const InstrumentMidiClipId clip = h.putClip(ctl, 2000000, 100000, {}, {});
+    h.lanes->setArrangementEventSelection({ ArrangementEventId { ArrangementEventKind::MidiClip, h.trackA, clip } });
+    h.lanes->handleHeaderSelectionClick(h.trackA, false);
+    h.lanes->handleHeaderSelectionClick(audioTrack, true);
+    const std::vector<TrackId> selected = h.lanes->selectedHeaderTrackIdsInVisibleOrder();
+    expect(selected.size() >= 2 && h.lanes->isHeaderMultiSelected(h.trackA) && h.lanes->isHeaderMultiSelected(audioTrack),
+           "a shift range spans instrument and audio headers");
+    std::vector<ArrangementEventId> events;
+    h.lanes->copyArrangementEventSelection(events);
+    expect(events.empty(), "the track range replaces the event selection");
+    expect(h.lanes->requestDeleteSelectedHeaderTracks(), "Delete goes to the selected tracks");
+    expect(requested == selected, "Delete asks for every selected track");
+
+    // An event selected afterwards owns Delete again.
+    requested.clear();
+    h.lanes->setArrangementEventSelection({ ArrangementEventId { ArrangementEventKind::MidiClip, h.trackA, clip } });
+    expect(!h.lanes->requestDeleteSelectedHeaderTracks() && requested.empty(), "a later event selection owns Delete");
+    h.lanes->setArrangementEventSelection({});
+
+    // The header menu deletes the selection too, and Stereo Out is never part of it.
+    if (masterTrack != kInvalidTrackId && h.lanes->visibleRowIndexForTrackForDiagnostics(masterTrack) >= 0)
+    {
+        h.lanes->handleHeaderSelectionClick(masterTrack, true);
+        expect(h.lanes->isHeaderMultiSelected(masterTrack), "a range can reach Stereo Out");
+    }
+    h.lanes->requestDeleteTrackForHeaderMenu(audioTrack);
+    expect(requested.size() >= 2 && std::find(requested.begin(), requested.end(), masterTrack) == requested.end()
+               && std::find(requested.begin(), requested.end(), audioTrack) != requested.end(),
+           "the menu deletes the selection without Stereo Out");
+    expect(h.lanes->deleteTrackMenuItemText(audioTrack) == "Delete " + juce::String((int) requested.size()) + " Tracks",
+           "the menu names the number of tracks");
+
+    // One undo step brings every row and instrument back; redo retires them again.
+    const int undoSteps = h.undo->undoStackSizeForDiagnostics();
+    const int rowsBefore = before->getNumTracks();
+    h.undo->executeUndoableMultiTrackDelete("Delete tracks", [&](MultiTrackDeleteUndoSides& sides) {
+        for (const TrackId tid : { h.trackA, h.trackB })
+        {
+            InstrumentTrackDeleteUndoSides instrument;
+            instrument.trackId = tid;
+            sides.instruments.push_back(instrument);
+            h.session.removeTrack(tid);
+        }
+        h.session.removeTrack(audioTrack);
+        return true;
+    });
+    const auto rowCount = [&h] { return h.session.loadSessionSnapshotForAudioThread()->getNumTracks(); };
+    expect(rowCount() == rowsBefore - 3, "three rows of different kinds are gone");
+    expect(h.undo->undoStackSizeForDiagnostics() == undoSteps + 1, "several tracks are one undo step");
+    h.undo->invokeUndoFromWindowShortcut();
+    expect(rowCount() == rowsBefore, "one undo restores every row");
+    expect(h.runtimesRestored == std::vector<TrackId>({ h.trackA, h.trackB }), "one undo restores every instrument");
+    h.undo->invokeRedoFromWindowShortcut();
+    expect(rowCount() == rowsBefore - 3, "redo deletes them all again");
+    expect(h.runtimesRetired == std::vector<TrackId>({ h.trackA, h.trackB }), "redo retires every instrument");
+    h.undo->invokeUndoFromWindowShortcut();
+    h.lanes->setOnDeleteTracksRequested(nullptr);
+}
+
 void testSnappedAudioDrags(Harness& h)
 {
     constexpr std::int64_t kBar = 96000;
@@ -1045,6 +1136,7 @@ int main()
     testSnappedDrags(harness, *lanes[0], *harness.controller(harness.trackA));
     testSnappedRulerSeek(harness);
     testSnappedAudioDrags(harness);
+    testMultiTrackDelete(harness);
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

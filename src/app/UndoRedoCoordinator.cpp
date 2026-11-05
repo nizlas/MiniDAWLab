@@ -177,6 +177,7 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
     {
         applyInstrumentTrackRuntimeSides(*bundle->instrumentTrackDelete, *bundle->timelineSnapshot);
     }
+    applyMultiTrackDeleteSides(*bundle);
     if (bundle->soloMemorySides.has_value())
     {
         // Narrow solo-memory step: write the recorded side back into exactly that memory
@@ -326,6 +327,7 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
     {
         applyInstrumentTrackRuntimeSides(*bundle->instrumentTrackDelete, *bundle->timelineSnapshot);
     }
+    applyMultiTrackDeleteSides(*bundle);
     if (bundle->soloMemorySides.has_value())
     {
         session_.setSoloMemoryTrackIds(bundle->soloMemorySides->memoryIndex,
@@ -384,6 +386,22 @@ void UndoRedoCoordinator::applyInstrumentTrackRuntimeSides(const InstrumentTrack
     else if (callbacks_.teardownDeletedInstrumentTrackRuntimeForRedo)
     {
         callbacks_.teardownDeletedInstrumentTrackRuntimeForRedo(sides.trackId);
+    }
+}
+
+void UndoRedoCoordinator::applyMultiTrackDeleteSides(const SessionHistoryRestoreBundle& bundle)
+{
+    if (!bundle.multiTrackDelete.has_value())
+    {
+        return;
+    }
+    for (const PluginUndoStepSides& sides : bundle.multiTrackDelete->plugins)
+    {
+        pluginHost_.importChain(sides.trackId, bundle.isRedo ? sides.after : sides.before);
+    }
+    for (const InstrumentTrackDeleteUndoSides& sides : bundle.multiTrackDelete->instruments)
+    {
+        applyInstrumentTrackRuntimeSides(sides, *bundle.timelineSnapshot);
     }
 }
 
@@ -480,7 +498,8 @@ void UndoRedoCoordinator::commitRecord(juce::String label,
                                        std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete,
                                        std::optional<SoloMemoryUndoSides> soloMemorySides,
                                        std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides,
-                                       std::optional<TrackColourUndoSides> trackColourSides)
+                                       std::optional<TrackColourUndoSides> trackColourSides,
+                                       std::optional<MultiTrackDeleteUndoSides> multiTrackDelete)
 {
     auto selection = std::move(pendingArrangementSelection_);
     pendingArrangementSelection_.reset();
@@ -493,7 +512,8 @@ void UndoRedoCoordinator::commitRecord(juce::String label,
                            std::move(soloMemorySides),
                            std::move(visualTrackGroupSides),
                            std::move(trackColourSides),
-                           std::move(selection));
+                           std::move(selection),
+                           std::move(multiTrackDelete));
 }
 
 void UndoRedoCoordinator::executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator)
@@ -621,6 +641,45 @@ void UndoRedoCoordinator::executeUndoableTrackDelete(
         writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableTrackDelete recorded label=\"" + label
                                    + "\" undoSize=" + juce::String(sessionHistory_.undoStackSize())
                                    + " redoSize=" + juce::String(sessionHistory_.redoStackSize()));
+    }
+}
+
+void UndoRedoCoordinator::executeUndoableMultiTrackDelete(
+    const juce::String& label,
+    std::function<bool(MultiTrackDeleteUndoSides& outSides)> mutator)
+{
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
+    std::shared_ptr<const SessionSnapshot> before = session_.loadSessionSnapshotForAudioThread();
+    if (before == nullptr)
+    {
+        return;
+    }
+    MultiTrackDeleteUndoSides sides;
+    if (!mutator(sides))
+    {
+        return;
+    }
+    std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
+    if (after == nullptr || after.get() == before.get())
+    {
+        return;
+    }
+    commitRecord(label,
+                 std::move(before),
+                 std::move(after),
+                 std::nullopt,
+                 std::nullopt,
+                 std::nullopt,
+                 std::nullopt,
+                 std::nullopt,
+                 std::nullopt,
+                 std::move(sides));
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
     }
 }
 
