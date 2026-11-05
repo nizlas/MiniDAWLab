@@ -198,6 +198,51 @@ bool pump(const std::function<bool()>& pred, const int ms)
 
 constexpr double kSr = 48000.0;
 
+juce::String ampliTubeSettings(const juce::MemoryBlock& state);
+
+/// An AmpliTube 4 state from the TSE_pt2 temp copy whose settings differ from `notLike`.
+juce::MemoryBlock otherAmpliTubeState(const juce::MemoryBlock& notLike)
+{
+    const juce::File f = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                             .getChildFile("dal-s0-cpu/TSE_pt2_261031/TSE_pt2.dalproj");
+    const juce::var root = juce::JSON::parse(f);
+    juce::MemoryBlock found;
+    std::function<void(const juce::var&)> walk = [&](const juce::var& v) {
+        if (found.getSize() > 0)
+        {
+            return;
+        }
+        if (auto* o = v.getDynamicObject())
+        {
+            if (o->getProperty("pluginVst3Path").toString().contains("AmpliTube 4"))
+            {
+                juce::MemoryOutputStream m;
+                if (juce::Base64::convertFromBase64(m, o->getProperty("pluginStateBase64").toString()))
+                {
+                    const juce::MemoryBlock b = m.getMemoryBlock();
+                    if (ampliTubeSettings(b).isNotEmpty() && ampliTubeSettings(b) != ampliTubeSettings(notLike))
+                    {
+                        found = b;
+                    }
+                }
+            }
+            for (const auto& kv : o->getProperties())
+            {
+                walk(kv.value);
+            }
+        }
+        else if (auto* arr = v.getArray())
+        {
+            for (const auto& e : *arr)
+            {
+                walk(e);
+            }
+        }
+    };
+    walk(root);
+    return found;
+}
+
 /// AmpliTube 4's settings from a JUCE VST3 state: the IComponent preset XML with the per-capture
 /// random `GUID` attribute removed (AmpliTube writes a new one on every getState).
 juce::String ampliTubeSettings(const juce::MemoryBlock& state)
@@ -637,6 +682,13 @@ void testAmpliTube(const juce::PluginDescription& amp)
             local->getStateInformation(localAfter);
             check(ampliTubeSettings(localAfter) == ampliTubeSettings(afterLoad),
                   "a reload in the helper gives the same settings as the same reload in-process");
+            juce::String names;
+            const auto& prms = local->getParameters();
+            for (int k = 0; k < juce::jmin(12, prms.size()); ++k)
+            {
+                names << prms[k]->getName(40) << "=" << juce::String(prms[k]->getValue(), 3) << (prms[k]->isAutomatable() ? "" : "(na)") << ", ";
+            }
+            info("AmpliTube parameters: " + juce::String(prms.size()) + ": " + names);
             local.release(); // leaked on purpose
         }
     }
@@ -656,12 +708,60 @@ void testAmpliTube(const juce::PluginDescription& amp)
         check(firstNonZero(ra) >= 0, "AmpliTube produces sound bs=" + juce::String(bs));
     }
 
-    // Editor: AmpliTube's real editor opens and closes in the helper.
+    // Editor round trip: open the real editor, change a setting while it is open, close it with
+    // the window's close button, save, reopen in a new instance, then Off / On.
     auto* a0 = asIso(v[0].get());
-    check(a0->openRemoteEditor("IsolatedInsertFocusedTests - AmpliTube 4"), "editor opens in the helper");
+    juce::MemoryBlock beforeEdit;
+    a0->getStateInformation(beforeEdit);
+    bool closedByUser = false;
+    a0->onRemoteEditorClosed = [&] { closedByUser = true; };
+    check(a0->openRemoteEditor("IsolatedInsertFocusedTests - AmpliTube 4"), "the real editor opens in the helper");
     pump([] { return false; }, 1500);
-    a0->closeRemoteEditor();
+    // AmpliTube's 2096 host parameters are unmapped automation slots, so a real setting change
+    // comes from its GUI or a state / preset. Apply another real AmpliTube setting from the
+    // project copy while the editor is open, as a preset load from DAL does.
+    const juce::MemoryBlock other = otherAmpliTubeState(beforeEdit);
+    check(other.getSize() > 0, "a second, different AmpliTube setting is available from the project copy");
+    if (other.getSize() > 0)
+    {
+        a0->setStateInformation(other.getData(), (int)other.getSize());
+    }
+    juce::MemoryBlock edited;
+    a0->getStateInformation(edited);
+    check(ampliTubeSettings(edited) != ampliTubeSettings(beforeEdit), "the setting changed while the editor is open");
+    check(host.sendTestFault(iso::TestFault::CloseEditorAsUser, 0, a0->helperInstanceId()), "editor close button");
+    check(pump([&] { return closedByUser; }, 5000), "closing the editor window reaches DAL (undo step and capture)");
     check(!a0->remoteEditorOpen(), "editor closed");
+    juce::MemoryBlock saved; // Save
+    a0->getStateInformation(saved);
+    check(ampliTubeSettings(saved) != ampliTubeSettings(beforeEdit), "the saved state carries the edit");
+    auto reopened = isolated(amp, kSr, 512); // reopen: a new instance from the saved bytes
+    reopened->setStateInformation(saved.getData(), (int)saved.getSize());
+    juce::MemoryBlock afterReopen;
+    reopened->getStateInformation(afterReopen);
+    check(ampliTubeSettings(afterReopen) == ampliTubeSettings(saved), "reopen keeps the edited settings");
+    // Off / On: the instance goes away with its captured state and comes back from it.
+    juce::MemoryBlock atOff;
+    reopened->getStateInformation(atOff);
+    reopened.reset();
+    auto backOn = isolated(amp, kSr, 512);
+    backOn->setStateInformation(atOff.getData(), (int)atOff.getSize());
+    juce::MemoryBlock afterOn;
+    backOn->getStateInformation(afterOn);
+    check(ampliTubeSettings(afterOn) == ampliTubeSettings(saved), "Off / On keeps the edited settings");
+    juce::AudioBuffer<float> heard(2, 512);
+    heard.clear();
+    for (int i = 0; i < 512; ++i)
+    {
+        heard.setSample(0, i, 0.2f * std::sin(0.05f * (float)i));
+        heard.setSample(1, i, 0.2f * std::sin(0.05f * (float)i));
+    }
+    for (int k = 0; k < 8; ++k)
+    {
+        processLaneBlock(*backOn, heard, kSr);
+    }
+    check(heard.getMagnitude(0, 512) > 0.0f, "the instance back On processes");
+    backOn.reset();
 
     // Destroy one with the others alive (the real destructor runs in the helper; a crash there is
     // recovered). Then the last ones end the helper.

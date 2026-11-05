@@ -59,6 +59,8 @@ enum class TestFault : std::int32_t
     CrashInProcessAfterBlocks = 3, // argument: blocks
     StallNextProcess = 4,          // argument: milliseconds; INT32_MAX = forever
     HangNextGetState = 5,          // argument: milliseconds
+    NudgeParameter = 6,            // argument: parameter index; a host-notifying change, as an editor makes
+    CloseEditorAsUser = 7,         // the editor window's close button
 };
 
 /// Bits of `SharedBlockHeader::transportFlags`.

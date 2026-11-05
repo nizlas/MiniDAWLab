@@ -4,6 +4,7 @@
 #include <juce_events/juce_events.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <cmath>
 #include <map>
 #include <memory>
 #include <thread>
@@ -452,6 +453,20 @@ private:
                 }
                 break;
             case TestFault::HangNextGetState: hangNextGetStateMs_ = arg; break;
+            case TestFault::NudgeParameter:
+                if (HostedInstance* h = find(id))
+                {
+                    const auto& params = h->plugin->getParameters();
+                    if (arg >= 0 && arg < params.size())
+                    {
+                        juce::AudioProcessorParameter* prm = params[arg];
+                        prm->beginChangeGesture();
+                        prm->setValueNotifyingHost(std::fmod(prm->getValue() + 0.37f, 1.0f));
+                        prm->endChangeGesture();
+                    }
+                }
+                break;
+            case TestFault::CloseEditorAsUser: closeEditor(id, true); break;
             case TestFault::None: break;
         }
     }
