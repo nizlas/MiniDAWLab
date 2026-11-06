@@ -1673,6 +1673,7 @@ bool ExperimentalInstrumentHost::installInstrumentInstanceForTests(std::unique_p
     owner->inst->addListener(&primaryRevisionBumpListener_);
     primarySemanticRevision_.bump();
     std::atomic_store_explicit(&activeOwner_, owner, std::memory_order_release);
+    refreshRestParameters(); // a new instance: re-read its tail, start awake
 
     const int totalCh = owner->inst->getTotalNumOutputChannels();
     const int scratchCh = juce::jmax(kStereoChannels, totalCh);
@@ -1803,6 +1804,26 @@ void ExperimentalInstrumentHost::enqueueAllNotesOffFromMessageThread()
     {
         midiIo_->uiPendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
         midiIo_->uiPendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
+    }
+}
+
+int ExperimentalInstrumentHost::pendingUiMidiEventCountForDiagnostics() const
+{
+    if (midiIo_ == nullptr)
+    {
+        return 0;
+    }
+    const juce::ScopedLock sl(midiIo_->midiLock);
+    return midiIo_->uiPendingMidi.getNumEvents();
+}
+
+void ExperimentalInstrumentHost::audioThread_discardPendingMidi() noexcept
+{
+    rtBlockMidi_.clear(); // keeps capacity: no allocation
+    if (midiIo_ != nullptr)
+    {
+        const juce::ScopedLock sl(midiIo_->midiLock);
+        midiIo_->uiPendingMidi.clear();
     }
 }
 
@@ -2199,6 +2220,7 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromVst3File(const juce::
     primarySemanticRevision_.bump();
 
     std::atomic_store_explicit(&activeOwner_, owner, std::memory_order_release);
+    refreshRestParameters(); // a new instance: re-read its tail, start awake
 
     const int totalCh = owner->inst->getTotalNumOutputChannels();
     const int scratchCh = juce::jmax(kStereoChannels, totalCh);
@@ -2577,6 +2599,7 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     primarySemanticRevision_.bump();
 
     std::atomic_store_explicit(&activeOwner_, owner, std::memory_order_release);
+    refreshRestParameters(); // a new instance: re-read its tail, start awake
 
     const int totalCh = owner->inst->getTotalNumOutputChannels();
     const int scratchCh = juce::jmax(kStereoChannels, totalCh);
@@ -4037,6 +4060,15 @@ void ExperimentalInstrumentHost::audioThread_renderGenerationStageImpl(const int
         }
     }
 
+    // Automatic rest: no MIDI this block, nothing held, and the instrument has provably nothing left
+    // to play (InsertChainRest.h). The scratch stays cleared and the add step adds nothing.
+    audioThread_trackHeldNotes(blockMidi);
+    const bool idleInput = blockMidi.isEmpty() && rtHeldNoteCount_ == 0 && rtSustainMask_ == 0;
+    if (rtRest_.shouldSkip(idleInput, rtRestParams_, rtRestSuspended_.load(std::memory_order_acquire)))
+    {
+        return;
+    }
+
     juce::AudioBuffer<float> view(
         scratchPtrs_.empty() ? nullptr : scratchPtrs_.data(), scratchCh, n);
 
@@ -4080,4 +4112,103 @@ void ExperimentalInstrumentHost::audioThread_renderGenerationStageImpl(const int
 
     rtDiag_processOkBlocks_.fetch_add(1, std::memory_order_relaxed);
     rtStageHasAudio_ = true; // scratch_ L/R hold the instance's output; the add step applies gain / pan
+    rtRest_.afterProcess(idleInput, peak <= insert_rest::kSilenceThreshold, n, rtRestParams_);
+}
+
+void ExperimentalInstrumentHost::audioThread_trackHeldNotes(const juce::MidiBuffer& delivered) noexcept
+{
+    for (const auto meta : delivered)
+    {
+        const juce::MidiMessage m = meta.getMessage();
+        const int ch = juce::jlimit(1, 16, m.getChannel()) - 1;
+        if (m.isNoteOn())
+        {
+            std::uint8_t& held = rtHeldNotes_[ch][m.getNoteNumber() & 127];
+            rtHeldNoteCount_ += held == 0 ? 1 : 0;
+            held = 1;
+        }
+        else if (m.isNoteOff())
+        {
+            std::uint8_t& held = rtHeldNotes_[ch][m.getNoteNumber() & 127];
+            rtHeldNoteCount_ -= held != 0 ? 1 : 0;
+            held = 0;
+        }
+        else if (m.isAllNotesOff() || m.isAllSoundOff())
+        {
+            for (std::uint8_t& held : rtHeldNotes_[ch])
+            {
+                rtHeldNoteCount_ -= held != 0 ? 1 : 0;
+                held = 0;
+            }
+            if (m.isAllSoundOff())
+            {
+                rtSustainMask_ = (std::uint16_t)(rtSustainMask_ & ~(1u << ch));
+            }
+        }
+        else if (m.isSustainPedalOn())
+        {
+            rtSustainMask_ = (std::uint16_t)(rtSustainMask_ | (1u << ch));
+        }
+        else if (m.isSustainPedalOff())
+        {
+            rtSustainMask_ = (std::uint16_t)(rtSustainMask_ & ~(1u << ch));
+        }
+    }
+}
+
+bool ExperimentalInstrumentHost::audioThread_restingAndIdle() noexcept
+{
+    if (!rtRest_.resting || rtRestSuspended_.load(std::memory_order_acquire) || !rtBlockMidi_.isEmpty() || rtHeldNoteCount_ != 0 || rtSustainMask_ != 0
+        || rtRestParams_.generation.load(std::memory_order_acquire) != rtRest_.seenGeneration)
+    {
+        return false;
+    }
+    if (proxyPlaybackView_.load(std::memory_order_acquire) != nullptr)
+    {
+        return false; // proxy branch: not this policy
+    }
+    if (midiIo_ != nullptr)
+    {
+        const juce::ScopedTryLock sl(midiIo_->midiLock);
+        return sl.isLocked() && midiIo_->uiPendingMidi.isEmpty();
+    }
+    return true;
+}
+
+void ExperimentalInstrumentHost::refreshRestParameters()
+{
+    const auto owner = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
+    insert_rest::TailKind kind = insert_rest::TailKind::Empty;
+    std::int64_t tailSamples = 0;
+    int latency = 0;
+    bool neverRest = editorWindow_ != nullptr;
+    std::uint64_t signature = (std::uint64_t)(std::uintptr_t)owner.get();
+    if (owner != nullptr && owner->inst != nullptr)
+    {
+        const double t = owner->inst->getTailLengthSeconds();
+        kind = insert_rest::classifyTail(t, insert_rest::TailKind::Empty);
+        tailSamples = kind == insert_rest::TailKind::Finite ? (std::int64_t)std::ceil(t * juce::jmax(1.0, sampleRate_)) : 0;
+        latency = juce::jmax(0, owner->inst->getLatencySamples());
+        // An instrument can make sound without MIDI (a transport-driven pattern, a latched
+        // arpeggio, a drone that starts late), so silence so far proves nothing about the next
+        // block: only a plug-in declaring itself an audio-processing effect may rest
+        // (InsertChainRest.h). Every instrument keeps running.
+        const juce::PluginDescription desc = owner->inst->getPluginDescription();
+        neverRest = neverRest || desc.isInstrument || !insert_rest::categoryAllowsRest(desc.category.toStdString());
+    }
+    signature = (signature * 1099511628211ull) ^ (std::uint64_t)tailSamples;
+    signature = (signature * 1099511628211ull) ^ (std::uint64_t)latency;
+    signature = (signature * 1099511628211ull) ^ (std::uint64_t)kind;
+    signature = (signature * 1099511628211ull) ^ (neverRest ? 7u : 5u);
+    if (signature == restSignature_)
+    {
+        return;
+    }
+    restSignature_ = signature;
+    rtRestParams_.tailSamples.store(tailSamples, std::memory_order_relaxed);
+    rtRestParams_.latencySamples.store(latency, std::memory_order_relaxed);
+    // No instrument loaded: nothing to judge (Empty never rests; the stage is not run anyway).
+    rtRestParams_.tailKind.store((int)kind, std::memory_order_relaxed);
+    rtRestParams_.neverRest.store(neverRest, std::memory_order_relaxed);
+    rtRestParams_.generation.fetch_add(1, std::memory_order_release);
 }

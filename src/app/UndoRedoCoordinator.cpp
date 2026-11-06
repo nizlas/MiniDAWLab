@@ -64,6 +64,44 @@ void UndoRedoCoordinator::onPluginUndoRecord(const juce::String& label, const Pl
     }
 }
 
+void UndoRedoCoordinator::setPowerChangeGuard(std::function<bool()> isTransportPlaying,
+                                              std::function<void(const juce::String&)> reportRefused)
+{
+    isTransportPlayingForPower_ = std::move(isTransportPlaying);
+    reportPowerRefused_ = std::move(reportRefused);
+}
+
+bool UndoRedoCoordinator::wouldRefuseForPower(const bool redo) const
+{
+    if (!isTransportPlayingForPower_ || !isTransportPlayingForPower_())
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> target
+        = redo ? sessionHistory_.peekRedoTimelineSnapshot() : sessionHistory_.peekUndoTimelineSnapshot();
+    const std::shared_ptr<const SessionSnapshot> live = session_.loadSessionSnapshotForAudioThread();
+    return target != nullptr && live != nullptr && SessionSnapshot::anyTrackOffDiffers(*live, *target);
+}
+
+bool UndoRedoCoordinator::refuseIfStepChangesPowerWhilePlaying(const bool redo)
+{
+    if (!wouldRefuseForPower(redo))
+    {
+        return false;
+    }
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine(juce::String("[UndoDiag] ") + (redo ? "invokeRedo" : "invokeUndo")
+                                   + " bail: step changes track Power while playing");
+    }
+    if (reportPowerRefused_)
+    {
+        reportPowerRefused_(juce::String(redo ? "Redo" : "Undo")
+                            + " would switch a track On or Off. Stop the transport first.");
+    }
+    return true;
+}
+
 void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
 {
     if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
@@ -110,6 +148,10 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
         return;
     }
     pluginHost_.flushOpenEditorParameterUndoSteps();
+    if (refuseIfStepChangesPowerWhilePlaying(false))
+    {
+        return;
+    }
     const std::optional<SessionHistoryRestoreBundle> bundle = sessionHistory_.popUndo();
     if (!bundle.has_value() || bundle->timelineSnapshot == nullptr)
     {
@@ -265,6 +307,10 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
         {
             writeUndoDiagnosticLogLine("[UndoDiag] invokeRedo bail: gestureInProgress");
         }
+        return;
+    }
+    if (refuseIfStepChangesPowerWhilePlaying(true))
+    {
         return;
     }
     const std::optional<SessionHistoryRestoreBundle> bundle = sessionHistory_.popRedo();

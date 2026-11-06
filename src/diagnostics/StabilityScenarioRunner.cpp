@@ -380,6 +380,14 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
         {
             req.perfIdleWindows = true;
         }
+        else if (a == "--all-off")
+        {
+            req.perfAllSourcesOff = true;
+        }
+        else if (a == "--save")
+        {
+            req.perfSaveAfterAllOff = true;
+        }
         else if (a == "--idle-gap")
         {
             if (i + 1 >= args.size())
@@ -9126,6 +9134,8 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
     const PerfGeneration generation = request.perfGeneration;
     const bool idleWindows = request.perfIdleWindows;
     const int idleGapSeconds = request.perfIdleGapSeconds;
+    const bool allSourcesOff = request.perfAllSourcesOff;
+    const bool saveAfterAllOff = request.perfSaveAfterAllOff;
 
     auto say = [this](const juce::String& s) { appendStabilityRunLine("  " + s); };
     auto baseline = std::make_shared<PerfProcessSample>();
@@ -9171,6 +9181,35 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                return true;
                            },
                            300 });
+
+    if (allSourcesOff)
+    {
+        steps_.push_back(Step{ "perf-profile: switch every source row Off",
+                               [this, say](juce::String& failReason) -> bool {
+                                   if (!hooks_.perf.switchSourceTracksOff)
+                                   {
+                                       failReason = "switchSourceTracksOff hook not installed";
+                                       return false;
+                                   }
+                                   say(hooks_.perf.switchSourceTracksOff());
+                                   return true;
+                               },
+                               20000 }); // the coordinator unloads one row per message-loop turn
+        steps_.push_back(Step{ "perf-profile: project load after Off (loaded vs processed)",
+                               [this, say, saveAfterAllOff](juce::String&) -> bool {
+                                   if (hooks_.perf.describeProjectLoad)
+                                   {
+                                       say(hooks_.perf.describeProjectLoad());
+                                   }
+                                   if (saveAfterAllOff && hooks_.saveProject)
+                                   {
+                                       hooks_.saveProject();
+                                       say("saved the project with every source row Off");
+                                   }
+                                   return true;
+                               },
+                               3000 });
+    }
 
     steps_.push_back(Step{ juce::String("perf-profile: mixer window ") + (mixerOpen ? "OPEN" : "closed"),
                            [this, say, mixerOpen, mixerOpenedHere](juce::String&) -> bool {

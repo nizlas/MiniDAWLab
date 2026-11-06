@@ -101,11 +101,25 @@
 #include <vector>
 
 #include "app/MainWindow.h"
+#include "plugins/isolation/IsolatedHostWorker.h"
+#include "plugins/isolation/IsolatedInsertHosting.h"
 #include "app/TransportControlsShortcutTarget.h"
 #include "instruments/ProxyRenderScheduler.h"
 
 void MiniDAWLabApplication::initialise(const juce::String& commandLine)
 {
+    // The shared isolated-insert helper (AmpliTube 4): no audio device, no settings, no window of
+    // its own until an editor is opened. It leaves by terminating itself, never through shutdown().
+    if (mini_daw::isolation::isIsolatedHelperCommandLine(commandLine))
+    {
+        vst3OopWorkerMode_ = true;
+        if (!mini_daw::isolation::startIsolatedHelper(commandLine))
+        {
+            quit();
+        }
+        return;
+    }
+
     const juce::StringArray workerArgv = mini_daw::rawScanWorkerArgsFromCommandLine(commandLine);
     if (mini_daw::isVst3RawScanWorkerArgv(workerArgv))
     {
@@ -120,6 +134,22 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // even early-initialisation crashes produce a dump. Not installed in the OOP scan worker
     // above: scan-worker crashes are contained by design and must not fill the dump folder.
     installCrashDumpHandler();
+
+    // Isolation of AmpliTube 4 into the shared helper is on by default. Diagnostic switches:
+    // `--no-plugin-isolation` keeps every plug-in in this process; `--isolate-plugin-for-test <id>`
+    // also isolates the plug-in with that identifier string (A/B measurements only).
+    {
+        const juce::StringArray args = getCommandLineParameterArray();
+        if (args.contains("--no-plugin-isolation"))
+        {
+            mini_daw::isolation::IsolatedPluginPolicy::setEnabled(false);
+        }
+        const int at = args.indexOf("--isolate-plugin-for-test");
+        if (at >= 0 && at + 1 < args.size())
+        {
+            mini_daw::isolation::IsolatedPluginPolicy::setAdditionalIdentifierForTests(args[at + 1]);
+        }
+    }
 
     // Hidden verification flag (never exposed in UI): crash deliberately so the dump/breadcrumb/
     // symbolization pipeline can be checked end to end. See scripts/symbolize-crash.ps1.
@@ -462,6 +492,11 @@ void MiniDAWLabApplication::shutdown()
     }
 
     writeLastOperationBreadcrumb("app shutdown begin");
+
+    // End the isolated-insert helper first, by terminating it: AmpliTube 4's destructor never runs
+    // and no stand-in talks to a helper while the window tears down below.
+    mini_daw::isolation::IsolatedHostConnection::get().terminateForTeardown("app exit");
+    mini_daw::isolation::IsolatedHostConnection::get().setUiHooks({});
 
     // Stability Slice 1: remove the audio callback *first* so the audio thread can never touch
     // plugin hosts / instrument runtimes / session state while the window (which owns the

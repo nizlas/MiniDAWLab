@@ -238,6 +238,28 @@ public:
     /// Experimental lane header **Power** (on = processed); default on when the track shell exists.
     [[nodiscard]] bool isPowerOn() const noexcept { return powerOn_; }
     void setPowerOn(bool on) noexcept;
+    /// [Message thread] Follow the session's Off flag without writing it (undo or a snapshot
+    /// restore changed it). Republishes the render snapshot when the mirror changes.
+    void syncPowerMirrorFromSession() noexcept;
+
+    // --- Track Off (Power): the Primary plug-in is unloaded --------------------------------------
+    // While the track is Off the host holds no plug-in. The controller keeps the plug-in fields of
+    // the instrument project block (kind, path, descriptor, version, state blob, loaded-on-save)
+    // as a **retained Primary row**. Every block it builds while the host has no instrument
+    // carries those fields, so Save, autosave, Duplicate and undo keep the exact state.
+
+    /// [Message thread] Capture the live Primary into the retained row (fresh state blob). False
+    /// when nothing is loaded, or the capture came back empty (then nothing is retained and the
+    /// caller must not unload: the state only lives in the plug-in).
+    bool captureRetainedPrimaryRowForUnload();
+    [[nodiscard]] bool hasRetainedPrimaryRow() const noexcept { return retainedPrimaryRow_.has_value(); }
+    /// True when the retained row names a plug-in to load (not an empty instrument shell).
+    [[nodiscard]] bool retainedPrimaryRowNeedsLoad() const noexcept;
+    /// [Message thread] Arm the project-autoload fields from the retained row and run the
+    /// matching autoload on `host`, even though the session row is still Off. The retained row
+    /// is dropped when the plug-in loaded; otherwise it stays for saving and `outWarning` says
+    /// why. Returns true when the host holds an instrument afterwards.
+    bool reloadPrimaryFromRetainedRow(ExperimentalInstrumentHost& host, juce::String& outWarning);
 
     /// Experimental lane header **Mute**; default off when the track shell exists.
     [[nodiscard]] bool isMuted() const noexcept { return muted_; }
@@ -424,12 +446,12 @@ public:
     /// [Message thread] P1H mode change (UI): persisted project state — the CALLER marks the
     /// project dirty on a true return (§18.3: dirties the project, never part of musical undo;
     /// the undo DTO strips it, see stripExperimentalInstrumentTrackPluginFieldsForUndo).
-    /// Unrecognized values repair to "auto" like the project reader. Returns true when changed.
+    /// Unrecognized values repair to "manual" like the project reader. Returns true when changed.
     bool setProxyUpdateModeFromUi(const juce::String& mode) noexcept
     {
-        const juce::String valid = (mode == "onSave" || mode == "manual" || mode == "off")
+        const juce::String valid = (mode == "auto" || mode == "onSave" || mode == "off")
                                        ? mode
-                                       : juce::String("auto");
+                                       : juce::String("manual");
         if (valid == proxyUpdateMode_)
         {
             return false;
@@ -784,6 +806,15 @@ private:
 
     juce::String requiredKitName_;
     juce::String pendingPluginStateBase64_;
+    bool pendingPluginWasLoadedOnSave_ = false;
+    /// Plug-in fields kept while the Primary is unloaded (track Off); see
+    /// `captureRetainedPrimaryRowForUnload`.
+    std::optional<ProjectFileExperimentalInstrumentTrackV1> retainedPrimaryRow_;
+    /// Set only inside `reloadPrimaryFromRetainedRow`: the autoload runs although the row is Off.
+    bool loadWhileOff_ = false;
+    /// The autoload paths call this first: on an Off row it moves the pending plug-in fields into
+    /// the retained row and returns true (nothing is instantiated).
+    bool deferPendingAutoloadWhileOff();
     bool pendingProjectGrooveAutoload_ = false;
     bool pendingProjectHalionSonicAutoload_ = false;
     bool pendingProjectGenericVst3Autoload_ = false;
@@ -822,7 +853,7 @@ private:
     /// write this record.
     mutable proxy_checkpoint::SavedPrimaryBlobRevisionRecord savedPrimaryBlob_;
     /// Per-destination update mode (steering §18.1): "auto" | "onSave" | "manual" | "off".
-    juce::String proxyUpdateMode_ { "auto" };
+    juce::String proxyUpdateMode_ { "manual" };
     juce::File proxyAssetSourceHint_; ///< P1H Save As rehoming (runtime-only, see accessor)
     /// v21 Secondary instrument configuration (P2; steering §17, PID-009). Fully independent of
     /// the Primary fields above and never a proxy-fingerprint input. The state blob is `mutable`

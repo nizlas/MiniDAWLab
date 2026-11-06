@@ -1,0 +1,11 @@
+# AudioStripParallelFocusedTests: failing checks, identical in base 8472feb and PR 4ad4784, runs 1 and 2
+-- mixed session: serial-hint vs parallel bit-identity, combined batch, Mute/Off --
+[FAIL] parallel: blocks were dispatched to the pool
+[FAIL] parallel: worker threads ran jobs
+[FAIL] live row's Pre insert covered exactly every playing sample (no dup/loss)
+[FAIL] live row's Pre insert covered exactly every playing sample (no dup/loss)
+-- cycle wrap: split block, segment order, per-segment playhead, clip-content regression --
+[FAIL] wrap: insert chain covered every sample exactly once (no duplication, no loss)
+[FAIL] wrap: insert chain covered every sample exactly once (no duplication, no loss)
+85 checks, 6 failure(s)
+exit=1

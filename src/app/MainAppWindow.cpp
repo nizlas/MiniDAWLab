@@ -65,11 +65,13 @@
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
 #include "plugins/PluginInsertHost.h"
+#include "plugins/isolation/IsolatedInsertHosting.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "app/AppProxyRenderEngine.h"
 #include "instruments/ProxyPlaybackCoordinator.h"
 #include "instruments/ProxyStatusModel.h"
 #include "instruments/ProxyUpdatePolicyService.h"
+#include "app/TrackPowerCoordinator.h"
 #include "instruments/InstrumentTrackController.h"
 #include "instruments/ProxyAssetStore.h"
 #include "instruments/ProxyOfflineSequencer.h"
@@ -801,6 +803,7 @@ public:
             // P2 (steering §17): the Secondary fallback. Consulted only when neither Primary nor
             // a usable Current proxy can play — the ensure call lazily instantiates the Secondary
             // (message thread; existing safe load path) and latches per-descriptor failures.
+            pbDeps.destinationPoweredOff = [this](const TrackId tid) { return isTrackPoweredOff(tid); };
             pbDeps.secondaryUsable = [this](const TrackId tid) {
                 return instrumentRuntimeCoordinator_ != nullptr
                        && instrumentRuntimeCoordinator_->ensureSecondaryInstrumentLoadedForTrack(tid);
@@ -999,8 +1002,9 @@ public:
                     = instrumentRuntimeCoordinator_ != nullptr
                           ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
                           : nullptr;
-                return c != nullptr ? c->getProxyUpdateMode() : juce::String("auto");
+                return c != nullptr ? c->getProxyUpdateMode() : juce::String("manual");
             };
+            polDeps.destinationPoweredOff = [this](const TrackId tid) { return isTrackPoweredOff(tid); };
             polDeps.identityForTrack = [this](const TrackId tid) {
                 proxy_policy::ProxyUpdatePolicyService::DestinationIdentity id;
                 if (proxyRenderEngine_ != nullptr)
@@ -1087,6 +1091,7 @@ public:
                     = c != nullptr ? c->getProxyMetadata() : nullptr;
                 in.hasMetadata = meta != nullptr;
                 in.silentGeneration = meta != nullptr && meta->silentGeneration;
+                in.trackPoweredOff = isTrackPoweredOff(tid);
                 return proxy_status::buildProxyStatusView(in);
             };
             proxyUi.setUpdateMode = [this](const TrackId tid, const int modeComboIndex) {
@@ -2189,6 +2194,10 @@ public:
                     {
                         proxyUpdatePolicyService_->noteProjectChanged();
                     }
+                    if (trackPowerCoordinator_ != nullptr)
+                    {
+                        trackPowerCoordinator_->noteProjectChanged();
+                    }
                 },
                 // P1H onProjectLoaded: capture asset source hints for later Save As rehoming.
                 [this](const juce::File& projectFolder) {
@@ -2335,6 +2344,146 @@ public:
                                            juce::Colours::white.withAlpha(0.25f));
         savingProjectToastLabel_.setInterceptsMouseClicks(false, false);
         addChildComponent(savingProjectToastLabel_);
+        trackPowerToastLabel_.setJustificationType(juce::Justification::centred);
+        trackPowerToastLabel_.setFont(juce::FontOptions(14.0f));
+        trackPowerToastLabel_.setColour(juce::Label::backgroundColourId, juce::Colour(0xee2a2a33));
+        trackPowerToastLabel_.setColour(juce::Label::textColourId, juce::Colours::white);
+        trackPowerToastLabel_.setColour(juce::Label::outlineColourId, juce::Colours::white.withAlpha(0.25f));
+        trackPowerToastLabel_.setInterceptsMouseClicks(false, false);
+        addChildComponent(trackPowerToastLabel_);
+
+        // Track Power: plug-in instances follow the Off flag (docs/RESOURCE_SAVING_2026-11-05.md §3).
+        {
+            pluginHost_.setTrackDormancyQuery([this](const TrackId tid) { return isTrackPoweredOff(tid); });
+            pluginHost_.setPowerLifecycleLog([](const juce::String& line) {
+                appendTrackPowerDiagnosticLine(line);
+                writeLastOperationBreadcrumb("track power: " + line);
+            });
+            TrackPowerCoordinator::Callbacks pc;
+            pc.loadSnapshot = [this] { return session.loadSessionSnapshotForAudioThread(); };
+            pc.setTrackOff = [this](const TrackId tid, const bool off) {
+                InstrumentTrackController* const ctl = instrumentRuntimeCoordinator_ != nullptr
+                                                           ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid)
+                                                           : nullptr;
+                if (ctl != nullptr)
+                {
+                    ctl->setPowerOn(!off);
+                }
+                else
+                {
+                    session.setTrackOff(tid, off);
+                }
+            };
+            pc.waitForAudioCallbackExit = [this] { return playbackEngine_.waitForAudioCallbackExit(250.0); };
+            pc.instrumentHost = [this](const TrackId tid) -> ExperimentalInstrumentHost* {
+                return instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid)
+                                                                : nullptr;
+            };
+            pc.instrumentController = [this](const TrackId tid) -> InstrumentTrackController* {
+                return instrumentRuntimeCoordinator_ != nullptr
+                           ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                           : nullptr;
+            };
+            pc.hasSecondaryInstance = [this](const TrackId tid) {
+                ExperimentalInstrumentHost* const h = instrumentRuntimeCoordinator_ != nullptr
+                                                          ? instrumentRuntimeCoordinator_->getSecondaryInstrumentHostForTrack(tid)
+                                                          : nullptr;
+                return h != nullptr && h->hasInstrument();
+            };
+            pc.retireSecondaryInstance = [this](const TrackId tid) {
+                if (instrumentRuntimeCoordinator_ != nullptr)
+                {
+                    instrumentRuntimeCoordinator_->removeSecondaryRuntimeForTrack(tid);
+                }
+            };
+            pc.transportBusy = [this] { return trackLanesView.isStructuralTimelineEditBlocked(); };
+            pc.onRuntimeChanged = [this] {
+                refreshInstrumentUi();
+                if (inspectorPanel_.isShowing())
+                {
+                    inspectorPanel_.repaint();
+                }
+            };
+            const auto showPowerToast = [this](const juce::String& text) {
+                trackPowerToastLabel_.setText(text, juce::dontSendNotification);
+                if (text.isEmpty())
+                {
+                    trackPowerToastLabel_.setVisible(false);
+                    return;
+                }
+                const int w = juce::jlimit(200, juce::jmax(200, getWidth() - 40),
+                                           juce::GlyphArrangement::getStringWidthInt(trackPowerToastLabel_.getFont(), text) + 40);
+                trackPowerToastLabel_.setBounds(juce::jmax(0, (getWidth() - w) / 2), 48, w, 34);
+                trackPowerToastLabel_.setVisible(true);
+                trackPowerToastLabel_.toFront(false);
+            };
+            pc.showProgress = showPowerToast;
+            pc.reportLoadProblem = [](const juce::String& text) {
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Track On", text);
+            };
+            trackPowerCoordinator_ = std::make_unique<TrackPowerCoordinator>(pluginHost_, std::move(pc));
+            // Power changes only while stopped, also when undo / redo would switch a row On or Off.
+            undoRedoCoordinator_->setPowerChangeGuard(
+                [this] { return trackLanesView.isStructuralTimelineEditBlocked(); },
+                [this, showPowerToast](const juce::String& text) {
+                    showPowerToast(text);
+                    juce::Component::SafePointer<juce::Component> self(this);
+                    juce::Timer::callAfterDelay(3000, [self, this, text] {
+                        if (self != nullptr && trackPowerToastLabel_.getText() == text)
+                        {
+                            trackPowerToastLabel_.setVisible(false);
+                        }
+                    });
+                });
+            trackLanesView.setOnRequestTrackPowerOn([this](const TrackId tid) {
+                return trackPowerCoordinator_ != nullptr ? trackPowerCoordinator_->requestPowerOn(tid) : false;
+            });
+
+            // The shared AmpliTube 4 helper: restore progress in the same toast as Power, a failure
+            // banner with Retry, and the transport rule (restore only while stopped).
+            {
+                namespace iso = mini_daw::isolation;
+                iso::IsolatedHostConnection::UiHooks h;
+                h.transportBusy = [this] {
+                    return anyRecordingInProgress()
+                           || (recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive())
+                           || transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+                };
+                h.showProgress = [this, showPowerToast](const juce::String& text) {
+                    showPowerToast(text);
+                    if (!text.startsWith("Restoring plugins"))
+                    {
+                        juce::Component::SafePointer<juce::Component> self(this);
+                        juce::Timer::callAfterDelay(6000, [self, this, text] {
+                            if (self != nullptr && trackPowerToastLabel_.getText() == text)
+                            {
+                                trackPowerToastLabel_.setVisible(false);
+                            }
+                        });
+                    }
+                };
+                h.hideProgress = [showPowerToast] { showPowerToast({}); };
+                h.showFailure = [](const juce::String& message, std::function<void()> retry) {
+                    juce::AlertWindow::showAsync(juce::MessageBoxOptions()
+                                                     .withIconType(juce::MessageBoxIconType::WarningIcon)
+                                                     .withTitle("AmpliTube 4 host")
+                                                     .withMessage(message)
+                                                     .withButton("Retry")
+                                                     .withButton("Later"),
+                                                 [retry](const int result) {
+                                                     if (result == 1 && retry)
+                                                     {
+                                                         retry();
+                                                     }
+                                                 });
+                };
+                h.blockingChanged = [this] {
+                    refreshInstrumentUi();
+                    repaint();
+                };
+                iso::IsolatedHostConnection::get().setUiHooks(std::move(h));
+            }
+        }
         addAndMakeVisible(inspectorPanel_);
         addAndMakeVisible(inspectorResizeSplitter_);
         addAndMakeVisible(rulerView);
@@ -2795,7 +2944,10 @@ public:
     /// start and track creation are refused until finalize released the gates.
     [[nodiscard]] bool isProjectLoadInProgress() const noexcept
     {
-        return projectIoCoordinator_ != nullptr && projectIoCoordinator_->isLoadInProgress();
+        // Restoring the isolated plug-in host after a crash takes the same gates as a project
+        // load: transport start, record, structural edits, Power, undo / redo, save, open.
+        return (projectIoCoordinator_ != nullptr && projectIoCoordinator_->isLoadInProgress())
+               || mini_daw::isolation::IsolatedHostConnection::get().isBlockingCommands();
     }
 
     void invokeUndoFromWindowShortcut() override
@@ -6277,6 +6429,21 @@ private:
         inspectorView_.refreshFromSession();
         updateMainWindowTitleWithDirtyState();
         tickPlaybackUiLoadDiagnostics();
+        // Automatic insert rest: a plug-in's reported tail can follow its parameters (1 Hz).
+        if (++insertRestRefreshTicks_ >= 10)
+        {
+            insertRestRefreshTicks_ = 0;
+            pluginHost_.refreshInsertRestParameters();
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            for (int i = 0; snap != nullptr && instrumentRuntimeCoordinator_ != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                if (ExperimentalInstrumentHost* const h
+                    = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(snap->getTrack(i).getId()))
+                {
+                    h->refreshRestParameters();
+                }
+            }
+        }
     }
 
     /// Part E: one aggregated `playback-ui-load.log` line per second (audio callback cost + UI
@@ -6871,9 +7038,16 @@ private:
             }
             InstrumentTrackController* const ctl
                 = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
-            if (ctl != nullptr)
+            if (ctl != nullptr && ctl->isPowerOn())
             {
-                ctl->setPowerOn(!ctl->isPowerOn());
+                ctl->setPowerOn(false);
+            }
+            else if (ctl != nullptr)
+            {
+                if (!trackLanesView.requestTrackPowerOn(tid))
+                {
+                    return false;
+                }
             }
             else if (const auto snap = session.loadSessionSnapshotForAudioThread())
             {
@@ -6882,7 +7056,14 @@ private:
                 {
                     return false;
                 }
-                session.setTrackOff(tid, !snap->getTrack(idx).isTrackOff());
+                if (!snap->getTrack(idx).isTrackOff())
+                {
+                    session.setTrackOff(tid, true);
+                }
+                else if (!trackLanesView.requestTrackPowerOn(tid))
+                {
+                    return false;
+                }
             }
             activateTrackLikeHeaderClickForMixer(tid);
             return true;
@@ -7539,6 +7720,36 @@ private:
                      + (now == requested ? " (applied)" : " (driver kept its own size)");
             return now;
         };
+        P.switchSourceTracksOff = [this]() -> juce::String {
+            int switched = 0;
+            if (const auto snap = session.loadSessionSnapshotForAudioThread())
+            {
+                for (int i = 0; i < snap->getNumTracks(); ++i)
+                {
+                    const Track& t = snap->getTrack(i);
+                    const TrackKind k = t.getKind();
+                    if (t.isTrackOff() || (k != TrackKind::Audio && k != TrackKind::Instrument && k != TrackKind::Midi))
+                    {
+                        continue;
+                    }
+                    InstrumentTrackController* const ctl
+                        = instrumentRuntimeCoordinator_ != nullptr
+                              ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(t.getId())
+                              : nullptr;
+                    if (ctl != nullptr)
+                    {
+                        ctl->setPowerOn(false);
+                    }
+                    else
+                    {
+                        session.setTrackOff(t.getId(), true);
+                    }
+                    ++switched;
+                }
+            }
+            // The coordinator unloads one row per message-loop turn from here on.
+            return "switched Off: " + juce::String(switched) + " source rows";
+        };
         P.describeProjectLoad = [this]() -> juce::String {
             juce::String s;
             const auto snap = session.loadSessionSnapshotForAudioThread();
@@ -7756,6 +7967,22 @@ private:
         P.renderPoolText = [this]() -> juce::String {
             const auto st = playbackEngine_.instrumentRenderPoolStats();
             juce::String s;
+            s << "rest: " << pluginHost_.insertRestDiagnosticsText();
+            {
+                std::uint64_t rested = 0, processed = 0;
+                const auto snap = session.loadSessionSnapshotForAudioThread();
+                for (int i = 0; snap != nullptr && instrumentRuntimeCoordinator_ != nullptr && i < snap->getNumTracks(); ++i)
+                {
+                    if (const ExperimentalInstrumentHost* const h
+                        = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(snap->getTrack(i).getId()))
+                    {
+                        rested += h->restedBlocksForDiagnostics();
+                        processed += h->processedBlocksForDiagnostics();
+                    }
+                }
+                s << " instrumentBlocks rested=" << (juce::int64)rested << " processed=" << (juce::int64)processed
+                  << " liveInserts=" << pluginHost_.liveInsertInstanceCount() << " | ";
+            }
             s << "workers=" << playbackEngine_.instrumentRenderWorkerCount()
               << " (threads incl. callback=" << (playbackEngine_.instrumentRenderWorkerCount() + 1) << ")"
               << " serialForced=" << (playbackEngine_.isInstrumentRenderSerialForDiagnostics() ? "yes" : "no")
@@ -8388,6 +8615,14 @@ private:
                || (recordingCoordinator_ != nullptr && recordingCoordinator_->isMidiTakeActive());
     }
 
+    /// The row is switched Off (Power) in the published snapshot.
+    [[nodiscard]] bool isTrackPoweredOff(const TrackId tid) const
+    {
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        const int index = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+        return index >= 0 && snap->getTrack(index).isTrackOff();
+    }
+
     Transport& transport;
     Session& session;
     PluginInsertHost& pluginHost_;
@@ -8462,6 +8697,11 @@ private:
     /// the instrument runtime so it is destroyed first: its destructor detaches the engine bus
     /// and unregisters the device callbacks while hosts and controllers still exist.
     std::unique_ptr<LiveMidiInputCoordinator> liveMidiInputCoordinator_;
+    /// Track Power: unloads an Off row's plug-ins and loads them back for On. Declared after the
+    /// instrument runtime so it is destroyed (and its timer stopped) first.
+    std::unique_ptr<TrackPowerCoordinator> trackPowerCoordinator_;
+    juce::Label trackPowerToastLabel_;
+    int insertRestRefreshTicks_ = 0;
 
     /// When Audio Settings is open; auto-clears when the dialog-owned view is destroyed.
     juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;

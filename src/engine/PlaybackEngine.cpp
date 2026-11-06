@@ -49,6 +49,7 @@
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
+#include "plugins/isolation/IsolatedProcessDeadline.h"
 #include "transport/Transport.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -457,6 +458,7 @@ void PlaybackEngine::publishExperimentalInstrumentPlaybackSnapshot(
     std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot> snapshot) noexcept
 {
     experimentalInstrumentPlaybackSnapshot_.store(std::move(snapshot), std::memory_order_release);
+    applyPluginRestSuspension(); // hosts that just joined follow the current setting
 }
 
 void PlaybackEngine::setExperimentalInstrumentDeviceLifecycleHooks(
@@ -1134,6 +1136,19 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     const AudioCallbackSectionClear callbackSectionClear { audioCallbackInProcessingSection_,
                                                            audioCallbackPhase_ };
 
+    // One absolute deadline for every isolated-stage wait of this callback, in any lane (plan
+    // D.3): start + block duration − a reserve for the mixing that follows the last stage.
+    {
+        const double srForDeadline = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+        if (srForDeadline > 0.0 && numSamples > 0)
+        {
+            const double budgetSeconds = (double)numSamples / srForDeadline;
+            namespace dl = mini_daw::isolation::deadline;
+            dl::publishCallbackDeadline(dl::qpcNow()
+                                        + (std::int64_t)(budgetSeconds * 0.80 * (double)dl::qpcPerSecond()));
+        }
+    }
+
     // Load diagnostics: two clock reads per block, folded into relaxed counters on the way out
     // (covers the early-return offline-gate path as well). Never read for synchronization.
     // Opt-in profiler (`--stability-perf-profile`): one relaxed load when off; when on, the
@@ -1735,9 +1750,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 continue;
             }
             const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
-            if (srcTr.getKind() != TrackKind::Audio)
+            if (srcTr.getKind() != TrackKind::Audio || srcTr.isTrackOff())
             {
-                continue;
+                continue; // an Off row has nothing to render ahead
             }
             if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
             {
@@ -1939,7 +1954,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         const PluginProcessTransportContext blockContext = makeInsertProcessContext(t0);
         int jobCount = 0;
         const auto addJob = [&](ExperimentalInstrumentHost* const h, const int combineTrackIndex) noexcept {
-            if (h == nullptr || jobCount >= InstrumentRenderPool::kMaxJobs || h->audioThread_isProxySelectedNow())
+            // A resting instrument with nothing queued gets no job: the serial add step below sees
+            // it rest in one cheap check (its inserts still run there for their own tails).
+            if (h == nullptr || jobCount >= InstrumentRenderPool::kMaxJobs || h->audioThread_isProxySelectedNow()
+                || h->audioThread_restingAndIdle())
             {
                 return;
             }
@@ -2100,6 +2118,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
                 if (tr.isTrackOff())
                 {
+                    // An Off host is never processed, so MIDI routed to it this block (MIDI To,
+                    // live input, audition) would pile up and burst out when it is switched On.
+                    entry->host->audioThread_discardPendingMidi();
+                    if (entry->auditionHost != nullptr && entry->auditionHost != entry->host)
+                    {
+                        entry->auditionHost->audioThread_discardPendingMidi();
+                    }
                     fillPlayEdgePeekOnly("sessionOff");
                     continue;
                 }
@@ -3300,9 +3325,43 @@ void PlaybackEngine::invokeExperimentalInstrumentBeginBlocks(
     }
 }
 
+void PlaybackEngine::setPluginRestSuspended(const bool suspended) noexcept
+{
+    pluginRestSuspendedByCaller_.store(suspended, std::memory_order_release);
+    applyPluginRestSuspension();
+}
+
+void PlaybackEngine::applyPluginRestSuspension() noexcept
+{
+    const bool suspended = pluginRestSuspendedByCaller_.load(std::memory_order_acquire)
+                           || offlineRenderGateDepth_.load(std::memory_order_seq_cst) > 0;
+    if (pluginHost_ != nullptr)
+    {
+        pluginHost_->setRestSuspended(suspended);
+    }
+    if (const auto snap = experimentalInstrumentPlaybackSnapshot_.load(std::memory_order_acquire))
+    {
+        for (const auto& e : snap->entries)
+        {
+            if (e.host != nullptr)
+            {
+                e.host->setRestSuspended(suspended);
+            }
+            if (e.auditionHost != nullptr)
+            {
+                e.auditionHost->setRestSuspended(suspended);
+            }
+        }
+    }
+}
+
 bool PlaybackEngine::beginOfflineRenderGate() noexcept
 {
     const bool becameActive = offlineRenderGateDepth_.fetch_add(1, std::memory_order_seq_cst) == 0;
+    if (becameActive)
+    {
+        applyPluginRestSuspension(); // an export never rests: it must equal an uninterrupted render
+    }
     if (becameActive && readAhead_ != nullptr)
     {
         // The offline render processes the SAME live chains on the message thread: an
@@ -3329,6 +3388,10 @@ bool PlaybackEngine::endOfflineRenderGate() noexcept
 {
     const int previous = offlineRenderGateDepth_.fetch_sub(1, std::memory_order_seq_cst);
     jassert(previous > 0);
+    if (previous == 1)
+    {
+        applyPluginRestSuspension();
+    }
     if (previous == 1 && readAhead_ != nullptr)
     {
         readAhead_->resumeWorker();
@@ -3726,6 +3789,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
 
             if (tr.isTrackOff())
             {
+                entry->host->audioThread_discardPendingMidi(); // same as the realtime path
                 continue;
             }
             // Same as the realtime path: mute / fader −∞ are gain 0, the host still processes so

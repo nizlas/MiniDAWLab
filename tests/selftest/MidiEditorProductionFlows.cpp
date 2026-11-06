@@ -1191,6 +1191,62 @@ void testColourAndSnapshots()
 }
 } // namespace
 
+// An Off row holds no instrument: the MIDI editor still opens, edits and undoes its notes,
+// nothing loads the instrument, and audition stays silent.
+void testOffRowEditor()
+{
+    World world;
+    world.hostB.prepareForDevice(kRate, kBlock);
+    world.ctlB.setPowerOn(false);
+    const auto offNow = [&world] {
+        const auto snap = world.session.loadSessionSnapshotForAudioThread();
+        return snap->getTrack(snap->findTrackIndexById(world.idB)).isTrackOff();
+    };
+    expect(offNow() && !world.hostB.hasInstrument(), "off row: B is Off and holds no instrument");
+
+    const auto bId = world.addClip(world.ctlB, 0, 192000, 0, { makeNote(960, 60, 80) }, "B");
+    world.addMember(world.idB, bId, &world.ctlB, &world.hostB);
+    world.show(world.ctlB, bId);
+    auto* roll = world.rollOrNull();
+    auto* clip = world.ctlB.getClipById(bId);
+    expect(roll != nullptr && clip != nullptr, "off row: the MIDI editor opens on the Off row's clip");
+    if (roll == nullptr || clip == nullptr)
+    {
+        return;
+    }
+    publishLayout(*roll);
+    expect(MidiEditorProductionFlowAccess::noteBounds(*roll, 0).has_value(), "off row: its note is shown");
+
+    const auto from = centreOf(world, *roll, *clip, 60);
+    dragRoll(*roll, from, from.translated(60.0f, 0.0f), nullptr);
+    clip = world.ctlB.getClipById(bId);
+    const auto movedTo = findPitch(*clip, 60)->startTick;
+    expect(movedTo > 960, "off row: a note can be moved in the editor");
+
+    clickRoll(*roll, centreOf(world, *roll, *clip, 60), juce::ModifierKeys::leftButtonModifier);
+    float left[kBlock] {};
+    float right[kBlock] {};
+    float* channels[] = { left, right };
+    world.hostB.audioThread_beginAudioBlock(kBlock);
+    world.hostB.audioThread_processBlockAndAddToOutputs(channels, 2, kBlock);
+    float peak = 0.0f;
+    for (int i = 0; i < kBlock; ++i)
+    {
+        peak = juce::jmax(peak, std::abs(left[i]), std::abs(right[i]));
+    }
+    pump(950);
+    expect(peak == 0.0f && !world.hostB.hasInstrument() && offNow(),
+           "off row: audition is silent and does not load the instrument; the row stays Off");
+
+    world.undo->invokeUndoFromWindowShortcut();
+    clip = world.ctlB.getClipById(bId);
+    expect(clip != nullptr && findPitch(*clip, 60)->startTick == 960 && offNow(),
+           "off row: undo of the note edit works and leaves the row Off");
+    world.undo->invokeRedoFromWindowShortcut();
+    clip = world.ctlB.getClipById(bId);
+    expect(clip != nullptr && findPitch(*clip, 60)->startTick == movedTo, "off row: redo of the note edit works");
+}
+
 int runMidiEditorProductionFlows()
 {
     testSnappedNoteEdits();
@@ -1198,6 +1254,7 @@ int runMidiEditorProductionFlows()
     testClipboard();
     testExtend();
     testAudition();
+    testOffRowEditor();
     testColourAndSnapshots();
     if (gFail != 0)
     {

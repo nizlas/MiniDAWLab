@@ -1832,12 +1832,18 @@ stale/missing proxies are current (§16.6).
 
 * Storage (Recommended): per-destination `proxyUpdateMode` persisted at v20 (§12.2), values
   `"auto" | "onSave" | "manual" | "off"`.
-* Default policy: **newly created** instrument destinations default to `"off"` — proxy
-  generation is an explicit per-track choice (most instruments exist on both collaborators'
-  computers), and the mode is serialized explicitly so save/reload preserves it. This creation
-  default is deliberately separate from the legacy load rule: an **absent** `proxyUpdateMode`
-  key in an existing project file keeps its historical meaning `"auto"` (earlier writers
-  omitted the field for Auto); explicitly stored values are always preserved.
+* Default policy (revision 6, 2026-11-05): automatic rendering is **opt-in**. Newly created
+  instrument destinations default to `"manual"`, and an **absent** or unrecognized
+  `proxyUpdateMode` key reads as `"manual"`. Writers always store the mode, `"auto"` included.
+  Earlier writers omitted the key for Auto, so an Auto chosen in such a file cannot be told
+  apart from an unset mode and now reads as Manual; this behaviour change was approved.
+  Explicitly stored `"auto"`, `"onSave"`, `"manual"` and `"off"` keep their meaning.
+* Manual still plays an existing current proxy by the normal source priority and offers
+  Render now; nothing renders automatically at load, on a plug-in notification, on Stale or on
+  a missing proxy.
+* A destination whose **track is switched Off** (Power) never queues or starts a render in any
+  mode, a running job is cancelled when the track goes Off, and Render now / Retry are
+  unavailable with an explanation. Its proxy files and metadata stay untouched.
 
 ### 18.2 Save and autosave (Locked)
 

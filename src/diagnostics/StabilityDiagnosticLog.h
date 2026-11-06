@@ -15,6 +15,10 @@ void appendMixdownDiagnosticLine(const juce::String& message);
 /// Appends one timestamped line to `track-delete-diag.log` (mirrors to juce::Logger).
 void appendTrackDeleteDiagnosticLine(const juce::String& message);
 
+/// Appends one timestamped line to `track-power-diag.log`: Track Off unloads and On reloads,
+/// one line per plug-in, so a crash inside a plug-in's destructor names the plug-in.
+void appendTrackPowerDiagnosticLine(const juce::String& message);
+
 /// Overwrites `last-operation.txt` with one timestamped status line. Written at the
 /// start/end/failure of risky operations so a hard crash leaves a breadcrumb of what
 /// the app was doing last. Keep messages short (e.g. "mixdown wav start").

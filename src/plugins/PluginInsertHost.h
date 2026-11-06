@@ -22,6 +22,7 @@
 // See `docs/PHASE_PLAN.md` Phase 8 and `docs/ARCHITECTURE_PRINCIPLES.md` Plugin host section.
 // =============================================================================
 
+#include "plugins/InsertChainRest.h"
 #include "plugins/InsertSlotRuntime.h"
 #include "plugins/PluginEditorWindows.h"
 #include "plugins/PluginTrackSlot.h"
@@ -32,6 +33,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -87,11 +89,42 @@ public:
     /// a value copy, so processors cannot retain mutable host state.
     [[nodiscard]] juce::Optional<PositionInfo> getPosition() const override;
 
+    /// [Same processing thread] The transport of the segment last set (automatic rest).
+    [[nodiscard]] bool isPlayingForRest() const noexcept { return playing_; }
+    [[nodiscard]] std::int64_t timelineSampleForRest() const noexcept { return timelineSample_; }
+
 private:
     juce::AudioPlayHead::PositionInfo position_;
+    bool playing_ = false;
+    std::int64_t timelineSample_ = 0;
 };
 
 // Immutable view exchanged with the audio callback (release-store / acquire-load).
+/// Automatic rest of one row's insert chain: Pre and Post stages separately (InsertChainRest.h).
+/// Co-owned by every published entry of the row so a republished map keeps the measured state.
+/// Also listens to every instance of the row: a parameter or processor change, on any thread,
+/// wakes both stages. Kept for the host's lifetime: `restRuntimes_` is never erased, the host's
+/// destructor clears `chains_` and the pending closes before its members go, and `offRetired_` is
+/// declared after it, so every instance is gone before its listener.
+struct InsertChainRestRuntime final : juce::AudioProcessorListener
+{
+    insert_rest::Params params[2]; ///< [0] = Pre, [1] = Post
+    insert_rest::State state[2];
+    /// [Message thread] What the params were computed from; a change bumps the generation.
+    std::uint64_t signature[2] { 0, 0 };
+
+    /// [Any thread] Work again and re-measure (parameter, state or preset change).
+    void wake() noexcept
+    {
+        for (auto& p : params)
+        {
+            p.wake.fetch_add(1, std::memory_order_release);
+        }
+    }
+    void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override { wake(); }
+    void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails&) override { wake(); }
+};
+
 struct PluginAudioThreadMap
 {
     struct SlotProc
@@ -114,6 +147,8 @@ struct PluginAudioThreadMap
         /// This chain's transport playhead, installed on every instance of the entry and co-owned
         /// here so it outlives every published map that references it (Stage A1, see class note).
         std::shared_ptr<InsertProcessPlayHead> playHead;
+        /// Automatic rest of this row's stages (never null for a published entry).
+        std::shared_ptr<InsertChainRestRuntime> rest;
     };
     std::vector<Entry> entries;
 };
@@ -192,6 +227,58 @@ public:
 
     /// Remove instances without undo (e.g. track deleted from session).
     void evictPluginForTrackNoUndo(TrackId trackId) noexcept;
+
+    /// [Message thread] Re-read every active insert's reported tail, latency, MIDI input and open
+    /// editor into the rest parameters; a change wakes that stage. Cheap; call about once a second
+    /// (a plug-in's tail can change with its parameters).
+    void refreshInsertRestParameters();
+    /// Rested / processed stage blocks since start, and stages resting right now (diagnostics).
+    [[nodiscard]] juce::String insertRestDiagnosticsText() const;
+    /// Offline export: every stage processes (the export must equal an uninterrupted render).
+    void setRestSuspended(const bool suspended) noexcept { restSuspended_.store(suspended, std::memory_order_release); }
+
+    // --- Track Off (Power): dormant inserts --------------------------------------------------
+    // An Off track holds no insert instances. Each slot stays in the chain as a **dormant
+    // placeholder**: the unavailable-placeholder shape (identity, opaque state, Active/Bypass,
+    // slot id, stage) with `dormant` set, shown as "<name> (Off)". `exportChain` re-emits it,
+    // so Save, autosave, undo and Duplicate keep the state captured when the track went Off.
+
+    /// [Message thread] True for a track whose inserts must stay dormant (production: the
+    /// session row is Off). `importChain` / `importChainNoUndo` then build dormant placeholders
+    /// and never instantiate the plug-in — project load, undo, redo and Duplicate of an Off row.
+    void setTrackDormancyQuery(std::function<bool(TrackId)> query) noexcept { dormancyQuery_ = std::move(query); }
+    /// Optional: one line before each Off unload / On load of a plug-in (crash forensics).
+    void setPowerLifecycleLog(std::function<void(const juce::String&)> log) noexcept { powerLog_ = std::move(log); }
+
+    enum class DormancyResult
+    {
+        NothingToDo, ///< no live instance on the track
+        Done,        ///< every instance captured, released and destroyed
+        NotDrained,  ///< exclusive access was not acknowledged; the chain is unchanged and live
+    };
+
+    /// [Message thread] Unload every live insert instance of `trackId`: close editors, publish a
+    /// map without them, then under exclusive access (callback drained, read-ahead paused and
+    /// acknowledged) capture each state, release and destroy. A timeout captures nothing and
+    /// destroys nothing: the slots are put back and `NotDrained` is returned.
+    DormancyResult makeTrackInsertsDormant(TrackId trackId);
+
+    [[nodiscard]] bool hasDormantInserts(TrackId trackId) const noexcept;
+    [[nodiscard]] int countDormantInserts(TrackId trackId) const noexcept;
+    [[nodiscard]] bool hasLiveInsertInstances(TrackId trackId) const noexcept;
+    /// Live insert instances over all tracks (diagnostics).
+    [[nodiscard]] int liveInsertInstanceCount() const noexcept;
+
+    /// [Message thread] Instantiate the first dormant slot of `trackId` with its saved state and
+    /// publish the chain. One plug-in per call, so a caller can spread a chain over message-loop
+    /// turns. A plug-in that cannot be created becomes an ordinary unavailable placeholder (state
+    /// kept) and `errorOut` names it. Returns false when no dormant slot was left.
+    bool wakeNextDormantInsert(TrackId trackId, juce::String& nameOut, juce::String& errorOut);
+    /// [Message thread] Destroy one insert instance that an Off unload released at least
+    /// `minAgeMs` ago. Returns false when none is due. Unloaded instances are no longer published
+    /// or processed; only their destructor waits.
+    bool destroyNextOffRetiredInsert(double minAgeMs);
+    [[nodiscard]] int offRetiredInsertCount() const noexcept { return (int)offRetired_.size(); }
 
     void removePlugin(TrackId trackId);
 
@@ -497,6 +584,9 @@ private:
         /// (`occupied == true`) carries the saved path / identifier / opaque state untouched so
         /// `exportChain` can re-emit it. Default (`occupied == false`) for live rows.
         PluginInsertDescriptor unavailableDescriptor;
+        /// The placeholder holds the state of a live plug-in unloaded because the track is Off
+        /// (not a missing plug-in). Waking the track instantiates it again.
+        bool dormant = false;
 
         [[nodiscard]] bool isUnavailablePlaceholder() const noexcept
         {
@@ -519,6 +609,9 @@ private:
     void closeEditorsForTrack(TrackId trackId);
     void closeEditorForSlot(TrackId trackId, InsertSlotId slotId);
     void importChainNoUndo(TrackId trackId, const PluginTrackChain& chain);
+    /// Create, prepare and restore one live slot from a descriptor. Empty on failure (`whyNot`).
+    std::optional<LiveInsertSlot> instantiateLiveSlot(TrackId trackId, const PluginInsertDescriptor& desc,
+                                                      juce::String& whyNot);
 
     /// In-place undo of plug-in state. `Busy` means exclusive access was not obtained, so the
     /// live instance is left as it is; the caller must not rebuild the chain on that result.
@@ -566,6 +659,11 @@ private:
     /// [Message thread] Release resources, set stereo I/O, `setBusesLayout` when supported, `prepareToPlay`.
     /// Returns whether main bus is 2-in / 2-out.
     [[nodiscard]] bool tryPrepareStereoInsert(juce::AudioPluginInstance& inst, double sr, int bs);
+    /// [Message thread] In-process instance, or a stand-in in the shared helper for isolated plug-ins.
+    [[nodiscard]] std::unique_ptr<juce::AudioPluginInstance> createInsertInstance(const juce::PluginDescription& desc,
+                                                                                double sr,
+                                                                                int bs,
+                                                                                juce::String& err);
     void logStereoLayoutFailure(TrackId trackId) const;
 
     /// [Message thread] Retires one track's live slots: moves them out of `chains_`, republishes the
@@ -575,8 +673,24 @@ private:
     juce::AudioPluginFormatManager formatManager_;
     std::unordered_map<TrackId, std::vector<LiveInsertSlot>> chains_;
     std::function<void()> realtimeDrainAfterPublish_;
+    std::function<bool(TrackId)> dormancyQuery_;
+    std::unordered_map<TrackId, std::shared_ptr<InsertChainRestRuntime>> restRuntimes_;
+    std::atomic<bool> restSuspended_ { false };
+    std::shared_ptr<InsertChainRestRuntime> restRuntimeForTrack(TrackId trackId);
+    /// [Message thread] Recompute one row's rest params from its live slots; bump on change.
+    void updateRestParams(TrackId trackId, InsertChainRestRuntime& rest, bool forceWake);
+    std::function<void(const juce::String&)> powerLog_;
     /// Parked by `detachAllInstancesForProjectClose` until released one at a time.
     std::vector<std::unique_ptr<juce::AudioPluginInstance>> projectClosePending_;
+    /// Off: instances already captured, unpublished and released, destroyed later one per call to
+    /// `destroyNextOffRetiredInsert` (a destructor never runs in the same turn as the release).
+    struct OffRetired
+    {
+        std::unique_ptr<juce::AudioPluginInstance> instance;
+        TrackId trackId = kInvalidTrackId;
+        double releasedAtMs = 0.0;
+    };
+    std::vector<OffRetired> offRetired_;
     std::vector<juce::String> projectClosePendingNames_;
     InsertSlotId nextInsertSlotId_ = 1;
 

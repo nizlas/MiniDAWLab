@@ -3,6 +3,7 @@
 #include "engine/ReadAheadRenderer.h"
 
 #include "engine/ReadAheadStartupConfig.h"
+#include "plugins/isolation/IsolatedProcessDeadline.h"
 
 #include <chrono>
 
@@ -1098,6 +1099,15 @@ bool ReadAheadRenderer::workerRenderOneSegment(Row& row) noexcept
         return false;
     }
     const std::int64_t startAudible = seg.start + row.playbackShift;
+    // Isolated stages in this segment wait at most one block duration per ring slot of lead
+    // (their own deadline on this thread; never the device callback's).
+    if (contextTemplate.sampleRate > 0.0)
+    {
+        namespace dl = mini_daw::isolation::deadline;
+        dl::setThreadDeadline(dl::qpcNow()
+                              + (std::int64_t)((double)blockSizeSamples_ / contextTemplate.sampleRate
+                                               * (double)juce::jmax(1, depth_) * (double)dl::qpcPerSecond()));
+    }
     if (startAudible < 0 || seg.destFrame + seg.run > blockSizeSamples_)
     {
         row.workerSelfStopped.store(true, std::memory_order_release);

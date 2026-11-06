@@ -408,6 +408,7 @@ namespace
                 proxyModeComboBox_.setSelectedId(pv.modeComboIndex + 1, juce::dontSendNotification);
                 proxyModeComboGuard_ = false;
                 proxyRenderNowButton_.setEnabled(pv.canRenderNow);
+                proxyRenderNowButton_.setTooltip(pv.renderNowTooltip);
                 proxyCancelButton_.setEnabled(pv.canCancel);
                 proxyRetryButton_.setEnabled(pv.canRetry);
             }

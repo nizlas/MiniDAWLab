@@ -1,0 +1,1 @@
+2026-11-05T16:38:08.938+01:00 project load end ok: C:\Users\nicla\AppData\Local\Temp\dal-rs-tse\TSE_pt2_261031\TSE_pt2-off.dalproj

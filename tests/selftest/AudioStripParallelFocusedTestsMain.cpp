@@ -424,6 +424,10 @@ struct Harness
 
     Harness() : engine(transport, session, nullptr, nullptr, &pluginHost)
     {
+        // These checks count every processBlock call to prove scheduling (no duplicate or lost
+        // block). Automatic rest skips digitally silent blocks on purpose, so it is off here; rest
+        // with the pool is covered by InstrumentParallelFocusedTests (bit identity with rest on).
+        engine.setPluginRestSuspended(true);
         // Production wiring (Main.cpp, Stability Slice 3): after the host publishes a realtime map
         // that dropped live instances, DRAIN the in-flight callback before they are destroyed.
         // Without this hook `removePlugin` destroys immediately after the publish, racing any

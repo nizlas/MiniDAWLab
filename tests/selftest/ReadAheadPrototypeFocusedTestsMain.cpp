@@ -426,6 +426,9 @@ struct Harness
 
     explicit Harness(const int readAheadDepth) : engine(transport, session, nullptr, nullptr, &pluginHost)
     {
+        // Contiguity checks record every processBlock position; automatic rest skips digitally
+        // silent blocks on purpose, so it is off for these scheduling checks.
+        engine.setPluginRestSuspended(true);
         if (readAheadDepth > 0)
         {
             engine.enableExperimentalReadAheadForTests(readAheadDepth);

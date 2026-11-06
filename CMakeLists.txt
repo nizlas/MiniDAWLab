@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.4.0 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.4.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,6 +62,7 @@ target_sources(MiniDAWLab PRIVATE
     src/app/LiveMidiInputCoordinator.cpp
     src/engine/LiveMidiInputBus.cpp
     src/app/TrackLanesEditCoordinator.cpp
+    src/app/TrackPowerCoordinator.cpp
     src/app/TransportLayoutHelper.cpp
     src/app/TransportPlayPauseStopController.cpp
     src/app/Vst3PluginPickerCoordinator.cpp
@@ -70,6 +71,8 @@ target_sources(MiniDAWLab PRIVATE
     src/instruments/InstrumentTrackController.cpp
     src/plugins/ExperimentalInstrumentHost.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
+    src/plugins/isolation/IsolatedHostWorker.cpp
     src/plugins/PluginDiscovery.cpp
     src/plugins/InstrumentCatalog.cpp
     src/plugins/Vst3ChildProcessScan.cpp
@@ -300,6 +303,7 @@ juce_add_console_app(PluginInsertTempoFocusedTests PRODUCT_NAME "PluginInsertTem
 target_sources(PluginInsertTempoFocusedTests PRIVATE
     tests/selftest/PluginInsertTempoFocusedTestsMain.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp)
 target_include_directories(PluginInsertTempoFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(PluginInsertTempoFocusedTests PRIVATE
@@ -343,6 +347,7 @@ target_sources(MixdownPreGainFocusedTests PRIVATE
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/transport/Transport.cpp)
 target_include_directories(MixdownPreGainFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -401,6 +406,7 @@ target_sources(EventEnvelopeFocusedTests PRIVATE
     src/io/ProjectFile.cpp
     src/plugins/ExperimentalInstrumentHost.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/plugins/Vst3ChildProcessScan.cpp
     src/plugins/PluginDiscovery.cpp
@@ -445,6 +451,7 @@ juce_generate_juce_header(EventEnvelopeFocusedTests)
 juce_add_console_app(InsertPersistenceFocusedTests PRODUCT_NAME "InsertPersistenceFocusedTests")
 target_sources(InsertPersistenceFocusedTests PRIVATE
     tests/selftest/InsertPersistenceFocusedTestsMain.cpp
+    src/app/TrackPowerCoordinator.cpp
     src/diagnostics/StabilityDiagnosticLog.cpp
     src/diagnostics/ProjectLoadDiagnosticLog.cpp
     src/diagnostics/UndoDiagnosticFileLog.cpp
@@ -460,6 +467,7 @@ target_sources(InsertPersistenceFocusedTests PRIVATE
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/transport/Transport.cpp)
 target_include_directories(InsertPersistenceFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -502,6 +510,7 @@ target_sources(InsertAudibleFocusedTests PRIVATE
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/transport/Transport.cpp)
 target_include_directories(InsertAudibleFocusedTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -573,6 +582,7 @@ target_sources(InsertPresetFocusedTests PRIVATE
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/transport/Transport.cpp)
 target_include_directories(InsertPresetFocusedTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -625,6 +635,7 @@ target_sources(MidiEditorCohortFocusedTests PRIVATE
     src/plugins/PluginDiscovery.cpp
     src/plugins/PluginEditorWindows.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/Vst3ChildProcessScan.cpp
     src/transport/Transport.cpp
     src/ui/CollapsibleSideStrip.cpp
@@ -704,6 +715,7 @@ target_sources(ArrangementMidiEventFocusedTests PRIVATE
     src/plugins/PluginDiscovery.cpp
     src/plugins/PluginEditorWindows.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/Vst3ChildProcessScan.cpp
     src/transport/Transport.cpp
     src/ui/ClipWaveformView.cpp
@@ -772,6 +784,7 @@ target_sources(ExportLevelFocusedTests PRIVATE
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/transport/Transport.cpp)
 target_include_directories(ExportLevelFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -833,6 +846,7 @@ target_sources(InstrumentParallelFocusedTests PRIVATE
     src/io/ProjectFile.cpp
     src/plugins/ExperimentalInstrumentHost.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/plugins/Vst3ChildProcessScan.cpp
     src/plugins/PluginDiscovery.cpp
@@ -902,6 +916,7 @@ target_sources(AudioStripParallelFocusedTests PRIVATE
     src/io/ProjectFile.cpp
     src/plugins/ExperimentalInstrumentHost.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/plugins/Vst3ChildProcessScan.cpp
     src/plugins/PluginDiscovery.cpp
@@ -971,6 +986,7 @@ target_sources(ReadAheadPrototypeFocusedTests PRIVATE
     src/io/ProjectFile.cpp
     src/plugins/ExperimentalInstrumentHost.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/plugins/Vst3ChildProcessScan.cpp
     src/plugins/PluginDiscovery.cpp
@@ -1270,6 +1286,7 @@ target_sources(SoloFocusedTests PRIVATE
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/transport/Transport.cpp
     src/ui/TrackHeaderView.cpp
@@ -1327,6 +1344,7 @@ target_sources(CollapsibleTrackGroupFocusedTests PRIVATE
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
     src/plugins/PluginInsertHost.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp
     src/plugins/PluginEditorWindows.cpp
     src/transport/Transport.cpp
     src/ui/ClipWaveformView.cpp
@@ -1396,3 +1414,25 @@ add_custom_command(
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyOptionalLame.cmake"
     COMMENT "Optional: copy local LAME encoder for MP3 export (if external_tools/lame/lame.exe exists)"
     VERBATIM)
+
+# -----------------------------------------------------------------------------
+# IsolatedInsertFocusedTests: the shared isolated-insert helper (AmpliTube 4). Starts the built
+# MiniDAWLab.exe as helper; deterministic checks with DAL Mono Delay, real AmpliTube 4 when
+# installed. Needs the MiniDAWLab target built first.
+# -----------------------------------------------------------------------------
+juce_add_console_app(IsolatedInsertFocusedTests PRODUCT_NAME "IsolatedInsertFocusedTests")
+target_sources(IsolatedInsertFocusedTests PRIVATE
+    tests/selftest/IsolatedInsertFocusedTestsMain.cpp
+    src/plugins/isolation/IsolatedInsertHosting.cpp)
+target_include_directories(IsolatedInsertFocusedTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(IsolatedInsertFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(IsolatedInsertFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)

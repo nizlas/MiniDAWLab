@@ -55,6 +55,7 @@
 #include "instruments/ProxyRenderScheduler.h"
 #include "instruments/ProxyRenderTypes.h"
 #include "instruments/ProxyUpdatePolicyService.h"
+#include "plugins/InsertChainRest.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -1159,8 +1160,8 @@ namespace
             expect(old.experimentalInstrumentTracks.size() == 1U
                        && !old.experimentalInstrumentTracks[0].hasProxy
                        && old.experimentalInstrumentTracks[0].pluginVersion.isEmpty()
-                       && old.experimentalInstrumentTracks[0].proxyUpdateMode == "auto",
-                   "p1b: v19 loads with no proxy, no plugin version, update mode auto");
+                       && old.experimentalInstrumentTracks[0].proxyUpdateMode == "manual",
+                   "p1b: v19 loads with no proxy, no plugin version, update mode manual");
         }
 
         // Malformed proxy metadata / malformed timeline rate never fail the load (PI-025).
@@ -1195,8 +1196,8 @@ namespace
                    "p1b: malformed proxy object degrades to no-proxy");
             expect(back.timelineSampleRate == 48000.0,
                    "p1b: malformed timeline rate falls back to deviceSampleRateAtSave");
-            expect(back.experimentalInstrumentTracks[0].proxyUpdateMode == "auto",
-                   "p1b: unrecognized proxyUpdateMode repairs to auto");
+            expect(back.experimentalInstrumentTracks[0].proxyUpdateMode == "manual",
+                   "p1b: unrecognized proxyUpdateMode repairs to manual");
         }
 
         // Newer versions stay rejected (unchanged contract).
@@ -1217,7 +1218,7 @@ namespace
         {
             ProjectFileExperimentalInstrumentTrackV1 et = makeV20FixtureProject().experimentalInstrumentTracks[0];
             stripExperimentalInstrumentTrackPluginFieldsForUndo(et);
-            expect(!et.hasProxy && et.pluginVersion.isEmpty() && et.proxyUpdateMode == "auto",
+            expect(!et.hasProxy && et.pluginVersion.isEmpty() && et.proxyUpdateMode == "manual",
                    "p1b: undo strip clears proxy metadata, plugin version and update mode");
         }
 
@@ -7727,6 +7728,7 @@ namespace
         bool recording = false;
         std::map<TrackId, bool> quiescent; // absent = quiescent (eligible)
         std::set<TrackId> primaryMissing;  // exists=false but derived identity available
+        std::set<TrackId> poweredOff;      // track switched Off (Power)
         std::vector<TrackId> observedChanges;
         std::unique_ptr<proxy_policy::ProxyUpdatePolicyService> policy;
 
@@ -7775,6 +7777,7 @@ namespace
             };
             d.onRenderRelevantChangeObserved
                 = [this](const TrackId t) { observedChanges.push_back(t); };
+            d.destinationPoweredOff = [this](const TrackId t) { return poweredOff.count(t) != 0; };
             policy = std::make_unique<proxy_policy::ProxyUpdatePolicyService>(std::move(d));
         }
 
@@ -8069,6 +8072,390 @@ namespace
         expect(pf.policy->retry(TrackId{ 1 }) && pf.finishJob(TrackId{ 1 })
                    && pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Current,
                "p1h-manual: explicit Retry renders and publishes to Current");
+    }
+
+    // Automatic rendering is opt-in (2026-11-05): a missing or unknown mode is Manual, the
+    // writer always stores the mode, and an Off track never renders in any mode.
+    void testProxyPolicyOptInAndPoweredOffTrack()
+    {
+        using proxy_policy::ProxyUpdateMode;
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        expect(proxy_policy::parseProxyUpdateMode({}) == ProxyUpdateMode::Manual
+                   && proxy_policy::parseProxyUpdateMode("bogus") == ProxyUpdateMode::Manual
+                   && proxy_policy::parseProxyUpdateMode("auto") == ProxyUpdateMode::AutoAfterIdle,
+               "opt-in: a missing or unknown mode parses as Manual, only explicit auto is Auto");
+
+        // Writer: every mode is explicit on disk, Auto included, and reads back unchanged.
+        const juce::File file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                    .getChildFile("dal_optin_modes.dalproj");
+        for (const char* mode : { "auto", "onSave", "manual", "off" })
+        {
+            ProjectFileV1 data = makeV20FixtureProject();
+            data.experimentalInstrumentTracks[0].proxyUpdateMode = mode;
+            const auto wr = writeProjectFile(file, data);
+            juce::var root;
+            (void)juce::JSON::parse(file.loadFileAsString(), root);
+            bool explicitOnDisk = false;
+            if (const auto* exArr = root.getProperty("experimentalInstrumentTracks", {}).getArray())
+            {
+                explicitOnDisk = !exArr->isEmpty()
+                                 && (*exArr)[0].getProperty("proxyUpdateMode", {}).toString() == mode;
+            }
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(file, back);
+            expect(wr.wasOk() && rr.wasOk() && explicitOnDisk
+                       && back.experimentalInstrumentTracks[0].proxyUpdateMode == mode,
+                   std::string("opt-in: mode is written explicitly and kept: ") + mode);
+        }
+        (void)file.deleteFile();
+
+        // A destination whose mode string is empty (old file, no key) never renders on its own.
+        {
+            PolicyFixture pf;
+            pf.modes[TrackId{ 1 }] = {};
+            pf.addCurrentDest(TrackId{ 1 }, "a");
+            pf.policy->tick();
+            pf.edit(TrackId{ 1 }, "b");
+            pf.advance(proxy_policy::kAutoIdleDelayMs * 3.0);
+            expect(!pf.hasActiveJob(TrackId{ 1 })
+                       && pf.status(TrackId{ 1 }).state == RS::WaitingForManual,
+                   "opt-in: a destination without a saved mode waits for Render now");
+            expect(pf.policy->renderNow(TrackId{ 1 }) && pf.finishJob(TrackId{ 1 }),
+                   "opt-in: Render now still renders a destination without a saved mode");
+        }
+
+        // An Off track: Auto never fires, Render now and Retry are refused, a running job is
+        // cancelled, and back On a still-stale Auto destination re-arms a full window.
+        {
+            PolicyFixture pf;
+            pf.modes[TrackId{ 1 }] = "auto";
+            pf.addCurrentDest(TrackId{ 1 }, "a");
+            pf.policy->tick();
+            pf.poweredOff.insert(TrackId{ 1 });
+            pf.edit(TrackId{ 1 }, "b");
+            pf.advance(proxy_policy::kAutoIdleDelayMs * 2.0);
+            expect(!pf.hasActiveJob(TrackId{ 1 }), "off-track: Auto never renders an Off track");
+            pf.modes[TrackId{ 1 }] = "manual";
+            expect(!pf.policy->renderNow(TrackId{ 1 }) && !pf.policy->retry(TrackId{ 1 })
+                       && !pf.hasActiveJob(TrackId{ 1 }),
+                   "off-track: Render now and Retry are refused while the track is Off");
+            pf.poweredOff.clear();
+            pf.fx.engine.holdRender = true;
+            expect(pf.policy->renderNow(TrackId{ 1 }) && pf.hasActiveJob(TrackId{ 1 }),
+                   "off-track: back On, Render now starts a job");
+            pf.poweredOff.insert(TrackId{ 1 });
+            pf.policy->tick();
+            pf.fx.engine.holdRender = false;
+            expect(pf.fx.pumpUntilTerminal(TrackId{ 1 })
+                       && pf.fx.sched->jobStatus(TrackId{ 1 }).phase == ProxyJobPhase::Cancelled,
+                   "off-track: switching Off cancels the running job");
+            pf.modes[TrackId{ 1 }] = "auto";
+            pf.poweredOff.clear();
+            pf.advance(1000.0);
+            expect(pf.status(TrackId{ 1 }).state == RS::WaitingForIdle
+                       && !pf.hasActiveJob(TrackId{ 1 }),
+                   "off-track: back On, a stale Auto destination waits a full idle window");
+            pf.advance(proxy_policy::kAutoIdleDelayMs);
+            expect(pf.hasActiveJob(TrackId{ 1 }) || pf.fx.sched->destinationState(TrackId{ 1 })
+                                                         == ProxyDestinationState::Current,
+                   "off-track: the re-armed Auto window renders when it elapses");
+        }
+
+        // Status model: Render now is unavailable with an explanation on an Off track.
+        {
+            proxy_status::ProxyStatusInputs in;
+            in.destinationState = ProxyDestinationState::Stale;
+            in.policy.mode = ProxyUpdateMode::Manual;
+            expect(proxy_status::buildProxyStatusView(in).canRenderNow,
+                   "off-track: a stale Manual destination offers Render now while On");
+            in.trackPoweredOff = true;
+            const auto v = proxy_status::buildProxyStatusView(in);
+            expect(!v.canRenderNow && v.renderNowTooltip.contains("Off")
+                       && v.tooltip.contains("Turn the track On"),
+                   "off-track: Render now is disabled and explained while the track is Off");
+        }
+    }
+
+
+    //==========================================================================
+    // Automatic insert rest (InsertChainRest.h): a simulated stage driven block by block.
+    // `plugin` maps (input block) -> output block; the stage skips it while resting.
+    //==========================================================================
+    struct RestSim
+    {
+        insert_rest::Params params;
+        insert_rest::State state;
+        int block = 512;
+        double rate = 48000.0;
+        std::int64_t processCalls = 0;
+        std::int64_t blocks = 0;
+        /// Returns the output peak of one block whose input is `in` (constant level).
+        std::function<float(float in, std::int64_t blockIndex)> plugin;
+
+        float run(const float in)
+        {
+            std::vector<float> l((size_t)block, in), r((size_t)block, in);
+            float* ch[2] = { l.data(), r.data() };
+            const bool inSilent = insert_rest::isSilent(ch, 2, block);
+            float out = in;
+            if (!state.shouldSkip(inSilent, params))
+            {
+                ++processCalls;
+                out = plugin(in, blocks);
+                std::fill(l.begin(), l.end(), out);
+                std::fill(r.begin(), r.end(), out);
+                state.afterProcess(inSilent, insert_rest::isSilent(ch, 2, block), block, params);
+            }
+            ++blocks;
+            return out;
+        }
+        void setTail(const double seconds, const insert_rest::TailKind kind, const int latency = 0)
+        {
+            params.tailSamples = (std::int64_t)std::ceil(seconds * rate);
+            params.tailKind = (int)kind;
+            params.latencySamples = latency;
+            params.generation.fetch_add(1);
+        }
+        [[nodiscard]] int blocksFor(const double seconds) const { return (int)std::ceil(seconds * rate / block); }
+    };
+
+    void testInsertChainRest()
+    {
+        using insert_rest::TailKind;
+        // 1. Never played: rests after latency + 2 blocks of silence, wakes in the first block
+        //    of input and processes that block (the attack is not lost).
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.plugin = [](const float in, std::int64_t) { return in * 0.5f; };
+            for (int i = 0; i < 10; ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            expect(sim.processCalls == 2 && sim.state.resting,
+                   "rest: a stage that never had input rests after 2 silent blocks");
+            const std::int64_t before = sim.processCalls;
+            const float out = sim.run(0.3f);
+            expect(sim.processCalls == before + 1 && std::abs(out - 0.15f) < 1.0e-6f,
+                   "rest: the first block of input wakes the stage and is processed");
+        }
+        // 2. A delay with a silent gap and a reported finite tail: never rests inside the tail,
+        //    rests only after 2 x tail of silence, and every echo is heard.
+        {
+            RestSim sim;
+            sim.setTail(1.0, TailKind::Finite);
+            const int echoAt = sim.blocksFor(0.5);
+            std::int64_t lastInputBlock = -1;
+            sim.plugin = [&](const float in, const std::int64_t b) {
+                if (in != 0.0f)
+                {
+                    lastInputBlock = b;
+                    return in;
+                }
+                // One echo 0.5 s after the last input block, silence in between.
+                return (lastInputBlock >= 0 && b == lastInputBlock + echoAt) ? 0.25f : 0.0f;
+            };
+            (void)sim.run(0.5f);
+            bool echoHeard = false;
+            bool restedBeforeEcho = false;
+            for (int i = 1; i < sim.blocksFor(3.0); ++i)
+            {
+                const float out = sim.run(0.0f);
+                echoHeard = echoHeard || out > 0.0f;
+                restedBeforeEcho = restedBeforeEcho || (i < echoAt && sim.state.resting);
+            }
+            expect(echoHeard && !restedBeforeEcho, "rest: the echo after a silent gap is heard");
+            expect(sim.state.resting, "rest: a finite reported tail rests after twice its length");
+        }
+        // 3. Unknown (0) and infinite tails never rest once the stage has had input.
+        for (const TailKind kind : { TailKind::Unknown, TailKind::Infinite })
+        {
+            RestSim sim;
+            sim.setTail(0.0, kind);
+            sim.plugin = [](const float in, std::int64_t) { return in; };
+            (void)sim.run(0.5f);
+            for (int i = 0; i < sim.blocksFor(120.0); ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            expect(!sim.state.resting && sim.processCalls == sim.blocks,
+                   std::string("rest: a stage with an ") + (kind == TailKind::Unknown ? "unknown" : "infinite")
+                       + " tail keeps processing after input");
+        }
+        // 4. A plug-in heard after its reported tail is marked unreliable and never rests again.
+        {
+            RestSim sim;
+            sim.setTail(0.1, TailKind::Finite);
+            const int lateEcho = sim.blocksFor(0.15);
+            sim.plugin = [&](const float in, const std::int64_t b) {
+                return in != 0.0f ? in : (b == lateEcho ? 0.2f : 0.0f);
+            };
+            (void)sim.run(0.5f);
+            bool heard = false;
+            for (int i = 1; i < sim.blocksFor(5.0); ++i)
+            {
+                heard = sim.run(0.0f) > 0.0f || heard;
+            }
+            expect(heard && sim.state.unreliable && !sim.state.resting,
+                   "rest: sounding after the reported tail marks the stage unreliable; it keeps running");
+        }
+        // 5. A chain change wakes the stage; a never-rest stage (MIDI / editor) never rests.
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.plugin = [](const float in, std::int64_t) { return in; };
+            for (int i = 0; i < 5; ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            const std::int64_t before = sim.processCalls;
+            sim.params.generation.fetch_add(1);
+            (void)sim.run(0.0f);
+            expect(sim.state.resting == false || sim.processCalls == before + 1,
+                   "rest: a chain change processes the next block again");
+            RestSim never;
+            never.setTail(0.0, TailKind::Unknown);
+            never.params.neverRest = true;
+            never.plugin = [](const float in, std::int64_t) { return in; };
+            for (int i = 0; i < 20; ++i)
+            {
+                (void)never.run(0.0f);
+            }
+            expect(never.processCalls == never.blocks, "rest: a stage with an instrument plug-in or open editor never rests");
+        }
+        // 6. A plug-in that makes sound without input never rests (its output is not silent).
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.plugin = [](float, std::int64_t) { return 0.01f; };
+            for (int i = 0; i < 50; ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            expect(sim.processCalls == sim.blocks, "rest: a stage that sounds on its own keeps running");
+        }
+        // 7. Which plug-ins may rest at all: only declared audio-processing effects.
+        {
+            using insert_rest::categoryAllowsRest;
+            expect(categoryAllowsRest("Fx|EQ") && categoryAllowsRest("Fx|Reverb") && categoryAllowsRest("Fx|Distortion")
+                       && categoryAllowsRest("Fx|Dynamics") && categoryAllowsRest("Fx|Delay|Stereo"),
+                   "rest policy: processing effects (EQ, Reverb, Distortion, Dynamics, Delay) may rest");
+            expect(!categoryAllowsRest("Fx") && !categoryAllowsRest("Fx|Tools") && !categoryAllowsRest("")
+                       && !categoryAllowsRest("Fx|Generator") && !categoryAllowsRest("Fx|Instrument")
+                       && !categoryAllowsRest("Instrument|Synth") && !categoryAllowsRest("Instrument|Drum")
+                       && !categoryAllowsRest("Fx|Reverb|Generator") && !categoryAllowsRest("Instrument|Synth|Sampler"),
+                   "rest policy: instruments, generators, plain or tool effects and unknown categories never rest");
+        }
+        // 8. A generator that is silent for its first blocks and starts later without input,
+        //    MIDI or a parameter change. Two silent blocks prove nothing: such a plug-in is not
+        //    allowed to rest (neverRest from its category) and its late start is heard.
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.params.neverRest = true;
+            const int startsAt = 40;
+            sim.plugin = [&](float, const std::int64_t b) { return b >= startsAt ? 0.1f : 0.0f; };
+            float firstHeardAt = -1.0f;
+            for (int i = 0; i < 60; ++i)
+            {
+                if (sim.run(0.0f) > 0.0f && firstHeardAt < 0.0f)
+                {
+                    firstHeardAt = (float)i;
+                }
+            }
+            expect(sim.processCalls == sim.blocks && firstHeardAt == (float)startsAt,
+                   "rest: a late-starting generator keeps running and is heard from its first sounding block");
+        }
+        // 9. Parameter change and state / preset load without an editor wake a resting stage; it
+        //    processes the next block and a sound the change turns on is heard there.
+        for (const char* what : { "parameter change", "state / preset load" })
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            bool on = false;
+            sim.plugin = [&](const float in, std::int64_t) { return in + (on ? 0.1f : 0.0f); };
+            for (int i = 0; i < 6; ++i)
+            {
+                (void)sim.run(0.0f);
+            }
+            const bool restedFirst = sim.state.resting;
+            on = true;
+            sim.params.wake.fetch_add(1); // what the listener / state load does
+            const float out = sim.run(0.0f);
+            expect(restedFirst && out > 0.05f && !sim.state.resting,
+                   std::string("rest: a ") + what + " wakes the stage and the new sound is heard in the next block");
+        }
+        // 10. Transport start and a jump in play position wake a resting stage; a contiguous play
+        //     position does not.
+        {
+            RestSim sim;
+            sim.setTail(0.0, TailKind::Unknown);
+            sim.plugin = [](const float in, std::int64_t) { return in; };
+            std::int64_t pos = 0;
+            const auto step = [&](const bool playing) {
+                sim.state.noteTransport(playing, pos, sim.block);
+                (void)sim.run(0.0f);
+                pos += playing ? sim.block : 0;
+            };
+            for (int i = 0; i < 6; ++i)
+            {
+                step(false);
+            }
+            const bool restedStopped = sim.state.resting;
+            const std::int64_t callsBeforePlay = sim.processCalls;
+            step(true);
+            const bool wokeOnStart = sim.processCalls == callsBeforePlay + 1;
+            for (int i = 0; i < 6; ++i)
+            {
+                step(true);
+            }
+            const bool restedPlaying = sim.state.resting;
+            const std::int64_t callsBeforeJump = sim.processCalls;
+            pos = 48000 * 10; // locate / cycle wrap
+            step(true);
+            expect(restedStopped && wokeOnStart && restedPlaying && sim.processCalls == callsBeforeJump + 1,
+                   "rest: transport start and a position jump wake the stage; contiguous playback lets it rest");
+            const std::int64_t callsBeforeStop = sim.processCalls;
+            for (int i = 0; i < 6; ++i)
+            {
+                step(true);
+            }
+            step(false);
+            expect(sim.processCalls > callsBeforeStop, "rest: transport stop wakes the stage too");
+        }
+        // 11. A long finite tail with several echoes and silent gaps between them: no echo is
+        //     lost, the stage never rests between echoes, and it rests only 2 x tail after the last.
+        {
+            RestSim sim;
+            sim.setTail(2.0, TailKind::Finite);
+            const int gap = sim.blocksFor(0.6);
+            std::int64_t inputBlock = -1;
+            sim.plugin = [&](const float in, const std::int64_t b) {
+                if (in != 0.0f)
+                {
+                    inputBlock = b;
+                    return in;
+                }
+                const std::int64_t since = b - inputBlock;
+                return (inputBlock >= 0 && since > 0 && since % gap == 0 && since <= 3 * gap) ? 0.2f : 0.0f;
+            };
+            (void)sim.run(0.5f);
+            int echoes = 0;
+            bool restedEarly = false;
+            for (int i = 1; i < sim.blocksFor(8.0); ++i)
+            {
+                echoes += sim.run(0.0f) > 0.0f ? 1 : 0;
+                restedEarly = restedEarly || (i <= 3 * gap && sim.state.resting);
+            }
+            expect(echoes == 3 && !restedEarly && sim.state.resting,
+                   "rest: every echo of a long tail with silent gaps is heard; rest comes only after the tail");
+        }
+        expect(insert_rest::classifyTail(2.0, TailKind::Finite) == TailKind::Finite
+                   && insert_rest::classifyTail(0.0, TailKind::Finite) == TailKind::Unknown
+                   && insert_rest::classifyTail(std::numeric_limits<double>::infinity(), TailKind::Unknown)
+                          == TailKind::Infinite
+                   && insert_rest::classifyTail(90.0, TailKind::Empty) == TailKind::Unknown,
+               "rest: tail classification (finite, 0 = unknown, +inf, implausible)");
     }
 
     void testProxyPolicyOffModeAndFailureRearm()
@@ -9795,6 +10182,8 @@ int main()
     testProxyPolicyRecordingPausesEligibilityNotPlayback();
     testProxyPolicyOnSaveMode();
     testProxyPolicyManualMode();
+    testProxyPolicyOptInAndPoweredOffTrack();
+    testInsertChainRest();
     testProxyPolicyOffModeAndFailureRearm();
     testProxyPolicySnapshotEligibilityDefersCapture();
     testProxyPolicyProjectCloseAndReplacementDropRuntimeState();

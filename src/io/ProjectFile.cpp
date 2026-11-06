@@ -940,10 +940,13 @@ namespace
             }
             {
                 const juce::String mode = tv.getProperty("proxyUpdateMode", {}).toString().trim();
-                // Recognized values only (steering §18.1); anything else repairs to "auto".
-                et.proxyUpdateMode = (mode == "onSave" || mode == "manual" || mode == "off")
+                // Recognized values only (steering §18.1). A missing or unknown value reads as
+                // "manual": automatic rendering is opt-in, so only an explicit "auto" keeps it.
+                // Older writers omitted "auto", so an Auto chosen in such a file now reads as
+                // Manual; that migration was approved (2026-11-05).
+                et.proxyUpdateMode = (mode == "auto" || mode == "onSave" || mode == "off")
                                          ? mode
-                                         : juce::String("auto");
+                                         : juce::String("manual");
             }
             // v21 additive: optional Secondary instrument (P2, steering §17/PID-009). Absent key
             // ⇒ no Secondary. A malformed object (no descriptor identity) degrades to "no
@@ -1553,10 +1556,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                     }
                     eo->setProperty("proxy", juce::var(po.get()));
                 }
-                if (et.proxyUpdateMode.isNotEmpty() && et.proxyUpdateMode != "auto")
-                {
-                    eo->setProperty("proxyUpdateMode", et.proxyUpdateMode);
-                }
+                // Always explicit, Auto included: a missing key now means Manual.
+                eo->setProperty("proxyUpdateMode",
+                                et.proxyUpdateMode.isNotEmpty() ? et.proxyUpdateMode
+                                                                : juce::String("manual"));
             }
             if (data.version >= 21 && et.hasSecondary
                 && (et.secondaryDescriptor.name.isNotEmpty()
@@ -2659,7 +2662,7 @@ void stripExperimentalInstrumentTrackPluginFieldsForUndo(ProjectFileExperimental
     t.pluginVersion.clear();
     t.hasProxy = false;
     t.proxy = {};
-    t.proxyUpdateMode = "auto";
+    t.proxyUpdateMode = "manual";
     // v21 (P2): Secondary configuration is configuration state, not musical state — selecting,
     // replacing, or removing a Secondary dirties the project but never creates a musical-undo
     // entry, and undo never rewrites it.

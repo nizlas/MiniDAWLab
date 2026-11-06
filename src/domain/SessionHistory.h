@@ -177,6 +177,17 @@ public:
     /// present).
     [[nodiscard]] std::optional<SessionHistoryRestoreBundle> popRedo() noexcept;
 
+    /// [Message thread] The timeline `popUndo` / `popRedo` would restore, without popping (null when
+    /// the stack is empty). Lets a caller refuse a step before the history pointer moves.
+    [[nodiscard]] std::shared_ptr<const SessionSnapshot> peekUndoTimelineSnapshot() const noexcept
+    {
+        return undo_.empty() ? nullptr : undo_.back().before;
+    }
+    [[nodiscard]] std::shared_ptr<const SessionSnapshot> peekRedoTimelineSnapshot() const noexcept
+    {
+        return redo_.empty() ? nullptr : redo_.back().after;
+    }
+
     [[nodiscard]] int undoStackSize() const noexcept { return static_cast<int>(undo_.size()); }
     [[nodiscard]] int redoStackSize() const noexcept { return static_cast<int>(redo_.size()); }
 

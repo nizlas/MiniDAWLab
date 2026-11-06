@@ -226,6 +226,14 @@ namespace
             }
             ctl->syncShellWithHostState();
         }
+        else if (ctl->hasRetainedPrimaryRow())
+        {
+            // Saved Off: the instrument is kept as data and loads when the track is switched On.
+            if (displayName.isNotEmpty())
+            {
+                session.setTrackName(bindTid, displayName);
+            }
+        }
         else
         {
             const juce::String placeholderName = ensureGenericVst3PlaceholderTrackName(

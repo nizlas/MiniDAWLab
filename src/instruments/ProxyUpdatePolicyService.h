@@ -88,19 +88,19 @@ enum class ProxyUpdateMode : int
 
 [[nodiscard]] inline ProxyUpdateMode parseProxyUpdateMode(const juce::String& persisted) noexcept
 {
+    if (persisted == "auto")
+    {
+        return ProxyUpdateMode::AutoAfterIdle;
+    }
     if (persisted == "onSave")
     {
         return ProxyUpdateMode::OnSave;
-    }
-    if (persisted == "manual")
-    {
-        return ProxyUpdateMode::Manual;
     }
     if (persisted == "off")
     {
         return ProxyUpdateMode::Off;
     }
-    return ProxyUpdateMode::AutoAfterIdle; // "auto" + unrecognized repair (matches ProjectFile)
+    return ProxyUpdateMode::Manual; // "manual" + missing / unrecognized (matches ProjectFile)
 }
 
 [[nodiscard]] inline const char* proxyUpdateModePersistedString(const ProxyUpdateMode m) noexcept
@@ -112,7 +112,7 @@ enum class ProxyUpdateMode : int
         case ProxyUpdateMode::Manual: return "manual";
         case ProxyUpdateMode::Off: return "off";
     }
-    return "auto";
+    return "manual";
 }
 
 /// P1 policy constants (Locked): the Auto idle delay is FIXED at five minutes;
@@ -149,7 +149,7 @@ enum class ProxyPolicyRuntimeState : int
 
 struct ProxyPolicyStatus
 {
-    ProxyUpdateMode mode = ProxyUpdateMode::AutoAfterIdle;
+    ProxyUpdateMode mode = ProxyUpdateMode::Manual;
     ProxyPolicyRuntimeState state = ProxyPolicyRuntimeState::Passive;
     double idleRemainingMs = 0.0; ///< meaningful in WaitingForIdle (runtime-only)
     bool recordingPaused = false; ///< a due request is being held by recording
@@ -199,6 +199,10 @@ public:
         /// destination (production: playback-coordinator refresh for honest
         /// ProxyStale status while Primary is unavailable).
         std::function<void(TrackId)> onRenderRelevantChangeObserved;
+        /// Optional: the destination's track is switched Off (Power). An Off track
+        /// never queues or starts a render in any mode, and an active job is
+        /// cancelled; its proxy files and metadata stay untouched.
+        std::function<bool(TrackId)> destinationPoweredOff;
     };
 
     explicit ProxyUpdatePolicyService(Dependencies deps) : deps_(std::move(deps))
@@ -291,7 +295,7 @@ public:
     bool renderNow(const TrackId destination)
     {
         const ProxyUpdateMode mode = modeOf(destination);
-        if (mode != ProxyUpdateMode::Manual)
+        if (mode != ProxyUpdateMode::Manual || poweredOff(destination))
         {
             return false;
         }
@@ -307,7 +311,7 @@ public:
     bool retry(const TrackId destination)
     {
         const ProxyUpdateMode mode = modeOf(destination);
-        if (mode == ProxyUpdateMode::Off)
+        if (mode == ProxyUpdateMode::Off || poweredOff(destination))
         {
             return false;
         }
@@ -429,6 +433,11 @@ private:
                || p == proxy_render::ProxyJobPhase::Failed;
     }
 
+    [[nodiscard]] bool poweredOff(const TrackId tid) const
+    {
+        return deps_.destinationPoweredOff && deps_.destinationPoweredOff(tid);
+    }
+
     [[nodiscard]] ProxyUpdateMode modeOf(const TrackId tid) const
     {
         return parseProxyUpdateMode(deps_.modeForTrack ? deps_.modeForTrack(tid)
@@ -533,6 +542,25 @@ private:
 
     void evaluate(const TrackId tid, DestState& st, const double now)
     {
+        // An Off track does no proxy work: drop pending requests and cancel a running job.
+        // Identity tracking above continues, so a change made while Off is still observed.
+        if (poweredOff(tid))
+        {
+            if (deps_.jobStatus && deps_.cancelDestination)
+            {
+                const auto job = deps_.jobStatus(tid);
+                if (job.exists && !isTerminal(job.phase))
+                {
+                    deps_.cancelDestination(tid);
+                }
+            }
+            // Back On, a still-stale Auto destination re-arms a full idle window.
+            st.lastRelevantChangeMs = -1.0;
+            st.autoDue = false;
+            st.explicitPending = false;
+            st.waitingForSnapshot = false;
+            return;
+        }
         // An active job means the request was already handed over.
         if (deps_.jobStatus)
         {

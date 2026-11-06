@@ -8,6 +8,7 @@
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "plugins/PluginEditorWindows.h"
 #include "plugins/Vst3PresetFile.h"
+#include "plugins/isolation/IsolatedInsertHosting.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -387,6 +388,8 @@ void InsertProcessPlayHead::setContext(const PluginProcessTransportContext& cont
     // VST3 requires projectTimeSamples when a ProcessContext exists. JUCE maps these engaged
     // values directly to kTempoValid, kTimeSigValid and kProjectTimeMusicValid.
     position_.setTimeInSamples(timelineSample);
+    playing_ = context.isPlaying;
+    timelineSample_ = timelineSample;
     position_.setTimeInSeconds(elapsedSeconds);
     position_.setBpm(validBpm);
     position_.setTimeSignature(
@@ -648,6 +651,7 @@ void PluginInsertHost::restoreSlotOpaqueState(const TrackId trackId,
             continue;
         }
         slot.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+        restRuntimeForTrack(trackId)->wake(); // a loaded state may make the plug-in sound
         rememberHostAppliedState(trackId, slot.slotId, desc.opaqueState);
         ensureInsertRuntime(slot);
         break;
@@ -920,6 +924,7 @@ juce::Result PluginInsertHost::applyPresetBytes(const InsertInstanceToken token,
         slot->hostActive = hostActive;
         slot->hostBypassed = hostBypassed;
         ensureInsertRuntime(*slot);
+        restRuntimeForTrack(token.trackId)->wake(); // the preset may make the plug-in sound
         slot->vst3ClassId = live.classId;
 
         juce::MemoryBlock afterBlob;
@@ -1165,6 +1170,7 @@ PluginInsertHost::InPlaceRestore PluginInsertHost::tryInPlaceParameterStateResto
             if (desc.opaqueState.getSize() > 0 && desc.opaqueState.getSize() <= (size_t)std::numeric_limits<int>::max())
             {
                 live.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+                restRuntimeForTrack(trackId)->wake();
                 stateWritten = true;
                 if (live.instance->getMainBusNumInputChannels() != 2
                     || live.instance->getMainBusNumOutputChannels() != 2)
@@ -1261,6 +1267,20 @@ void PluginInsertHost::logStereoLayoutFailure(const TrackId trackId) const
         juce::String("[plugin] Stereo insert layout could not be established for track ")
         + juce::String((juce::int64)trackId)
         + " — VST3 processing bypassed (expected main bus 2/2).");
+}
+
+std::unique_ptr<juce::AudioPluginInstance> PluginInsertHost::createInsertInstance(const juce::PluginDescription& desc,
+                                                                                 const double sr,
+                                                                                 const int bs,
+                                                                                 juce::String& err)
+{
+    // The only place that decides in-process versus the shared helper (plan B.1). Everything
+    // after this handles a juce::AudioPluginInstance either way.
+    if (mini_daw::isolation::IsolatedPluginPolicy::shouldIsolate(desc))
+    {
+        return mini_daw::isolation::IsolatedHostConnection::get().createInstance(desc, sr, bs, err);
+    }
+    return std::unique_ptr<juce::AudioPluginInstance>(formatManager_.createPluginInstance(desc, sr, bs, err));
 }
 
 bool PluginInsertHost::tryPrepareStereoInsert(juce::AudioPluginInstance& inst, const double sr, const int bs)
@@ -1382,8 +1402,7 @@ juce::Result PluginInsertHost::addInsertFromVst3FileNoUndo(const TrackId trackId
 
     const double srU = effectiveSr(sampleRate_);
     const int bsU = effectiveBs(blockSize_);
-    std::unique_ptr<juce::AudioPluginInstance> inst(
-        formatManager_.createPluginInstance(desc, srU, bsU, err));
+    std::unique_ptr<juce::AudioPluginInstance> inst = createInsertInstance(desc, srU, bsU, err);
     if (inst == nullptr)
     {
         return juce::Result::fail(err.isNotEmpty() ? err : "createPluginInstance failed.");
@@ -1719,6 +1738,99 @@ PluginTrackChain PluginInsertHost::exportChain(const TrackId trackId) const
     return out;
 }
 
+std::optional<PluginInsertHost::LiveInsertSlot> PluginInsertHost::instantiateLiveSlot(
+    const TrackId trackId, const PluginInsertDescriptor& desc, juce::String& whyNot)
+{
+    const auto phaseMs = [](const double t0) {
+        return (int) (juce::Time::getMillisecondCounterHiRes() - t0 + 0.5);
+    };
+    const juce::File f(desc.vst3AbsolutePath);
+    if (!f.exists())
+    {
+        whyNot = "VST3 bundle missing at saved path";
+        return std::nullopt;
+    }
+
+    juce::String err;
+    const double describeT0 = juce::Time::getMillisecondCounterHiRes();
+    const juce::PluginDescription pd
+        = pickDescriptionForSavedIdentity(f, formatManager_, desc.pluginIdentifier, err);
+    const int describeMs = phaseMs(describeT0);
+    if (pd.name.isEmpty())
+    {
+        appendProjectLoadDiagnosticLine(
+            "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\""
+            + juce::File(desc.vst3AbsolutePath).getFileNameWithoutExtension()
+            + "\" outcome=unavailable describeMs=" + juce::String(describeMs) + " createMs=0 prepareMs=0 setStateMs=0 prepareAfterMs=0");
+        whyNot = err;
+        return std::nullopt;
+    }
+
+    const double srU = effectiveSr(sampleRate_);
+    const int bsU = effectiveBs(blockSize_);
+    const double createT0 = juce::Time::getMillisecondCounterHiRes();
+    std::unique_ptr<juce::AudioPluginInstance> inst = createInsertInstance(pd, srU, bsU, err);
+    const int createMs = phaseMs(createT0);
+    if (inst == nullptr)
+    {
+        appendProjectLoadDiagnosticLine(
+            "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\"" + pd.name
+            + "\" outcome=create-failed describeMs=" + juce::String(describeMs) + " createMs="
+            + juce::String(createMs) + " prepareMs=0 setStateMs=0 prepareAfterMs=0");
+        whyNot = "createPluginInstance failed: " + err;
+        return std::nullopt;
+    }
+    const double prepareT0 = juce::Time::getMillisecondCounterHiRes();
+    bool layoutOk = tryPrepareStereoInsert(*inst, srU, bsU);
+    const int prepareMs = phaseMs(prepareT0);
+    int setStateMs = 0;
+    int prepareAfterMs = 0;
+    if (desc.opaqueState.getSize() > 0)
+    {
+        const double stateT0 = juce::Time::getMillisecondCounterHiRes();
+        inst->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+        setStateMs = phaseMs(stateT0);
+        if (inst->getMainBusNumInputChannels() != 2 || inst->getMainBusNumOutputChannels() != 2)
+        {
+            const double afterT0 = juce::Time::getMillisecondCounterHiRes();
+            inst->prepareToPlay(srU, bsU);
+            prepareAfterMs = phaseMs(afterT0);
+        }
+        layoutOk = inst->getMainBusNumInputChannels() == 2 && inst->getMainBusNumOutputChannels() == 2;
+    }
+    if (!layoutOk)
+    {
+        logStereoLayoutFailure(trackId);
+    }
+    logPluginInstanceLayout("import", *inst);
+    appendProjectLoadDiagnosticLine(
+        "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\"" + inst->getName()
+        + "\" outcome=loaded describeMs=" + juce::String(describeMs) + " createMs=" + juce::String(createMs)
+        + " prepareMs=" + juce::String(prepareMs) + " setStateMs=" + juce::String(setStateMs)
+        + " prepareAfterMs=" + juce::String(prepareAfterMs) + " stateBytes="
+        + juce::String((juce::int64)desc.opaqueState.getSize()));
+
+    LiveInsertSlot live;
+    live.slotId = desc.slotId != kInvalidInsertSlotId ? desc.slotId : allocateSlotId();
+    live.stage = desc.stage;
+    live.instance = std::move(inst);
+    live.layoutOk = layoutOk;
+    stampNewInstanceEpoch(live);
+    rememberVst3ClassId(live);
+    live.hostActive = desc.hostActive;
+    live.hostBypassed = desc.hostBypassed;
+    ensureInsertRuntime(live);
+    if (!live.hostActive && live.runtime != nullptr)
+    {
+        live.runtime->setTarget(InsertSlotRuntime::Target::Inactive);
+    }
+    else if (live.hostBypassed && live.runtime != nullptr)
+    {
+        live.runtime->setTarget(InsertSlotRuntime::Target::HostBypass);
+    }
+    return live;
+}
+
 void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrackChain& chain)
 {
     if (trackId == kInvalidTrackId)
@@ -1753,16 +1865,18 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
         placeholder.hostBypassed = desc.hostBypassed;
         placeholder.unavailableDescriptor.hostActive = desc.hostActive;
         placeholder.unavailableDescriptor.hostBypassed = desc.hostBypassed;
-        juce::Logger::writeToLog("[plugin] insert kept as unavailable placeholder: track "
-                                 + juce::String((juce::int64)trackId) + " slot "
+        juce::Logger::writeToLog(juce::String("[plugin] insert kept as ")
+                                 + (why.isEmpty() ? "dormant (track Off)" : "unavailable placeholder")
+                                 + ": track " + juce::String((juce::int64)trackId) + " slot "
                                  + juce::String((juce::int64)placeholder.slotId) + " ("
                                  + (desc.stage == InsertStage::Pre ? "pre" : "post") + ") path=\""
                                  + desc.vst3AbsolutePath + "\" identifier=\"" + desc.pluginIdentifier
                                  + "\" stateBytes=" + juce::String((juce::int64)desc.opaqueState.getSize())
-                                 + " reason: " + why);
+                                 + (why.isEmpty() ? juce::String() : " reason: " + why));
         built.push_back(std::move(placeholder));
     };
 
+    const bool dormant = dormancyQuery_ != nullptr && dormancyQuery_(trackId);
     for (const auto& desc : chain.slots)
     {
         if (!desc.occupied)
@@ -1781,92 +1895,23 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
             continue;
         }
 
-        const juce::File f(desc.vst3AbsolutePath);
-        if (!f.exists())
+        if (dormant)
         {
-            keepAsUnavailablePlaceholder(desc, "VST3 bundle missing at saved path");
+            // Track Off: keep identity and state, never instantiate (not even briefly).
+            keepAsUnavailablePlaceholder(desc, {});
+            built.back().dormant = true;
             continue;
         }
 
-        juce::String err;
-        const double describeT0 = juce::Time::getMillisecondCounterHiRes();
-        const juce::PluginDescription pd
-            = pickDescriptionForSavedIdentity(f, formatManager_, desc.pluginIdentifier, err);
-        const int describeMs = phaseMs(describeT0);
-        if (pd.name.isEmpty())
+        juce::String whyNot;
+        if (std::optional<LiveInsertSlot> live = instantiateLiveSlot(trackId, desc, whyNot))
         {
-            appendProjectLoadDiagnosticLine(
-                "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\""
-                + juce::File(desc.vst3AbsolutePath).getFileNameWithoutExtension()
-                + "\" outcome=unavailable describeMs=" + juce::String(describeMs) + " createMs=0 prepareMs=0 setStateMs=0 prepareAfterMs=0");
-            keepAsUnavailablePlaceholder(desc, err);
-            continue;
+            built.push_back(std::move(*live));
         }
-
-        const double srU = effectiveSr(sampleRate_);
-        const int bsU = effectiveBs(blockSize_);
-        const double createT0 = juce::Time::getMillisecondCounterHiRes();
-        std::unique_ptr<juce::AudioPluginInstance> inst(
-            formatManager_.createPluginInstance(pd, srU, bsU, err));
-        const int createMs = phaseMs(createT0);
-        if (inst == nullptr)
+        else
         {
-            appendProjectLoadDiagnosticLine(
-                "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\"" + pd.name
-                + "\" outcome=create-failed describeMs=" + juce::String(describeMs) + " createMs="
-                + juce::String(createMs) + " prepareMs=0 setStateMs=0 prepareAfterMs=0");
-            keepAsUnavailablePlaceholder(desc, "createPluginInstance failed: " + err);
-            continue;
+            keepAsUnavailablePlaceholder(desc, whyNot);
         }
-        const double prepareT0 = juce::Time::getMillisecondCounterHiRes();
-        bool layoutOk = tryPrepareStereoInsert(*inst, srU, bsU);
-        const int prepareMs = phaseMs(prepareT0);
-        int setStateMs = 0;
-        int prepareAfterMs = 0;
-        if (desc.opaqueState.getSize() > 0)
-        {
-            const double stateT0 = juce::Time::getMillisecondCounterHiRes();
-            inst->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
-            setStateMs = phaseMs(stateT0);
-            if (inst->getMainBusNumInputChannels() != 2 || inst->getMainBusNumOutputChannels() != 2)
-            {
-                const double afterT0 = juce::Time::getMillisecondCounterHiRes();
-                inst->prepareToPlay(srU, bsU);
-                prepareAfterMs = phaseMs(afterT0);
-            }
-            layoutOk = inst->getMainBusNumInputChannels() == 2 && inst->getMainBusNumOutputChannels() == 2;
-        }
-        if (!layoutOk)
-        {
-            logStereoLayoutFailure(trackId);
-        }
-        logPluginInstanceLayout("import", *inst);
-        appendProjectLoadDiagnosticLine(
-            "load: insert instance trackId=" + juce::String((juce::int64)trackId) + " name=\"" + inst->getName()
-            + "\" outcome=loaded describeMs=" + juce::String(describeMs) + " createMs=" + juce::String(createMs)
-            + " prepareMs=" + juce::String(prepareMs) + " setStateMs=" + juce::String(setStateMs)
-            + " prepareAfterMs=" + juce::String(prepareAfterMs) + " stateBytes="
-            + juce::String((juce::int64)desc.opaqueState.getSize()));
-
-        LiveInsertSlot live;
-        live.slotId = desc.slotId != kInvalidInsertSlotId ? desc.slotId : allocateSlotId();
-        live.stage = desc.stage;
-        live.instance = std::move(inst);
-        live.layoutOk = layoutOk;
-        stampNewInstanceEpoch(live);
-        rememberVst3ClassId(live);
-        live.hostActive = desc.hostActive;
-        live.hostBypassed = desc.hostBypassed;
-        ensureInsertRuntime(live);
-        if (!live.hostActive && live.runtime != nullptr)
-        {
-            live.runtime->setTarget(InsertSlotRuntime::Target::Inactive);
-        }
-        else if (live.hostBypassed && live.runtime != nullptr)
-        {
-            live.runtime->setTarget(InsertSlotRuntime::Target::HostBypass);
-        }
-        built.push_back(std::move(live));
     }
 
     const int instanceCount = (int) built.size();
@@ -1897,6 +1942,228 @@ void PluginInsertHost::importChain(const TrackId trackId, const PluginTrackChain
     importChainNoUndo(trackId, chain);
 }
 
+PluginInsertHost::DormancyResult PluginInsertHost::makeTrackInsertsDormant(const TrackId trackId)
+{
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end() || !hasLiveInsertInstances(trackId))
+    {
+        return DormancyResult::NothingToDo;
+    }
+    closeEditorsForTrack(trackId);
+    struct Retiring
+    {
+        size_t index = 0;
+        std::unique_ptr<juce::AudioPluginInstance> instance;
+        bool layoutOk = false;
+    };
+    std::vector<Retiring> retiring;
+    std::vector<LiveInsertSlot>& chain = it->second;
+    for (size_t i = 0; i < chain.size(); ++i)
+    {
+        LiveInsertSlot& slot = chain[i];
+        if (slot.instance == nullptr)
+        {
+            continue;
+        }
+        PluginInsertDescriptor d;
+        d.slotId = slot.slotId;
+        d.stage = slot.stage;
+        d.occupied = true;
+        const juce::PluginDescription pd = slot.instance->getPluginDescription();
+        d.vst3AbsolutePath = pd.fileOrIdentifier;
+        d.pluginIdentifier = pd.createIdentifierString();
+        d.hostActive = slot.hostActive;
+        d.hostBypassed = slot.hostBypassed;
+        slot.unavailableDescriptor = std::move(d);
+        slot.dormant = true;
+        retiring.push_back({ i, std::move(slot.instance), slot.layoutOk });
+        slot.layoutOk = false;
+    }
+    // Publish-before-capture: from here the callback, the render pool and read-ahead can only
+    // reach the new map, which no longer lists these instances.
+    rebuildAudioThreadMapAndPublish();
+
+    bool isolatedCaptureFailed = false;
+    const bool ran = withExclusiveInstanceAccess([&] {
+        for (Retiring& r : retiring)
+        {
+            r.instance->getStateInformation(chain[r.index].unavailableDescriptor.opaqueState);
+            if (auto* iso = dynamic_cast<mini_daw::isolation::IsolatedInsertInstance*>(r.instance.get()))
+            {
+                isolatedCaptureFailed = isolatedCaptureFailed || !iso->lastCaptureOk();
+            }
+        }
+    });
+    if (!ran || isolatedCaptureFailed)
+    {
+        // No acknowledged exclusive access: nothing was captured and nothing may be destroyed.
+        // Put the live slots back; the row is still silenced by Off, and a later attempt retries.
+        for (Retiring& r : retiring)
+        {
+            LiveInsertSlot& slot = chain[r.index];
+            slot.instance = std::move(r.instance);
+            slot.layoutOk = r.layoutOk;
+            slot.dormant = false;
+            slot.unavailableDescriptor = {};
+        }
+        rebuildAudioThreadMapAndPublish();
+        juce::Logger::writeToLog("[plugin] Off: inserts of track " + juce::String((juce::int64)trackId)
+                                 + (ran ? " kept loaded (an isolated plug-in did not return its state)"
+                                        : " kept loaded (exclusive access not acknowledged)"));
+        return DormancyResult::NotDrained;
+    }
+    eraseLastHostAppliedStateForTrack(lastHostAppliedState_, trackId);
+    for (Retiring& r : retiring)
+    {
+        if (powerLog_)
+        {
+            powerLog_("Off: release insert \"" + r.instance->getName() + "\" track "
+                      + juce::String((juce::int64)trackId));
+        }
+        r.instance->releaseResources();
+        if (auto* iso = dynamic_cast<mini_daw::isolation::IsolatedInsertInstance*>(r.instance.get()))
+        {
+            iso->markRetiredForOff();
+        }
+        offRetired_.push_back({ std::move(r.instance), trackId, juce::Time::getMillisecondCounterHiRes() });
+    }
+    juce::Logger::writeToLog("[plugin] Off: unloaded " + juce::String((int)retiring.size())
+                             + " insert(s) of track " + juce::String((juce::int64)trackId));
+    return DormancyResult::Done;
+}
+
+bool PluginInsertHost::destroyNextOffRetiredInsert(const double minAgeMs)
+{
+    if (offRetired_.empty()
+        || juce::Time::getMillisecondCounterHiRes() - offRetired_.front().releasedAtMs < minAgeMs)
+    {
+        return false;
+    }
+    if (auto* iso = dynamic_cast<mini_daw::isolation::IsolatedInsertInstance*>(offRetired_.front().instance.get()))
+    {
+        // Destroying it may run AmpliTube's destructor in the helper, and a crash there takes every
+        // instance in the helper. Capture them all first; a failed capture postpones destruction
+        // with nothing lost (plan C.3). The last instance in the helper ends the helper instead.
+        auto& host = mini_daw::isolation::IsolatedHostConnection::get();
+        if (host.liveOnInstanceCount() > 0 && iso->link() == mini_daw::isolation::IsolatedInsertInstance::Link::Ready)
+        {
+            juce::String failed;
+            if (!host.captureAllLive(failed))
+            {
+                offRetired_.front().releasedAtMs = juce::Time::getMillisecondCounterHiRes() + 10000.0;
+                if (powerLog_)
+                {
+                    powerLog_("Off: destruction postponed, state of \"" + failed + "\" could not be captured");
+                }
+                return false;
+            }
+            iso->skipDestroyCaptureOnce();
+        }
+    }
+    OffRetired r = std::move(offRetired_.front());
+    offRetired_.erase(offRetired_.begin());
+    if (powerLog_)
+    {
+        powerLog_("Off: destroy insert \"" + r.instance->getName() + "\" track " + juce::String((juce::int64)r.trackId));
+    }
+    r.instance.reset();
+    return true;
+}
+
+bool PluginInsertHost::hasDormantInserts(const TrackId trackId) const noexcept
+{
+    return countDormantInserts(trackId) > 0;
+}
+
+int PluginInsertHost::countDormantInserts(const TrackId trackId) const noexcept
+{
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return 0;
+    }
+    int n = 0;
+    for (const auto& slot : it->second)
+    {
+        n += slot.instance == nullptr && slot.dormant ? 1 : 0;
+    }
+    return n;
+}
+
+bool PluginInsertHost::hasLiveInsertInstances(const TrackId trackId) const noexcept
+{
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return false;
+    }
+    for (const auto& slot : it->second)
+    {
+        if (slot.instance != nullptr)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+int PluginInsertHost::liveInsertInstanceCount() const noexcept
+{
+    int n = 0;
+    for (const auto& kv : chains_)
+    {
+        for (const auto& slot : kv.second)
+        {
+            n += slot.instance != nullptr ? 1 : 0;
+        }
+    }
+    return n;
+}
+
+bool PluginInsertHost::wakeNextDormantInsert(const TrackId trackId, juce::String& nameOut, juce::String& errorOut)
+{
+    nameOut.clear();
+    errorOut.clear();
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return false;
+    }
+    for (LiveInsertSlot& slot : it->second)
+    {
+        if (slot.instance != nullptr || !slot.dormant)
+        {
+            continue;
+        }
+        PluginInsertDescriptor desc = slot.unavailableDescriptor;
+        desc.slotId = slot.slotId;
+        desc.stage = slot.stage;
+        desc.hostActive = slot.hostActive;
+        desc.hostBypassed = slot.hostBypassed;
+        nameOut = unavailableInsertDisplayName(desc);
+        if (powerLog_)
+        {
+            powerLog_("On: create insert \"" + nameOut + "\" track " + juce::String((juce::int64)trackId));
+        }
+        juce::String whyNot;
+        if (std::optional<LiveInsertSlot> live = instantiateLiveSlot(trackId, desc, whyNot))
+        {
+            slot = std::move(*live);
+        }
+        else
+        {
+            // An ordinary unavailable placeholder now: identity and state stay for the next save.
+            slot.dormant = false;
+            errorOut = nameOut + ": " + whyNot;
+            juce::Logger::writeToLog("[plugin] On: insert of track " + juce::String((juce::int64)trackId)
+                                     + " could not be loaded: " + errorOut);
+        }
+        rebuildAudioThreadMapAndPublish();
+        return true;
+    }
+    return false;
+}
+
 std::vector<InsertRowView> PluginInsertHost::getInsertRowsForTrack(const TrackId trackId) const
 {
     std::vector<InsertRowView> rows;
@@ -1913,7 +2180,8 @@ std::vector<InsertRowView> PluginInsertHost::getInsertRowsForTrack(const TrackId
             InsertRowView row;
             row.slotId = live.slotId;
             row.stage = live.stage;
-            row.displayName = unavailableInsertDisplayName(live.unavailableDescriptor) + " (unavailable)";
+            row.displayName = unavailableInsertDisplayName(live.unavailableDescriptor)
+                              + (live.dormant ? " (Off)" : " (unavailable)");
             row.unavailable = true;
             row.hostActive = live.hostActive;
             row.hostBypassed = live.hostBypassed;
@@ -1973,6 +2241,9 @@ int PluginInsertHost::detachAllInstancesForProjectClose() noexcept
     {
         return (int) projectClosePending_.size();
     }
+    // Isolated instances leave with their helper, which is terminated: AmpliTube 4's destructor
+    // never runs at project close or switch (plan C.4). Their stand-ins then release nothing.
+    mini_daw::isolation::IsolatedHostConnection::get().terminateForTeardown("project close");
 
     for (const auto& kv : editorWindows_)
     {
@@ -2010,6 +2281,14 @@ int PluginInsertHost::detachAllInstancesForProjectClose() noexcept
             projectClosePending_.push_back(std::move(live.instance));
         }
     }
+    // Instances an Off unload already released go through the same paced close.
+    for (OffRetired& r : offRetired_)
+    {
+        projectClosePendingNames_.push_back(r.instance->getName().isNotEmpty() ? r.instance->getName()
+                                                                                : juce::String("Effect"));
+        projectClosePending_.push_back(std::move(r.instance));
+    }
+    offRetired_.clear();
     chains_.clear();
     nextInsertSlotId_ = 1;
     // Publish-before-destroy: the empty map is what later callbacks and read-ahead segments acquire.
@@ -2046,6 +2325,8 @@ bool PluginInsertHost::releaseNextDetachedInsertForProjectClose() noexcept
 
 void PluginInsertHost::removeAllPlugins() noexcept
 {
+    mini_daw::isolation::IsolatedHostConnection::get().terminateForTeardown("remove all plug-ins");
+    offRetired_.clear(); // released and unpublished already
     for (const auto& kv : editorWindows_)
     {
         if (kv.second != nullptr)
@@ -2130,6 +2411,123 @@ std::shared_ptr<InsertProcessPlayHead> PluginInsertHost::chainPlayHeadForTrack(c
     return ph;
 }
 
+std::shared_ptr<InsertChainRestRuntime> PluginInsertHost::restRuntimeForTrack(const TrackId trackId)
+{
+    auto& slot = restRuntimes_[trackId];
+    if (slot == nullptr)
+    {
+        slot = std::make_shared<InsertChainRestRuntime>();
+    }
+    return slot;
+}
+
+void PluginInsertHost::updateRestParams(const TrackId trackId, InsertChainRestRuntime& rest, const bool forceWake)
+{
+    const auto it = chains_.find(trackId);
+    const double sr = effectiveSr(sampleRate_);
+    for (int stageIndex = 0; stageIndex < 2; ++stageIndex)
+    {
+        const InsertStage stage = stageIndex == 0 ? InsertStage::Pre : InsertStage::Post;
+        insert_rest::TailKind kind = insert_rest::TailKind::Empty;
+        double tailSeconds = 0.0;
+        int latency = 0;
+        bool neverRest = false;
+        std::uint64_t signature = 1469598103934665603ull;
+        const auto mix = [&signature](const std::uint64_t v) {
+            signature = (signature ^ v) * 1099511628211ull;
+        };
+        if (it != chains_.end())
+        {
+            for (const LiveInsertSlot& live : it->second)
+            {
+                if (live.instance == nullptr || live.stage != stage || !live.layoutOk || !live.hostActive)
+                {
+                    continue;
+                }
+                juce::AudioPluginInstance& inst = *live.instance;
+                inst.addListener(&rest); // idempotent; a parameter change wakes the row
+                const double t = inst.getTailLengthSeconds();
+                kind = insert_rest::classifyTail(t, kind);
+                if (std::isfinite(t) && t > 0.0)
+                {
+                    tailSeconds += t;
+                }
+                latency += juce::jmax(0, inst.getLatencySamples());
+                // DAL sends inserts no MIDI (the scratch is cleared per slot), so a plug-in that
+                // merely accepts MIDI cannot be triggered. Only a declared audio-processing
+                // effect may rest; anything that can make sound on its own, or whose category
+                // does not say, keeps running (InsertChainRest.h).
+                const juce::PluginDescription desc = inst.getPluginDescription();
+                neverRest = neverRest || desc.isInstrument
+                            || !insert_rest::categoryAllowsRest(desc.category.toStdString())
+                            || editorWindows_.count({ trackId, live.slotId }) != 0
+                            || paramsWindows_.count({ trackId, live.slotId }) != 0;
+                mix((std::uint64_t)(std::uintptr_t)live.instance.get());
+                mix((std::uint64_t)live.instanceEpoch);
+                mix((std::uint64_t)(live.hostBypassed ? 3 : 1));
+            }
+        }
+        const std::int64_t tailSamples = kind == insert_rest::TailKind::Finite
+                                             ? (std::int64_t)std::ceil(tailSeconds * sr)
+                                             : 0;
+        mix((std::uint64_t)tailSamples);
+        mix((std::uint64_t)latency);
+        mix((std::uint64_t)kind);
+        mix(neverRest ? 7u : 5u);
+        insert_rest::Params& p = rest.params[stageIndex];
+        if (!forceWake && signature == rest.signature[stageIndex])
+        {
+            continue;
+        }
+        rest.signature[stageIndex] = signature;
+        p.tailSamples.store(tailSamples, std::memory_order_relaxed);
+        p.latencySamples.store(latency, std::memory_order_relaxed);
+        p.tailKind.store((int)kind, std::memory_order_relaxed);
+        p.neverRest.store(neverRest, std::memory_order_relaxed);
+        p.generation.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void PluginInsertHost::refreshInsertRestParameters()
+{
+    for (auto& [tid, rest] : restRuntimes_)
+    {
+        if (rest != nullptr)
+        {
+            updateRestParams(tid, *rest, false);
+        }
+    }
+}
+
+juce::String PluginInsertHost::insertRestDiagnosticsText() const
+{
+    std::uint64_t rested = 0;
+    std::uint64_t processed = 0;
+    int restingNow = 0;
+    int stages = 0;
+    for (const auto& [tid, rest] : restRuntimes_)
+    {
+        if (rest == nullptr || !hasLiveInsertInstances(tid))
+        {
+            continue;
+        }
+        for (int s = 0; s < 2; ++s)
+        {
+            if ((insert_rest::TailKind)rest->params[s].tailKind.load() == insert_rest::TailKind::Empty)
+            {
+                continue;
+            }
+            ++stages;
+            rested += rest->state[s].restedBlocks.load(std::memory_order_relaxed);
+            processed += rest->state[s].processedBlocks.load(std::memory_order_relaxed);
+            restingNow += rest->state[s].resting ? 1 : 0; // racy read, diagnostics only
+        }
+    }
+    return "insert stages=" + juce::String(stages) + " restingNow=" + juce::String(restingNow)
+           + " stageBlocks rested=" + juce::String((juce::int64)rested) + " processed="
+           + juce::String((juce::int64)processed);
+}
+
 void PluginInsertHost::rebuildAudioThreadMapAndPublish()
 {
     auto next = std::make_shared<PluginAudioThreadMap>();
@@ -2145,6 +2543,8 @@ void PluginInsertHost::rebuildAudioThreadMapAndPublish()
         // Stage A1: the chain's own transport playhead, co-owned by the entry so an in-flight
         // callback holding this map keeps a valid pointer across any message-thread change.
         e.playHead = chainPlayHeadForTrack(kv.first);
+        e.rest = restRuntimeForTrack(kv.first);
+        updateRestParams(kv.first, *e.rest, false);
         e.slots.reserve(kv.second.size());
         for (const auto& live : kv.second)
         {
@@ -2273,6 +2673,21 @@ void PluginInsertHost::openNativeEditor(const TrackId trackId, const InsertSlotI
         return;
     }
     juce::AudioProcessor& proc = *s->instance;
+    if (auto* iso = dynamic_cast<mini_daw::isolation::IsolatedInsertInstance*>(s->instance.get()))
+    {
+        // The real editor lives in the helper as its own top-level window (plan D.5). Closing it
+        // there comes back through onRemoteEditorClosed with the same undo diff as a local window.
+        juce::MemoryBlock snap;
+        proc.getStateInformation(snap);
+        editorOpenState_[key] = std::move(snap);
+        const InsertSlotId openedSlot = s->slotId;
+        iso->onRemoteEditorClosed = [this, trackId, openedSlot] { editorWindowClosing(trackId, openedSlot, false); };
+        if (!iso->openRemoteEditor(proc.getName() + " (isolated)"))
+        {
+            editorOpenState_.erase(key);
+        }
+        return;
+    }
     juce::AudioProcessorEditor* const rawEd = proc.createEditor();
     if (rawEd == nullptr)
     {
@@ -2656,6 +3071,23 @@ void PluginInsertHost::audioThread_processEntryChain(const PluginAudioThreadMap:
         insertLevelTapPreBlocks_.fetch_add(1, std::memory_order_relaxed);
     }
 
+    // Automatic rest (InsertChainRest.h): a stage whose input is silent and which has provably
+    // nothing left to produce skips processBlock; its silent buffer passes through unchanged.
+    const int restIndex = stage == InsertStage::Pre ? 0 : 1;
+    InsertChainRestRuntime* const rest = entry.rest.get();
+    const bool inputSilent = rest != nullptr && insert_rest::isSilent(scratchChannels, kInsertChannels, n);
+    if (rest != nullptr && entry.playHead != nullptr)
+    {
+        rest->state[restIndex].noteTransport(entry.playHead->isPlayingForRest(),
+                                             entry.playHead->timelineSampleForRest(), n);
+    }
+    if (rest != nullptr
+        && rest->state[restIndex].shouldSkip(inputSilent, rest->params[restIndex],
+                                             restSuspended_.load(std::memory_order_acquire)))
+    {
+        return;
+    }
+
     juce::AudioBuffer<float> view(scratchChannels, kInsertChannels, n);
     juce::ScopedNoDenormals noDenormals;
     audio_profiler::AudioThreadProfiler& profiler = audio_profiler::AudioThreadProfiler::get();
@@ -2691,6 +3123,11 @@ void PluginInsertHost::audioThread_processEntryChain(const PluginAudioThreadMap:
         laneInsertSlotIndex_[lane].store(-1, std::memory_order_relaxed);
         laneInsertStage_[lane].store(-1, std::memory_order_relaxed);
         midiScratch.clear();
+    }
+    if (rest != nullptr)
+    {
+        rest->state[restIndex].afterProcess(inputSilent, insert_rest::isSilent(scratchChannels, kInsertChannels, n), n,
+                                            rest->params[restIndex]);
     }
 
     // Diagnostics tap: level leaving the chain (after the last Post insert, before pan).

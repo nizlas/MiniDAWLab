@@ -120,6 +120,10 @@ public:
         /// previous set and sound state intact) — the engine never plays the whole proxy while
         /// the UI claims a single voice is soloed. Optional; absent = never requested.
         std::function<bool(TrackId)> soloIsolationRequested;
+        /// The destination's track is switched Off (Power). Its Primary is unloaded on purpose,
+        /// so it is NOT a missing Primary: no proxy reader is opened and no Secondary is loaded
+        /// for it (the engine does not play an Off row). Optional.
+        std::function<bool(TrackId)> destinationPoweredOff;
     };
 
     explicit ProxyPlaybackCoordinator(Dependencies deps) : deps_(std::move(deps)) {}
@@ -376,6 +380,14 @@ private:
     [[nodiscard]] Evaluation evaluateDestination(const TrackId destination)
     {
         Evaluation ev;
+        if (deps_.destinationPoweredOff && deps_.destinationPoweredOff(destination))
+        {
+            // Off: nothing plays. Decide as if the (unloaded) Primary were the source, which
+            // opens no reader and never consults the Secondary.
+            ev.decision = decideProxyPlaybackSource(true, ProxyCurrencyVerdict::NoMetadata,
+                                                    ProxyAssetAvailability::Missing, false);
+            return ev;
+        }
         const bool primaryOk = deps_.primaryUsable && deps_.primaryUsable(destination)
                                && !isForcedUnavailable(destination);
         const ProjectFileProxyMetadataV20* const meta

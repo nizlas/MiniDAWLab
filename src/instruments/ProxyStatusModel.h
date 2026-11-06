@@ -50,6 +50,8 @@ struct ProxyStatusInputs
     bool hasMetadata = false;
     /// The published generation is an explicit silent generation (§15.7).
     bool silentGeneration = false;
+    /// The destination track is switched Off (Power): no render can start.
+    bool trackPoweredOff = false;
 };
 
 //==============================================================================
@@ -62,7 +64,8 @@ struct ProxyStatusView
     juce::String progressText; ///< non-empty only while rendering ("12.3 s rendered")
     juce::String tooltip;      ///< full explanation (source + cache + mode semantics)
     int modeComboIndex = 0;    ///< 0 Auto / 1 On Save / 2 Manual / 3 Off
-    bool canRenderNow = false; ///< Manual mode, stale/absent/failed, no active job
+    bool canRenderNow = false; ///< Manual mode, stale/absent/failed, no active job, track On
+    juce::String renderNowTooltip { "Render this instrument's proxy now (Manual mode)." };
     bool canCancel = false;    ///< an active (queued…finalizing) job exists
     bool canRetry = false;     ///< last job Failed, maintaining mode, no active job
     bool showProgress = false;
@@ -326,9 +329,18 @@ struct ProxyStatusView
     const bool needsRender = in.destinationState == Dst::Stale
                              || in.destinationState == Dst::Failed
                              || in.destinationState == Dst::Absent;
-    v.canRenderNow = !activeJob && in.policy.mode == Mode::Manual && needsRender;
+    v.canRenderNow = !activeJob && in.policy.mode == Mode::Manual && needsRender
+                     && !in.trackPoweredOff;
     v.canRetry = !activeJob && in.policy.mode != Mode::Off && in.job.exists
-                 && in.job.phase == Phase::Failed;
+                 && in.job.phase == Phase::Failed && !in.trackPoweredOff;
+    if (in.trackPoweredOff)
+    {
+        // Rendering would need the instrument, and an Off track keeps it unloaded.
+        cacheTip << " This track is Off, so its proxy is not rendered. Turn the track On "
+                    "to render it.";
+        v.renderNowTooltip = "Unavailable: this track is Off and its instrument is not loaded. "
+                             "Turn the track On to render its proxy.";
+    }
 
     // --------------------------------------------------------------- tooltip
     v.tooltip = "Playing: " + v.sourceLabel + ". " + sourceTip + "\n\nProxy: "

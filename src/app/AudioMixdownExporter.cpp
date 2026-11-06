@@ -18,6 +18,7 @@
 // =============================================================================
 
 #include "app/AudioMixdownExporter.h"
+#include "plugins/isolation/IsolatedProcessDeadline.h"
 
 #include "app/Mp3LameEncoder.h"
 #include "diagnostics/StabilityDiagnosticLog.h"
@@ -269,6 +270,10 @@ public:
         : engine_(engine)
     {
         const bool outermost = engine_.beginOfflineRenderGate();
+        // Isolated stages wait for their helper without a real-time deadline while this gate is
+        // held, and report a block they could not produce instead of writing silence.
+        mini_daw::isolation::deadline::setOfflineRenderActive(true);
+        (void)mini_daw::isolation::deadline::takeOfflineFailure();
         if (!outermost)
         {
             appendMixdownDiagnosticLine("export gate enter (nested; realtime already suspended)");
@@ -297,6 +302,10 @@ public:
     ~ScopedOfflineRenderGate()
     {
         const bool resumed = engine_.endOfflineRenderGate();
+        if (resumed)
+        {
+            mini_daw::isolation::deadline::setOfflineRenderActive(false);
+        }
         appendMixdownDiagnosticLine(resumed ? "export gate exit; realtime resumed"
                                             : "export gate exit (nested; realtime still suspended)");
     }
@@ -550,6 +559,12 @@ juce::Result exportStereoMixdownWavBlocking(
                                                  stereoPtrs,
                                                  firstBlock);
         firstBlock = false;
+        if (mini_daw::isolation::deadline::takeOfflineFailure())
+        {
+            appendMixdownDiagnosticLine("FAIL isolated plug-in host at pos=" + juce::String((juce::int64)pos));
+            return failAndDiscardTemp("The isolated AmpliTube 4 host stopped or stopped responding during the "
+                                      "export. Nothing was written; export again after it has been restored.");
+        }
         // Measured on the float block BEFORE the writer converts it (the Stereo Out point).
         levelFold.fold(stereoPtrs, n);
 

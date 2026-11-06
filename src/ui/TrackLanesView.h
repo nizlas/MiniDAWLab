@@ -301,6 +301,15 @@ public:
     // [Message thread] Wired once by `Main`: delete several tracks as one undo step.
     void setOnDeleteTracksRequested(std::function<void(const std::vector<TrackId>&)> onDeleteTracksRequested) noexcept;
 
+    // [Message thread] Wired once by `Main`: Power On of a row. The row may have unloaded plug-ins
+    // (it was Off), so On goes through the owner, which loads them first. Off writes the session.
+    void setOnRequestTrackPowerOn(std::function<bool(TrackId)> handler) noexcept
+    {
+        onRequestTrackPowerOn_ = std::move(handler);
+    }
+    /// Power On through the wired handler (falls back to the session write when none is wired).
+    bool requestTrackPowerOn(TrackId tid);
+
     /// [Message thread] Delete key: a header multi-selection of two or more rows, unless arrangement
     /// events are selected. A single selected header is only the active row and is never deleted
     /// by the key. Returns true when the key belonged to the selection (also while edits are blocked).
@@ -825,6 +834,7 @@ private:
     /// never session state, never clip selection, never the active track.
     std::vector<TrackId> headerMultiSelection_;
     std::function<void(const std::vector<TrackId>&)> onDeleteTracksRequested_;
+    std::function<bool(TrackId)> onRequestTrackPowerOn_;
     TrackId headerSelectionAnchorTid_ = kInvalidTrackId;
 
     Session& session_;

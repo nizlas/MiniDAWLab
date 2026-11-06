@@ -43,6 +43,11 @@ void appendTrackDeleteDiagnosticLine(const juce::String& message)
     appendTimestampedLine("track-delete-diag.log", "[track-delete]", message);
 }
 
+void appendTrackPowerDiagnosticLine(const juce::String& message)
+{
+    appendTimestampedLine("track-power-diag.log", "[track-power]", message);
+}
+
 void appendStabilityRunLine(const juce::String& message)
 {
     appendTimestampedLine("stability-run.log", "[stability]", message);
