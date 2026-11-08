@@ -1,0 +1,13 @@
+﻿On rows (position, name, TrackId, instrument, muted):
+  #12 'Track 3' id=3 kind=instrument instrument=GrooveAgentSE muted=False powerOn=absent
+  #13 'Track 3 — kopia' id=25 kind=instrument instrument=GrooveAgentSE muted=False powerOn=absent
+  #16 'Track 8 — kopia 2 — kopia' id=45 kind=instrument instrument=HALionSonic muted=False powerOn=absent
+  #17 'Track 8 — kopia 3' id=40 kind=instrument instrument=HALionSonic muted=False powerOn=absent
+  #47 'VB3-II' id=5 kind=instrument instrument=VB3-II muted=False powerOn=absent
+  #52 'Stereo Out' id=2 kind=master instrument=master muted=False powerOn=-
+Changes against the previously measured file:
+  #48 id=23 'VB3-II — kopia 2': off False -> True
+  #48 id=23: instrument powerOn None -> False
+  total 2
+order unchanged: True
+Off 46 of 52

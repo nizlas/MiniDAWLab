@@ -1,0 +1,3 @@
+case=C mode=prof exe=C:\Users\nicla\development\MiniDAWLab\dist\DanielssonsAudioLab-1.4.1\MiniDAWLab.exe sha256=C497140FF4E809DC94B7281AD5AA3B9AAB650C0222BB74799808EBE2AF60238C project=C:\Users\nicla\AppData\Local\Temp\dal-cmp3b\TSE_pt2_261106\run-c2-r2-prof.dalproj args=--seconds 30 --warmup 5 --start-seconds 17 --idle --idle-gap 0
+start=2026-11-08T21:51:52.7686968+01:00 pid=49140
+exit=0 leftProcesses=0 newCrashFiles=0 proxyFiles=36->36

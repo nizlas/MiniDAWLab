@@ -359,6 +359,96 @@ measured that project with only the window position changed.
 - Whether the screen showed something else in your session cannot be determined from files and
   logs. It would need a look at a fresh temp copy in DAL, which was not done here.
 
+## 8. Addendum: updated C after the manual correction (2026-11-08 evening)
+
+**This section is about the project as manually corrected and saved by the user at 21:34:55.**
+Sections 1–5 and 7 are kept as history; they describe the file as it was before that change
+(hash `E5CEF985…`). Only C was re-measured. A, B and D were not re-run.
+
+**What changed in the saved file**, read without opening it in DAL:
+- Arrangement row #48, "VB3-II — kopia 2" (TrackId 23), was switched Off: `off` false → true,
+  and the instrument `powerOn` absent → false.
+- Nothing else in Off or Mute changed. Rows are numbered by position in the arrangement.
+- Other saved changes:
+  - Groove Agent SE states (tracks 3 and 25) were re-saved;
+  - UI fields changed: playhead, active track, window y.
+
+On rows now (5 instruments + master):
+
+| Row # | Name | TrackId | Instrument | Mute |
+|---|---|---|---|---|
+| 12 | Track 3 | 3 | Groove Agent SE | no |
+| 13 | Track 3 — kopia | 25 | Groove Agent SE | no |
+| 16 | Track 8 — kopia 2 — kopia | 45 | HALion Sonic + DAL Mono Delay | no |
+| 17 | Track 8 — kopia 3 | 40 | HALion Sonic + DAL Mono Delay | no |
+| 47 | VB3-II | 5 | VB3-II + Pro-Q 3 | no |
+| 52 | Stereo Out | 2 | master | – |
+
+That is 46 of 52 rows Off.
+
+**Isolation**
+- **Original**: `…\Saved Projects\TSE_pt2_261106\TSE_pt2.dalproj`, SHA-256
+  `15645E5A3CC3C97471B6C89BDDEDEC656D545DB0D181F8C739CE5107AFE7735C`.
+  - Identical before and after the series.
+  - Still written 21:34:55; its folder still holds 3 files.
+  - `audio-device.xml` unchanged (`D6B41E20…`), and `autosave-diag.log` unchanged in size
+    (no autosave in any run).
+- **Fresh copy**: `%TEMP%\dal-cmp3b\TSE_pt2_261106\`, copied whole, with no absolute path back to
+  Dropbox in the project. Autosave and any proxy rendering write next to the loaded file, so they
+  could only write into that temp folder; InstrumentProxies held 36 files before and after.
+- **Measured source**: `C2.dalproj` (SHA-256 `244F1CC0…1843`), the copy with the same window
+  position normalisation as old C (x/y only). Each run loaded and then deleted its own
+  `run-c2-*.dalproj`.
+
+**Conditions**
+- Same release exe (`C497140F…`), the same device (ASIO Fireface USB, 48 kHz, 512, 7 workers),
+  the same arguments, passage (22–52 s) and windows.
+- Two repetitions, mirrored: profiled → control, control → profiled.
+- All four runs exited with code 0, left no process and wrote no crash dump. The transport
+  advanced 30.0 s per window.
+- No proxy selected, no proxy job, no proxy underruns.
+- 0 overruns, 0 blocks over 70 %, 0 late starts, 0 read-ahead misses in every window.
+
+**Loaded**: 5 instruments (Groove Agent SE ×2, HALion Sonic ×2, VB3-II ×1) and 3 effects
+(DAL Mono Delay ×2, Pro-Q 3 ×1), where old C had 6 and 4. Master peak and RMS in the playback
+window are unchanged (0.513 / 0.0716): VB3-II copy 2 was muted already, so switching it Off does
+not change the sound.
+
+**Disturbance**: another application loaded the machine during most of the new series.
+- `systemBusy` was 30–40 % in the first three runs, against 5–9 % in every old C run. It dropped
+  to 9–14 % only in the last run.
+- A process sample right after the series showed Civilization VI using about 0.5 core. That is
+  the user's program; it was not closed.
+- **CPU and callback figures of the new series are therefore not comparable with old C.**
+  Memory, load peak and instance counts are not affected.
+
+| | Old C (file `E5CEF985…`) | New C (file `15645E5A…`) | Change | Valid comparison? |
+|---|---|---|---|---|
+| Instruments / effects loaded | 6 / 4 | 5 / 3 | −1 / −1 | yes |
+| Peak private, simultaneous, load (MB) | 1120 (1102–1153) | 1019 (1016–1021) | −9 % | yes, ranges separate |
+| Peak working set, load (MB) | 1050 (1033–1089) | 951 (947–957) | −9 % | yes |
+| Private before Play (MB) | 1318 | 1215 (1212–1218) | −103 MB, −8 % | yes |
+| Private during playback (MB) | 1320 | 1216 (1213–1219) | −8 % | yes |
+| Private after Stop 0–20 / 30–50 (MB) | 1323 / 1319 | 1220 / 1216 | −8 % | yes |
+| Process start → loaded (s) | 5.7 (5.7–5.8) | 7.2 (5.9–8.3) | | no (disturbed; the only quiet run took 5.9 s) |
+| CPU before Play, control (cores) | 0.36 (0.35–0.37) | 0.41 (0.40–0.41) | | no (disturbed) |
+| CPU playback, control (cores) | 0.44 (0.42–0.46) | 0.47 (0.46–0.48) | | no (disturbed) |
+| CPU after Stop 0–20 / 30–50, control (cores) | 0.38 / 0.39 | 0.42 / 0.36 | | no (disturbed) |
+| CPU, last run only (profiled, systemBusy 9–14 %): before Play / playback / after Stop 0–20 / 30–50 | 0.37 / 0.44 / 0.41 / 0.37 (profiled means) | 0.29 / 0.34 / 0.28 / 0.29 | | indicative only (1 run) |
+| Callback mean / max, playback, profiled (ms) | 0.67 / 1.29 | 0.52 / 0.97 | | indicative; the profiler's callback times are also affected by the disturbance |
+
+**Conclusion of the addendum**
+- Switching VB3-II copy 2 Off saved about 100 MB of private memory (−8 %) and about 100 MB of
+  load peak, and leaves 5 instruments and 3 effects loaded.
+- The CPU effect cannot be stated from this series. In the profile, one VB3-II instance cost
+  about 0.39 ms of summed plug-in time per block, so a saving of roughly 0.03–0.05 core is
+  plausible. The only undisturbed new run is lower than old C, but that is one run and is not a
+  confirmed improvement.
+- A CPU comparison needs a re-run of C with no other heavy application running.
+
+Full tables and per-run lines: `evidence/cpu-memory-abcd-2026-11-08/c2-summary.md`; series log
+with before/after hashes: `c2-series.log`; On rows: `c2-onrows.txt`; runs: `runs/c2-*`.
+
 ## 6. Evidence
 
 `docs/evidence/cpu-memory-abcd-2026-11-08/`:
