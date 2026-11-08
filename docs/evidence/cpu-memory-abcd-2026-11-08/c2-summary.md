@@ -1,4 +1,4 @@
-﻿| | Old C (2026-11-08, 4 runs) | New C, manually updated (4 runs) | Change | Ranges |
+| | Old C (2026-11-08, 4 runs) | New C, manually updated (4 runs) | Change | Ranges |
 |---|---|---|---|---|
 | Process start → loaded (s) | 5.7 (5.7–5.8) | 7.2 (5.9–8.3) | +26 % | separate |
 | Peak private, simultaneous total (MB) | 1120 (1102–1153) | 1019 (1016–1021) | -9 % | separate |

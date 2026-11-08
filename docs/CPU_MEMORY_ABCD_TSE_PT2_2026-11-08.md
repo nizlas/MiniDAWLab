@@ -449,6 +449,51 @@ not change the sound.
 Full tables and per-run lines: `evidence/cpu-memory-abcd-2026-11-08/c2-summary.md`; series log
 with before/after hashes: `c2-series.log`; On rows: `c2-onrows.txt`; runs: `runs/c2-*`.
 
+### 8.1 Re-run with the machine quiet (22:24–22:35)
+
+The user closed Civilization VI. Before the series, a 10 s process sample showed nothing heavier
+than Claude, Spotify and Edge (each 0.06–0.33 core); no DAL, Cubase, compiler or game was running.
+
+- **Setup**: the same temp copy, `C2.dalproj` (SHA-256 `244F1CC0…`, from original
+  `15645E5A…`), the same exe, device, arguments and mirrored order. Runs are `c3-*`.
+- **Original**: same hash before and after the series, still written 21:34:55. Device settings
+  were unchanged, no autosave was written, and InstrumentProxies held 36 files before and after.
+- **Run outcome**: all runs exited with code 0, with no leftover process and no crash dump.
+- **System load**: `systemBusy` was 7–10 % (one window 14 %), against 5–9 % for old C. That is
+  close, though slightly higher, so the background is comparable.
+
+| | Old C (file `E5CEF985…`, 6 instr. / 4 effects) | New C (file `15645E5A…`, 5 / 3) | Change |
+|---|---|---|---|
+| Process start → loaded (s) | 5.7 (5.7–5.8) | 5.6 (5.4–5.8), plus one run at 10.6 | same (the 10.6 s run had a 7.7 s load call; OS cache/disk, not reproduced) |
+| Peak private, simultaneous, load (MB) | 1120 (1102–1153) | 1005 (998–1015) | −10 % |
+| Peak working set, load (MB) | 1050 (1033–1089) | 938 (926–950) | −11 % |
+| **CPU before Play, control (cores)** | **0.361** (0.350–0.373) | **0.327** (0.317–0.337) | **−0.034, −9 %** |
+| **CPU playback, control (cores)** | **0.437** (0.418–0.455) | **0.398** (0.395–0.402) | **−0.039, −9 %** |
+| **CPU after Stop 0–20 s, control (cores)** | **0.375** (0.374–0.376) | **0.337** (0.320–0.354) | **−0.038, −10 %** |
+| **CPU after Stop 30–50 s, control (cores)** | **0.393** (0.390–0.396) | **0.333** (0.333–0.333) | **−0.060, −15 %** |
+| CPU, % of 24 logical: before Play / playback | 1.51 / 1.82 % | 1.36 / 1.66 % | |
+| CPU in profiled runs: before Play / playback / after Stop 0–20 / 30–50 | 0.37 / 0.44 / 0.41 / 0.37 | 0.32 / 0.39 / 0.33 / 0.35 | −5 to −18 % |
+| Private before Play / playback / after Stop (MB) | 1318 / 1320 / 1323 | 1208 / 1209 / 1214 | −110 MB, −8 % |
+| Callback mean, profiled: before Play / playback / after Stop (ms) | 0.60 / 0.67 / 0.59–0.60 | 0.47 / 0.53 / 0.47 | about −21 % |
+| Callback max, profiled: before Play / playback / after Stop (ms) | 1.27 / 1.29 / 1.28–1.41 | 1.20 / 1.24 / 1.22–1.28 | −0 to −14 % |
+| Overruns / blocks > 70 % / late starts / read-ahead misses | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | |
+| Proxy selected / jobs | 0 / none | 0 / none | |
+
+**Reading the comparison**
+- In every phase, the control-run CPU ranges of old and new C do not overlap, and the profiled
+  runs point the same way.
+- The saving, about **0.035–0.06 core (≈ −9 to −15 %)**, matches the profiled cost of one VB3-II
+  instance (≈ 0.39 ms of plug-in time per block, ≈ 0.04 core). It is the same size as the gap
+  between the old and new C ranges, so treat the exact percentage as approximate. With 2 control
+  runs per side, "about 0.04 core lower" is what this supports.
+- The memory saving (≈ 110 MB private, ≈ 115 MB load peak) is clear.
+- The output sound is unchanged (master peak/RMS 0.513 / 0.0716), as expected: the instrument
+  that was switched Off was already muted.
+
+The disturbed series in section 8 is kept as history. This quiet re-run replaces its CPU part.
+Tables: `evidence/cpu-memory-abcd-2026-11-08/c3-summary.md`; series log with before/after hashes:
+`c3-series.log`; runs: `runs/c3-*`.
+
 ## 6. Evidence
 
 `docs/evidence/cpu-memory-abcd-2026-11-08/`:
