@@ -1,0 +1,220 @@
+2026-11-08T20:58:54.234+01:00 stability test mode active (prompts auto-answer deterministically)
+2026-11-08T20:58:56.696+01:00 ================================================================
+2026-11-08T20:58:56.697+01:00 scenario start: perf-profile iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-cmp3\TSE_pt2_261031\run-r2-A-prof.dalproj
+2026-11-08T20:58:56.698+01:00 steps queued: 19 (delete-loop iterations expand at plan time)
+2026-11-08T20:58:57.208+01:00 step begin: perf-profile: load run-r2-A-prof.dalproj
+2026-11-08T20:59:14.048+01:00 step end ok: perf-profile: load run-r2-A-prof.dalproj elapsedMs=16839
+2026-11-08T20:59:14.130+01:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-11-08T20:59:15.297+01:00 step begin: perf-profile: verify loaded
+2026-11-08T20:59:15.297+01:00   track count after load: 52
+2026-11-08T20:59:15.299+01:00 step end ok: perf-profile: verify loaded elapsedMs=1
+2026-11-08T20:59:15.553+01:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-11-08T20:59:15.555+01:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-11-08T20:59:23.597+01:00 step begin: perf-profile: runtime conditions
+2026-11-08T20:59:23.598+01:00   exe=C:\Users\nicla\development\MiniDAWLab-rs-base\build\ninja-release-base-vs\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.4.0 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-11-08T20:59:23.599+01:00 step end ok: perf-profile: runtime conditions elapsedMs=1
+2026-11-08T20:59:23.905+01:00 step begin: perf-profile: project load (loaded vs processed)
+2026-11-08T20:59:23.906+01:00   exe=C:\Users\nicla\development\MiniDAWLab-rs-base\build\ninja-release-base-vs\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.4.0 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-11-08T20:59:23.907+01:00   tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=46 instances=58 | proxy states: 3:Primary,57:Primary,25:Primary,40:Primary,8:Primary,26:Primary,45:Primary,46:Primary,54:Primary,65:Primary,5:Primary,23:Primary,9:Primary,24:Primary
+2026-11-08T20:59:23.908+01:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=1
+2026-11-08T20:59:24.211+01:00 step begin: perf-profile: mixer window closed
+2026-11-08T20:59:24.219+01:00   mixer visible=no
+2026-11-08T20:59:24.220+01:00 step end ok: perf-profile: mixer window closed elapsedMs=7
+2026-11-08T20:59:24.568+01:00 step begin: perf-profile: transport stopped, never played (profiler on)
+2026-11-08T20:59:24.569+01:00   playing=no | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=985 serialBlocks=1 jobsByCallback=1739 jobsByWorkers=12065 joinKernelWaits=662 lastDispatchWallMs=0.466 lastJoinWaitMs=0.242 (cumulative since start)
+2026-11-08T20:59:24.570+01:00 step end ok: perf-profile: transport stopped, never played (profiler on) elapsedMs=0
+2026-11-08T20:59:26.602+01:00 step begin: perf-profile: stopped/never-played measurement window begins (30 s)
+2026-11-08T20:59:26.603+01:00   window start: playhead=181473 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=4716.25 MB private=5005.57 MB
+2026-11-08T20:59:26.603+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T20:59:26.605+01:00 step end ok: perf-profile: stopped/never-played measurement window begins (30 s) elapsedMs=1
+2026-11-08T20:59:56.629+01:00 step begin: perf-profile: stopped/never-played collect
+2026-11-08T20:59:56.630+01:00   === window: stopped/never-played ===
+2026-11-08T20:59:56.630+01:00   window end: wall=30.03 s playhead=181473 (started 181473)
+2026-11-08T20:59:56.631+01:00   engine: blocks=2816 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=3.531/4.065/5.223 budget%(mean/max)=38.1/49.0 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-08T20:59:56.631+01:00   output: peakHold=0.000 masterPeakL/R=0.000/0.000 oversL/R=0/0 rmsL/R=0.0000/0.0000 nonFinite=0
+2026-11-08T20:59:56.632+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-08T20:59:56.632+01:00   instruments: hosts with live processBlock blocks=14 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-08T20:59:56.633+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=3991 serialBlocks=1 jobsByCallback=7798 jobsByWorkers=48090 joinKernelWaits=2975 lastDispatchWallMs=0.488 lastJoinWaitMs=0.003 (cumulative since start)
+2026-11-08T20:59:56.633+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T20:59:56.633+01:00   process: cpu=87.5% of one core (3.6% of 24 cores) systemBusy=20.2% workingSet=4716.55 MB private=5005.79 MB pageFaultsInWindow=83 (soft+hard; 2.76415/s)
+2026-11-08T20:59:56.634+01:00   profile: blocks=2816 callback ms(mean/max)=4.065/5.223
+2026-11-08T20:59:56.634+01:00   profile: category instrument-plugin: perBlock ms(mean/max)=1.924/2.935 callsPerBlock=14.0 shareOfCallback=47.3%
+2026-11-08T20:59:56.635+01:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-08T20:59:56.635+01:00   profile: category insert-plugin: perBlock ms(mean/max)=3.504/4.593 callsPerBlock=16.0 shareOfCallback=86.2%
+2026-11-08T20:59:56.636+01:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.078/0.148 shareOfCallback=1.9%
+2026-11-08T20:59:56.636+01:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.005/0.044
+2026-11-08T20:59:56.636+01:00   profile: phase live-midi: perBlock ms(mean/max)=0.004/0.013
+2026-11-08T20:59:56.637+01:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.000/0.001
+2026-11-08T20:59:56.637+01:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.000/0.000
+2026-11-08T20:59:56.637+01:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.001
+2026-11-08T20:59:56.638+01:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.559/0.978
+2026-11-08T20:59:56.638+01:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.004/0.070
+2026-11-08T20:59:56.638+01:00   profile: worst block: total=5.223 ms (512 samples): instrument-plugin CPU 2.018 | proxy-mix 0.000 | insert-plugin 4.593 | generation-section wall 0.510 | remainder 0.120
+2026-11-08T20:59:56.639+01:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=0.484/0.890 callbackIdleWait ms(mean/max)=0.220/0.635 jobsPerBlock=14.0 parallelBlocks=2816 of 2816 effectiveParallelism(instrumentCPU/sectionWall)=3.98 (parallel blocks only: 3.98)
+2026-11-08T20:59:56.639+01:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-11-08T20:59:56.639+01:00   profile: callback start intervals: n=2816 ms(mean/max)=10.666/11.310 lateStarts(>1.25x period)=0
+2026-11-08T20:59:56.640+01:00   profile: instances with calls=30 of registered 72; top 12 by summed ms:
+2026-11-08T20:59:56.640+01:00   profile:   #1 track 9 "VB3-II â€” kopia" plugin "VB3-II" mode=instrument-plugin calls=2816 meanPerCall=446.2 us maxCall=0.744 ms perBlock=0.446 ms share=11.0%
+2026-11-08T20:59:56.641+01:00   profile:   #2 track 5 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=2816 meanPerCall=442.5 us maxCall=0.843 ms perBlock=0.443 ms share=10.9%
+2026-11-08T20:59:56.641+01:00   profile:   #3 track 23 "VB3-II â€” kopia 2" plugin "VB3-II" mode=instrument-plugin calls=2816 meanPerCall=440.0 us maxCall=0.844 ms perBlock=0.440 ms share=10.8%
+2026-11-08T20:59:56.641+01:00   profile:   #4 track 22 "Track 4 â€” kopia 2 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 1 plugin "AmpliTube 4 [Pre]" mode=insert-plugin calls=2816 meanPerCall=362.8 us maxCall=0.649 ms perBlock=0.363 ms share=8.9%
+2026-11-08T20:59:56.642+01:00   profile:   #5 track 35 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=293.6 us maxCall=0.759 ms perBlock=0.293 ms share=7.2%
+2026-11-08T20:59:56.642+01:00   profile:   #6 track 64 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 15" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=291.4 us maxCall=0.623 ms perBlock=0.291 ms share=7.2%
+2026-11-08T20:59:56.642+01:00   profile:   #7 track 22 "Track 4 â€” kopia 2 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 4 plugin "Pro-R [Post]" mode=insert-plugin calls=2816 meanPerCall=283.1 us maxCall=0.568 ms perBlock=0.283 ms share=7.0%
+2026-11-08T20:59:56.643+01:00   profile:   #8 track 47 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=280.9 us maxCall=0.796 ms perBlock=0.281 ms share=6.9%
+2026-11-08T20:59:56.643+01:00   profile:   #9 track 60 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 11" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=279.1 us maxCall=0.431 ms perBlock=0.279 ms share=6.9%
+2026-11-08T20:59:56.643+01:00   profile:   #10 track 53 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 6" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2816 meanPerCall=278.2 us maxCall=0.460 ms perBlock=0.278 ms share=6.8%
+2026-11-08T20:59:56.644+01:00   profile:   #11 track 44 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 2" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=273.9 us maxCall=0.403 ms perBlock=0.274 ms share=6.7%
+2026-11-08T20:59:56.644+01:00   profile:   #12 track 58 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 9" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=273.0 us maxCall=0.397 ms perBlock=0.273 ms share=6.7%
+2026-11-08T20:59:56.644+01:00   profile: top 12 together = 97.0% of callback time
+2026-11-08T20:59:56.645+01:00   profile: by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 3.068 ms 75.5%] [VB3-II x3 1.329 ms 32.7%] [HALion Sonic x9 0.364 ms 8.9%] [AmpliTube 4 [Pre] x1 0.363 ms 8.9%] [Groove Agent SE x2 0.231 ms 5.7%] [Pro-Q 3 [Post] x2 0.041 ms 1.0%] [DAL Mono Delay [Post] x2 0.031 ms 0.8%]
+2026-11-08T20:59:56.646+01:00 step end ok: perf-profile: stopped/never-played collect elapsedMs=16
+2026-11-08T20:59:56.885+01:00 step begin: perf-profile: start playback (warm-up 5 s)
+2026-11-08T20:59:56.886+01:00   start at 17.00 s (sample 816000) cycle=on profiler=ON generation=as configured | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=4014 serialBlocks=1 jobsByCallback=7835 jobsByWorkers=48386 joinKernelWaits=2993 lastDispatchWallMs=0.527 lastJoinWaitMs=0.334 (cumulative since start)
+2026-11-08T20:59:56.887+01:00 step end ok: perf-profile: start playback (warm-up 5 s) elapsedMs=1
+2026-11-08T21:00:01.929+01:00 step begin: perf-profile: configured measurement window begins (30 s)
+2026-11-08T21:00:01.930+01:00   window start: playhead=1058176 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=4731.75 MB private=5020.72 MB
+2026-11-08T21:00:01.931+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=7600 consumed=7552 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #1 id=27 "Track 27" inserts=[]; #2 id=28 "Track 27 â€” kopia" inserts=[Post:Pro-R]; #3 id=32 "Track 27 â€” kopia â€” kopia 3" inserts=[Post:Pro-R]; #4 id=31 "Track 27 â€” kopia â€” kopia 2" inserts=[Post:Pro-R]; #5 id=30 "Track 27 â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #6 id=35 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #7 id=44 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 2" inserts=[Post:Pro-R]; #8 id=38 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #9 id=39 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #10 id=43 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #21 id=47 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #22 id=70 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 20" inserts=[Post:Pro-R]; #23 id=69 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 19" inserts=[Post:Pro-R]; #24 id=68 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 18" inserts=[Post:Pro-R]; #25 id=67 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 17" inserts=[Post:Pro-R]
+2026-11-08T21:00:01.932+01:00 step end ok: perf-profile: configured measurement window begins (30 s) elapsedMs=1
+2026-11-08T21:00:31.943+01:00 step begin: perf-profile: configured collect
+2026-11-08T21:00:31.944+01:00   === window: configured ===
+2026-11-08T21:00:31.945+01:00   window end: wall=30.01 s playhead=2498944 (started 1058176)
+2026-11-08T21:00:31.945+01:00   engine: blocks=2814 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=0.690/0.907/1.309 budget%(mean/max)=8.5/12.3 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-08T21:00:31.946+01:00   output: peakHold=0.573 masterPeakL/R=0.554/0.573 oversL/R=0/0 rmsL/R=0.0707/0.0728 nonFinite=0
+2026-11-08T21:00:31.946+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-08T21:00:31.947+01:00   instruments: hosts with live processBlock blocks=14 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-08T21:00:31.947+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=7302 serialBlocks=1 jobsByCallback=23215 jobsByWorkers=144783 joinKernelWaits=5400 lastDispatchWallMs=0.875 lastJoinWaitMs=0.230 (cumulative since start)
+2026-11-08T21:00:31.947+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52624 consumed=52576 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #1 id=27 "Track 27" inserts=[]; #2 id=28 "Track 27 â€” kopia" inserts=[Post:Pro-R]; #3 id=32 "Track 27 â€” kopia â€” kopia 3" inserts=[Post:Pro-R]; #4 id=31 "Track 27 â€” kopia â€” kopia 2" inserts=[Post:Pro-R]; #5 id=30 "Track 27 â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #6 id=35 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #7 id=44 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 2" inserts=[Post:Pro-R]; #8 id=38 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #9 id=39 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #10 id=43 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #21 id=47 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #22 id=70 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 20" inserts=[Post:Pro-R]; #23 id=69 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 19" inserts=[Post:Pro-R]; #24 id=68 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 18" inserts=[Post:Pro-R]; #25 id=67 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 17" inserts=[Post:Pro-R]
+2026-11-08T21:00:31.948+01:00   process: cpu=106.0% of one core (4.4% of 24 cores) systemBusy=33.8% workingSet=4718.16 MB private=5007.12 MB pageFaultsInWindow=94 (soft+hard; 3.13183/s)
+2026-11-08T21:00:31.949+01:00   profile: blocks=2814 callback ms(mean/max)=0.908/1.309
+2026-11-08T21:00:31.949+01:00   profile: category instrument-plugin: perBlock ms(mean/max)=2.417/3.834 callsPerBlock=14.0 shareOfCallback=266.3%
+2026-11-08T21:00:31.949+01:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-08T21:00:31.950+01:00   profile: category insert-plugin: perBlock ms(mean/max)=2.396/4.545 callsPerBlock=10.0 shareOfCallback=263.9%
+2026-11-08T21:00:31.950+01:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.083/0.198 shareOfCallback=9.1%
+2026-11-08T21:00:31.950+01:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.006/0.020
+2026-11-08T21:00:31.950+01:00   profile: phase live-midi: perBlock ms(mean/max)=0.004/0.020
+2026-11-08T21:00:31.951+01:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.856/1.248
+2026-11-08T21:00:31.951+01:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.013/0.051
+2026-11-08T21:00:31.951+01:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.002
+2026-11-08T21:00:31.952+01:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.010/0.044
+2026-11-08T21:00:31.952+01:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.003/0.025
+2026-11-08T21:00:31.952+01:00   profile: worst block: total=1.309 ms (512 samples): instrument-plugin CPU 3.120 | proxy-mix 0.000 | insert-plugin 3.589 | generation-section wall 1.199 | remainder 0.111
+2026-11-08T21:00:31.953+01:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=0.825/1.216 callbackIdleWait ms(mean/max)=0.184/0.536 jobsPerBlock=34.0 parallelBlocks=2814 of 2814 effectiveParallelism(instrumentCPU/sectionWall)=2.93 (parallel blocks only: 2.93)
+2026-11-08T21:00:31.953+01:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-11-08T21:00:31.954+01:00   profile: callback start intervals: n=2814 ms(mean/max)=10.666/11.018 lateStarts(>1.25x period)=0
+2026-11-08T21:00:31.954+01:00   profile: instances with calls=30 of registered 72; top 12 by summed ms:
+2026-11-08T21:00:31.954+01:00   profile:   #1 track 23 "VB3-II â€” kopia 2" plugin "VB3-II" mode=instrument-plugin calls=2814 meanPerCall=522.6 us maxCall=1.049 ms perBlock=0.523 ms share=57.6%
+2026-11-08T21:00:31.955+01:00   profile:   #2 track 5 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=2814 meanPerCall=519.6 us maxCall=0.965 ms perBlock=0.520 ms share=57.2%
+2026-11-08T21:00:31.955+01:00   profile:   #3 track 9 "VB3-II â€” kopia" plugin "VB3-II" mode=instrument-plugin calls=2814 meanPerCall=514.1 us maxCall=0.954 ms perBlock=0.514 ms share=56.6%
+2026-11-08T21:00:31.955+01:00   profile:   #4 track 22 "Track 4 â€” kopia 2 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 1 plugin "AmpliTube 4 [Pre]" mode=insert-plugin calls=2814 meanPerCall=426.7 us maxCall=0.716 ms perBlock=0.427 ms share=47.0%
+2026-11-08T21:00:31.956+01:00   profile:   #5 track 64 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 15" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=385.5 us maxCall=0.857 ms perBlock=0.386 ms share=42.5%
+2026-11-08T21:00:31.956+01:00   profile:   #6 track 58 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 9" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2816 meanPerCall=384.2 us maxCall=0.850 ms perBlock=0.385 ms share=42.4%
+2026-11-08T21:00:31.956+01:00   profile:   #7 track 60 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 11" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2816 meanPerCall=383.6 us maxCall=0.857 ms perBlock=0.384 ms share=42.3%
+2026-11-08T21:00:31.957+01:00   profile:   #8 track 53 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 6" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2816 meanPerCall=383.0 us maxCall=0.829 ms perBlock=0.383 ms share=42.2%
+2026-11-08T21:00:31.957+01:00   profile:   #9 track 22 "Track 4 â€” kopia 2 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 4 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=344.0 us maxCall=0.662 ms perBlock=0.344 ms share=37.9%
+2026-11-08T21:00:31.958+01:00   profile:   #10 track 35 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=311.4 us maxCall=0.653 ms perBlock=0.311 ms share=34.3%
+2026-11-08T21:00:31.958+01:00   profile:   #11 track 47 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=293.5 us maxCall=0.614 ms perBlock=0.294 ms share=32.3%
+2026-11-08T21:00:31.958+01:00   profile:   #12 track 39 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2816 meanPerCall=290.5 us maxCall=0.582 ms perBlock=0.291 ms share=32.0%
+2026-11-08T21:00:31.959+01:00   profile: top 12 together = 524.4% of callback time
+2026-11-08T21:00:31.959+01:00   profile: by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 3.630 ms 399.9%] [VB3-II x3 1.556 ms 171.4%] [HALion Sonic x9 0.464 ms 51.1%] [AmpliTube 4 [Pre] x1 0.427 ms 47.0%] [Groove Agent SE x2 0.397 ms 43.7%] [Pro-Q 3 [Post] x2 0.053 ms 5.8%] [DAL Mono Delay [Post] x2 0.035 ms 3.9%]
+2026-11-08T21:00:31.960+01:00 step end ok: perf-profile: configured collect elapsedMs=15
+2026-11-08T21:00:32.196+01:00 step begin: perf-profile: stop playback (profiler stays on)
+2026-11-08T21:00:32.197+01:00   stopped; playhead=2510720
+2026-11-08T21:00:32.198+01:00 step end ok: perf-profile: stop playback (profiler stays on) elapsedMs=0
+2026-11-08T21:00:32.413+01:00 step begin: perf-profile: stopped/right-after-stop measurement window begins (30 s)
+2026-11-08T21:00:32.414+01:00   window start: playhead=2510720 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=4732.12 MB private=5021.09 MB
+2026-11-08T21:00:32.415+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52992 consumed=52944 missed=0 staleDiscarded=48 drainReleases=0 discardResets=16 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T21:00:32.416+01:00 step end ok: perf-profile: stopped/right-after-stop measurement window begins (30 s) elapsedMs=1
+2026-11-08T21:01:02.432+01:00 step begin: perf-profile: stopped/right-after-stop collect
+2026-11-08T21:01:02.432+01:00   === window: stopped/right-after-stop ===
+2026-11-08T21:01:02.433+01:00   window end: wall=30.02 s playhead=2510720 (started 2510720)
+2026-11-08T21:01:02.434+01:00   engine: blocks=2815 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=3.772/4.311/6.064 budget%(mean/max)=40.4/56.8 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-08T21:01:02.434+01:00   output: peakHold=0.044 masterPeakL/R=0.044/0.033 oversL/R=0/0 rmsL/R=0.0007/0.0008 nonFinite=0
+2026-11-08T21:01:02.435+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-08T21:01:02.435+01:00   instruments: hosts with live processBlock blocks=14 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-08T21:01:02.436+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=10160 serialBlocks=1 jobsByCallback=27701 jobsByWorkers=180769 joinKernelWaits=7871 lastDispatchWallMs=0.467 lastJoinWaitMs=0.305 (cumulative since start)
+2026-11-08T21:01:02.436+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52992 consumed=52944 missed=0 staleDiscarded=48 drainReleases=0 discardResets=16 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T21:01:02.436+01:00   process: cpu=88.3% of one core (3.7% of 24 cores) systemBusy=36.8% workingSet=4718.27 MB private=5007.2 MB pageFaultsInWindow=8 (soft+hard; 0.266499/s)
+2026-11-08T21:01:02.437+01:00   profile: blocks=2815 callback ms(mean/max)=4.311/6.064
+2026-11-08T21:01:02.438+01:00   profile: category instrument-plugin: perBlock ms(mean/max)=2.008/4.022 callsPerBlock=14.0 shareOfCallback=46.6%
+2026-11-08T21:01:02.438+01:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-08T21:01:02.439+01:00   profile: category insert-plugin: perBlock ms(mean/max)=3.720/5.202 callsPerBlock=16.0 shareOfCallback=86.3%
+2026-11-08T21:01:02.439+01:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.090/0.163 shareOfCallback=2.1%
+2026-11-08T21:01:02.439+01:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.006/0.020
+2026-11-08T21:01:02.440+01:00   profile: phase live-midi: perBlock ms(mean/max)=0.004/0.041
+2026-11-08T21:01:02.440+01:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.000/0.012
+2026-11-08T21:01:02.440+01:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.000/0.000
+2026-11-08T21:01:02.441+01:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.015
+2026-11-08T21:01:02.441+01:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.585/1.057
+2026-11-08T21:01:02.441+01:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.005/0.024
+2026-11-08T21:01:02.442+01:00   profile: worst block: total=6.064 ms (512 samples): instrument-plugin CPU 4.022 | proxy-mix 0.000 | insert-plugin 5.117 | generation-section wall 0.850 | remainder 0.097
+2026-11-08T21:01:02.442+01:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=0.502/0.850 callbackIdleWait ms(mean/max)=0.277/0.638 jobsPerBlock=14.0 parallelBlocks=2815 of 2815 effectiveParallelism(instrumentCPU/sectionWall)=4.00 (parallel blocks only: 4.00)
+2026-11-08T21:01:02.443+01:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-11-08T21:01:02.443+01:00   profile: callback start intervals: n=2815 ms(mean/max)=10.666/11.329 lateStarts(>1.25x period)=0
+2026-11-08T21:01:02.444+01:00   profile: instances with calls=30 of registered 72; top 12 by summed ms:
+2026-11-08T21:01:02.444+01:00   profile:   #1 track 9 "VB3-II â€” kopia" plugin "VB3-II" mode=instrument-plugin calls=2815 meanPerCall=459.9 us maxCall=0.819 ms perBlock=0.460 ms share=10.7%
+2026-11-08T21:01:02.444+01:00   profile:   #2 track 5 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=2815 meanPerCall=456.1 us maxCall=0.800 ms perBlock=0.456 ms share=10.6%
+2026-11-08T21:01:02.445+01:00   profile:   #3 track 23 "VB3-II â€” kopia 2" plugin "VB3-II" mode=instrument-plugin calls=2815 meanPerCall=452.8 us maxCall=0.781 ms perBlock=0.453 ms share=10.5%
+2026-11-08T21:01:02.445+01:00   profile:   #4 track 22 "Track 4 â€” kopia 2 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 1 plugin "AmpliTube 4 [Pre]" mode=insert-plugin calls=2815 meanPerCall=386.7 us maxCall=0.674 ms perBlock=0.387 ms share=9.0%
+2026-11-08T21:01:02.446+01:00   profile:   #5 track 35 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=311.0 us maxCall=0.703 ms perBlock=0.311 ms share=7.2%
+2026-11-08T21:01:02.446+01:00   profile:   #6 track 22 "Track 4 â€” kopia 2 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 4 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=304.3 us maxCall=0.651 ms perBlock=0.304 ms share=7.1%
+2026-11-08T21:01:02.446+01:00   profile:   #7 track 64 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 15" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=304.2 us maxCall=0.653 ms perBlock=0.304 ms share=7.1%
+2026-11-08T21:01:02.447+01:00   profile:   #8 track 47 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=301.6 us maxCall=0.777 ms perBlock=0.301 ms share=7.0%
+2026-11-08T21:01:02.447+01:00   profile:   #9 track 60 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 11" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=295.4 us maxCall=0.553 ms perBlock=0.295 ms share=6.8%
+2026-11-08T21:01:02.448+01:00   profile:   #10 track 53 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 6" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2815 meanPerCall=294.4 us maxCall=0.624 ms perBlock=0.294 ms share=6.8%
+2026-11-08T21:01:02.448+01:00   profile:   #11 track 44 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 2" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=290.0 us maxCall=0.485 ms perBlock=0.290 ms share=6.7%
+2026-11-08T21:01:02.448+01:00   profile:   #12 track 58 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 9" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=289.1 us maxCall=0.515 ms perBlock=0.289 ms share=6.7%
+2026-11-08T21:01:02.449+01:00   profile: top 12 together = 96.1% of callback time
+2026-11-08T21:01:02.449+01:00   profile: by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 3.253 ms 75.5%] [VB3-II x3 1.369 ms 31.8%] [AmpliTube 4 [Pre] x1 0.387 ms 9.0%] [HALion Sonic x9 0.383 ms 8.9%] [Groove Agent SE x2 0.256 ms 5.9%] [Pro-Q 3 [Post] x2 0.043 ms 1.0%] [DAL Mono Delay [Post] x2 0.036 ms 0.8%]
+2026-11-08T21:01:02.450+01:00 step end ok: perf-profile: stopped/right-after-stop collect elapsedMs=17
+2026-11-08T21:01:02.684+01:00 step begin: perf-profile: wait 0 s stopped
+2026-11-08T21:01:02.685+01:00 step end ok: perf-profile: wait 0 s stopped elapsedMs=0
+2026-11-08T21:01:02.890+01:00 step begin: perf-profile: stopped/after-gap measurement window begins (30 s)
+2026-11-08T21:01:02.891+01:00   window start: playhead=2510720 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=4718.27 MB private=5007.2 MB
+2026-11-08T21:01:02.891+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52992 consumed=52944 missed=0 staleDiscarded=48 drainReleases=0 discardResets=16 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T21:01:02.892+01:00 step end ok: perf-profile: stopped/after-gap measurement window begins (30 s) elapsedMs=1
+2026-11-08T21:01:32.898+01:00 step begin: perf-profile: stopped/after-gap collect
+2026-11-08T21:01:32.899+01:00   === window: stopped/after-gap ===
+2026-11-08T21:01:32.899+01:00   window end: wall=30.01 s playhead=2510720 (started 2510720)
+2026-11-08T21:01:32.900+01:00   engine: blocks=2813 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=3.635/4.264/6.982 budget%(mean/max)=40.0/65.5 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-08T21:01:32.901+01:00   output: peakHold=0.000 masterPeakL/R=0.000/0.000 oversL/R=0/0 rmsL/R=0.0000/0.0000 nonFinite=0
+2026-11-08T21:01:32.901+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-08T21:01:32.902+01:00   instruments: hosts with live processBlock blocks=14 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-08T21:01:32.902+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=13016 serialBlocks=1 jobsByCallback=32428 jobsByWorkers=216026 joinKernelWaits=10357 lastDispatchWallMs=0.489 lastJoinWaitMs=0.337 (cumulative since start)
+2026-11-08T21:01:32.903+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52992 consumed=52944 missed=0 staleDiscarded=48 drainReleases=0 discardResets=16 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T21:01:32.903+01:00   process: cpu=88.5% of one core (3.7% of 24 cores) systemBusy=33.7% workingSet=4718.27 MB private=5007.2 MB pageFaultsInWindow=64 (soft+hard; 2.13271/s)
+2026-11-08T21:01:32.904+01:00   profile: blocks=2813 callback ms(mean/max)=4.264/6.982
+2026-11-08T21:01:32.904+01:00   profile: category instrument-plugin: perBlock ms(mean/max)=1.992/3.212 callsPerBlock=14.0 shareOfCallback=46.7%
+2026-11-08T21:01:32.905+01:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-11-08T21:01:32.905+01:00   profile: category insert-plugin: perBlock ms(mean/max)=3.680/6.357 callsPerBlock=16.0 shareOfCallback=86.3%
+2026-11-08T21:01:32.906+01:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.089/0.180 shareOfCallback=2.1%
+2026-11-08T21:01:32.906+01:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.006/0.017
+2026-11-08T21:01:32.907+01:00   profile: phase live-midi: perBlock ms(mean/max)=0.004/0.036
+2026-11-08T21:01:32.907+01:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.000/0.001
+2026-11-08T21:01:32.907+01:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.000/0.000
+2026-11-08T21:01:32.908+01:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.013
+2026-11-08T21:01:32.908+01:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=0.578/0.957
+2026-11-08T21:01:32.909+01:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.005/0.022
+2026-11-08T21:01:32.909+01:00   profile: worst block: total=6.982 ms (512 samples): instrument-plugin CPU 2.038 | proxy-mix 0.000 | insert-plugin 6.357 | generation-section wall 0.506 | remainder 0.119
+2026-11-08T21:01:32.909+01:00   profile: generation section (dispatch -> join): wall perBlock ms(mean/max)=0.495/0.864 callbackIdleWait ms(mean/max)=0.269/0.667 jobsPerBlock=14.0 parallelBlocks=2813 of 2813 effectiveParallelism(instrumentCPU/sectionWall)=4.02 (parallel blocks only: 4.02)
+2026-11-08T21:01:32.910+01:00   profile: NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.
+2026-11-08T21:01:32.910+01:00   profile: callback start intervals: n=2813 ms(mean/max)=10.666/11.442 lateStarts(>1.25x period)=0
+2026-11-08T21:01:32.911+01:00   profile: instances with calls=30 of registered 72; top 12 by summed ms:
+2026-11-08T21:01:32.911+01:00   profile:   #1 track 9 "VB3-II â€” kopia" plugin "VB3-II" mode=instrument-plugin calls=2813 meanPerCall=455.7 us maxCall=0.772 ms perBlock=0.456 ms share=10.7%
+2026-11-08T21:01:32.912+01:00   profile:   #2 track 5 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=2813 meanPerCall=452.6 us maxCall=0.758 ms perBlock=0.453 ms share=10.6%
+2026-11-08T21:01:32.912+01:00   profile:   #3 track 23 "VB3-II â€” kopia 2" plugin "VB3-II" mode=instrument-plugin calls=2813 meanPerCall=448.2 us maxCall=0.831 ms perBlock=0.448 ms share=10.5%
+2026-11-08T21:01:32.912+01:00   profile:   #4 track 22 "Track 4 â€” kopia 2 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 1 plugin "AmpliTube 4 [Pre]" mode=insert-plugin calls=2813 meanPerCall=380.1 us maxCall=0.711 ms perBlock=0.380 ms share=8.9%
+2026-11-08T21:01:32.913+01:00   profile:   #5 track 35 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=311.1 us maxCall=0.636 ms perBlock=0.311 ms share=7.3%
+2026-11-08T21:01:32.913+01:00   profile:   #6 track 64 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 15" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=301.0 us maxCall=0.585 ms perBlock=0.301 ms share=7.1%
+2026-11-08T21:01:32.914+01:00   profile:   #7 track 22 "Track 4 â€” kopia 2 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 4 plugin "Pro-R [Post]" mode=insert-plugin calls=2813 meanPerCall=300.7 us maxCall=0.682 ms perBlock=0.301 ms share=7.1%
+2026-11-08T21:01:32.914+01:00   profile:   #8 track 47 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=298.8 us maxCall=0.720 ms perBlock=0.299 ms share=7.0%
+2026-11-08T21:01:32.915+01:00   profile:   #9 track 60 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 11" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=292.4 us maxCall=0.616 ms perBlock=0.293 ms share=6.9%
+2026-11-08T21:01:32.915+01:00   profile:   #10 track 53 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 6" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=291.0 us maxCall=0.684 ms perBlock=0.291 ms share=6.8%
+2026-11-08T21:01:32.915+01:00   profile:   #11 track 44 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 2" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=287.9 us maxCall=0.585 ms perBlock=0.288 ms share=6.8%
+2026-11-08T21:01:32.916+01:00   profile:   #12 track 58 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 9" insert slot 10 plugin "Pro-R [Post]" mode=insert-plugin calls=2814 meanPerCall=286.4 us maxCall=0.673 ms perBlock=0.287 ms share=6.7%
+2026-11-08T21:01:32.916+01:00   profile: top 12 together = 96.3% of callback time
+2026-11-08T21:01:32.917+01:00   profile: by plug-in (instances, perBlock ms, share): [Pro-R [Post] x11 3.224 ms 75.6%] [VB3-II x3 1.357 ms 31.8%] [HALion Sonic x9 0.386 ms 9.1%] [AmpliTube 4 [Pre] x1 0.380 ms 8.9%] [Groove Agent SE x2 0.249 ms 5.8%] [Pro-Q 3 [Post] x2 0.043 ms 1.0%] [DAL Mono Delay [Post] x2 0.035 ms 0.8%]
+2026-11-08T21:01:32.918+01:00 step end ok: perf-profile: stopped/after-gap collect elapsedMs=19
+2026-11-08T21:01:33.153+01:00 step begin: perf-profile: stop playback, profiler off
+2026-11-08T21:01:33.154+01:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-11-08T21:01:33.963+01:00 RESULT: PASS scenario=perf-profile totalMs=157267

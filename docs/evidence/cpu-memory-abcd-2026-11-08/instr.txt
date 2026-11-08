@@ -1,0 +1,104 @@
+﻿== experimentalInstrumentTracks (A | B)
+[0] track 3 'Track 3' plugin= kind=GrooveAgentSE kit=FiftySixDegreesModified notes=0->0 muted=None->None powerOn=None->None proxyMode=None->manual proxyActive=None->None trackOff=False->False
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxy,drumNoteNamesAutoPlugin,clips
+[1] track 25 'Track 3 � kopia' plugin= kind=GrooveAgentSE kit=FiftySixDegreesModified notes=0->0 muted=None->None powerOn=None->None proxyMode=None->manual proxyActive=None->None trackOff=False->False
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxy,drumNoteNamesAutoPlugin,clips
+[2] track 8 'Track 8' plugin= kind=HALionSonic kit= notes=0->0 muted=True->True powerOn=None->False proxyMode=off->off proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,muted,clips
+[3] track 26 'Track 8 � kopia 2' plugin= kind=HALionSonic kit= notes=0->0 muted=True->True powerOn=None->False proxyMode=off->off proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,muted,clips
+[4] track 45 'Track 8 � kopia 2 � kopia' plugin= kind=HALionSonic kit= notes=0->0 muted=None->None powerOn=None->None proxyMode=off->off proxyActive=None->None trackOff=False->False
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,clips
+[5] track 40 'Track 8 � kopia 3' plugin= kind=HALionSonic kit= notes=0->0 muted=True->None powerOn=None->None proxyMode=off->off proxyActive=None->None trackOff=False->False
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,muted,clips
+[6] track 46 'Track 8 � kopia 3 � kopia' plugin= kind=HALionSonic kit= notes=0->0 muted=True->True powerOn=None->False proxyMode=off->off proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,muted,clips
+[7] track 57 'Track 8 � kopia 3 � kopia � ko' plugin= kind=HALionSonic kit= notes=0->0 muted=True->True powerOn=None->False proxyMode=off->off proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,muted,clips
+[8] track 54 'Track 8 � kopia 3 � kopia � ko' plugin= kind=HALionSonic kit= notes=0->0 muted=True->True powerOn=None->False proxyMode=off->off proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,muted,clips
+[9] track 65 'Track 8 � kopia 3 � kopia � ko' plugin= kind=HALionSonic kit= notes=0->0 muted=True->True powerOn=None->False proxyMode=off->off proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,muted,clips
+[10] track 5 'VB3-II' plugin= kind=GenericVst3 kit= notes=0->0 muted=None->None powerOn=None->None proxyMode=onSave->onSave proxyActive=None->None trackOff=False->False
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,genericVst3Descriptor,pluginVersion,proxy,proxyUpdateMode,secondary,clips
+[11] track 23 'VB3-II � kopia 2' plugin= kind=GenericVst3 kit= notes=0->0 muted=True->None powerOn=None->None proxyMode=manual->manual proxyActive=None->None trackOff=False->False
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,genericVst3Descriptor,pluginVersion,proxy,proxyUpdateMode,secondary,muted,clips
+[12] track 9 'VB3-II � kopia' plugin= kind=GenericVst3 kit= notes=0->0 muted=None->None powerOn=None->False proxyMode=manual->manual proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,genericVst3Descriptor,pluginVersion,proxy,proxyUpdateMode,secondary,clips
+[13] track 7 'MIDI 1' plugin= kind=MidiContent kit= notes=0->0 muted=None->None powerOn=None->False proxyMode=None->manual proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,clips
+[14] track 24 'Track 8 � kopia' plugin= kind=HALionSonic kit= notes=0->0 muted=True->True powerOn=None->False proxyMode=off->off proxyActive=None->None trackOff=False->True
+     keys: name,instrumentKind,requiredKitName,trackId,pluginBundlePath,pluginWasLoadedOnSave,proxyUpdateMode,muted,clips
+== insert state differences, byte level (GUID masked)
+  track 12 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7259/7259 differingBytes=39 span=193..239 equalAfterGuidMask=False
+  track 13 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7259/7259 differingBytes=35 span=193..240 equalAfterGuidMask=False
+  track 14 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7259/7259 differingBytes=36 span=193..240 equalAfterGuidMask=False
+  track 15 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7259/7259 differingBytes=40 span=193..240 equalAfterGuidMask=False
+  track 18 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7259/7259 differingBytes=36 span=193..240 equalAfterGuidMask=False
+  track 17 insert 1 VST3-AmpliTube 4-1e8907dd-62218172 len 7259/7259 differingBytes=37 span=193..239 equalAfterGuidMask=False
+  track 19 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7259/7259 differingBytes=33 span=193..240 equalAfterGuidMask=False
+  track 20 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7095/7095 differingBytes=37 span=193..240 equalAfterGuidMask=False
+  track 21 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7095/7095 differingBytes=37 span=193..240 equalAfterGuidMask=False
+  track 22 insert 0 VST3-AmpliTube 4-1e8907dd-62218172 len 7095/7095 differingBytes=33 span=193..239 equalAfterGuidMask=False
+== instrument plugin state (GUID masked)
+  [0] track 3 len 151865/148660
+  [1] track 25 len 151839/148645
+== inserts per track (A)
+  track 28 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 32 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 31 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 30 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 35 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 44 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 38 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 39 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 43 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 8 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 26 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 45 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 40 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 46 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 57 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 54 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 65 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 47 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 70 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 69 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 68 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 67 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 66 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 64 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 63 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 62 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 61 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 60 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 58 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 56 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 55 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 53 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 12 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 12 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 13 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 13 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 14 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 14 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 15 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 15 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 18 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 18 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 17 stage=pre VST3-DAL Tuner-ddb566b2-dc3ba1a8
+  track 17 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 17 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 19 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 19 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 20 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 20 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 21 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 21 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 22 stage=pre VST3-AmpliTube 4-1e8907dd-62218172
+  track 22 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8
+  track 22 stage=post VST3-Pro-R-961b5505-78c01fa6
+  track 5 stage=post VST3-Pro-Q 3-ba029d33-ba5f7ab2
+  track 23 stage=post VST3-Pro-Q 3-ba029d33-ba5f7ab2
+  track 9 stage=post VST3-Pro-Q 3-ba029d33-ba5f7ab2
+  track 24 stage=post VST3-DAL Mono Delay-10fb0e66-dc3497a8

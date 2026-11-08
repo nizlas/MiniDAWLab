@@ -1,0 +1,96 @@
+2026-11-08T20:20:28.191+01:00 stability test mode active (prompts auto-answer deterministically)
+2026-11-08T20:20:30.548+01:00 ================================================================
+2026-11-08T20:20:30.548+01:00 scenario start: perf-profile iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-cmp3\TSE_pt2_261031\run-r1-A-ctl.dalproj
+2026-11-08T20:20:30.549+01:00 steps queued: 19 (delete-loop iterations expand at plan time)
+2026-11-08T20:20:31.057+01:00 step begin: perf-profile: load run-r1-A-ctl.dalproj
+2026-11-08T20:20:43.666+01:00 step end ok: perf-profile: load run-r1-A-ctl.dalproj elapsedMs=12608
+2026-11-08T20:20:43.715+01:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-11-08T20:20:44.870+01:00 step begin: perf-profile: verify loaded
+2026-11-08T20:20:44.871+01:00   track count after load: 52
+2026-11-08T20:20:44.872+01:00 step end ok: perf-profile: verify loaded elapsedMs=0
+2026-11-08T20:20:45.125+01:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-11-08T20:20:45.127+01:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-11-08T20:20:53.157+01:00 step begin: perf-profile: runtime conditions
+2026-11-08T20:20:53.158+01:00   exe=C:\Users\nicla\development\MiniDAWLab-rs-base\build\ninja-release-base-vs\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.4.0 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-11-08T20:20:53.158+01:00 step end ok: perf-profile: runtime conditions elapsedMs=1
+2026-11-08T20:20:53.467+01:00 step begin: perf-profile: project load (loaded vs processed)
+2026-11-08T20:20:53.468+01:00   exe=C:\Users\nicla\development\MiniDAWLab-rs-base\build\ninja-release-base-vs\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.4.0 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-11-08T20:20:53.468+01:00   tracks: audio=36 instrument=14 midi=1 group=0 master=1 (muted=34 off=1) | instrument registry entries=14 primaryLoaded=14 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=46 instances=58 | proxy states: 3:Primary,57:Primary,25:Primary,40:Primary,8:Primary,26:Primary,45:Primary,46:Primary,54:Primary,65:Primary,5:Primary,23:Primary,9:Primary,24:Primary
+2026-11-08T20:20:53.469+01:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=0
+2026-11-08T20:20:53.772+01:00 step begin: perf-profile: mixer window closed
+2026-11-08T20:20:53.779+01:00   mixer visible=no
+2026-11-08T20:20:53.779+01:00 step end ok: perf-profile: mixer window closed elapsedMs=7
+2026-11-08T20:20:54.128+01:00 step begin: perf-profile: transport stopped, never played (profiler on)
+2026-11-08T20:20:54.129+01:00   playing=no | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=980 serialBlocks=1 jobsByCallback=1163 jobsByWorkers=12571 joinKernelWaits=751 lastDispatchWallMs=0.518 lastJoinWaitMs=0.196 (cumulative since start)
+2026-11-08T20:20:54.130+01:00 step end ok: perf-profile: transport stopped, never played (profiler on) elapsedMs=0
+2026-11-08T20:20:56.171+01:00 step begin: perf-profile: stopped/never-played measurement window begins (30 s)
+2026-11-08T20:20:56.172+01:00   window start: playhead=181473 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=4701.81 MB private=4991.91 MB
+2026-11-08T20:20:56.174+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T20:20:56.174+01:00 step end ok: perf-profile: stopped/never-played measurement window begins (30 s) elapsedMs=2
+2026-11-08T20:21:26.217+01:00 step begin: perf-profile: stopped/never-played collect
+2026-11-08T20:21:26.217+01:00   === window: stopped/never-played ===
+2026-11-08T20:21:26.218+01:00   window end: wall=30.05 s playhead=181473 (started 181473)
+2026-11-08T20:21:26.219+01:00   engine: blocks=2817 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.720/3.517/6.408 budget%(mean/max)=33.0/60.1 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-08T20:21:26.219+01:00   output: peakHold=0.000 masterPeakL/R=0.000/0.000 oversL/R=0/0 rmsL/R=0.0000/0.0000 nonFinite=0
+2026-11-08T20:21:26.219+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-08T20:21:26.220+01:00   instruments: hosts with live processBlock blocks=14 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-08T20:21:26.220+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=3989 serialBlocks=1 jobsByCallback=4740 jobsByWorkers=51120 joinKernelWaits=2989 lastDispatchWallMs=0.473 lastJoinWaitMs=0.335 (cumulative since start)
+2026-11-08T20:21:26.221+01:00   read-ahead: depth=3 counters(cumulative): adopted=0 produced=0 consumed=0 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T20:21:26.221+01:00   process: cpu=75.9% of one core (3.2% of 24 cores) systemBusy=9.3% workingSet=4701.87 MB private=4991.93 MB pageFaultsInWindow=22 (soft+hard; 0.732218/s)
+2026-11-08T20:21:26.221+01:00 step end ok: perf-profile: stopped/never-played collect elapsedMs=4
+2026-11-08T20:21:26.422+01:00 step begin: perf-profile: start playback (warm-up 5 s)
+2026-11-08T20:21:26.423+01:00   start at 17.00 s (sample 816000) cycle=on profiler=off generation=as configured | workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=4008 serialBlocks=1 jobsByCallback=4767 jobsByWorkers=51359 joinKernelWaits=3000 lastDispatchWallMs=0.521 lastJoinWaitMs=0.105 (cumulative since start)
+2026-11-08T20:21:26.423+01:00 step end ok: perf-profile: start playback (warm-up 5 s) elapsedMs=0
+2026-11-08T20:21:31.471+01:00 step begin: perf-profile: configured measurement window begins (30 s)
+2026-11-08T20:21:31.472+01:00   window start: playhead=1058176 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=4716.92 MB private=5006.61 MB
+2026-11-08T20:21:31.473+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=7600 consumed=7552 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #1 id=27 "Track 27" inserts=[]; #2 id=28 "Track 27 â€” kopia" inserts=[Post:Pro-R]; #3 id=32 "Track 27 â€” kopia â€” kopia 3" inserts=[Post:Pro-R]; #4 id=31 "Track 27 â€” kopia â€” kopia 2" inserts=[Post:Pro-R]; #5 id=30 "Track 27 â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #6 id=35 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #7 id=44 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 2" inserts=[Post:Pro-R]; #8 id=38 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #9 id=39 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #10 id=43 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #21 id=47 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #22 id=70 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 20" inserts=[Post:Pro-R]; #23 id=69 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 19" inserts=[Post:Pro-R]; #24 id=68 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 18" inserts=[Post:Pro-R]; #25 id=67 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 17" inserts=[Post:Pro-R]
+2026-11-08T20:21:31.474+01:00 step end ok: perf-profile: configured measurement window begins (30 s) elapsedMs=2
+2026-11-08T20:22:01.501+01:00 step begin: perf-profile: configured collect
+2026-11-08T20:22:01.501+01:00   === window: configured ===
+2026-11-08T20:22:01.502+01:00   window end: wall=30.03 s playhead=2499968 (started 1058176)
+2026-11-08T20:22:01.502+01:00   engine: blocks=2816 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=0.552/0.931/1.719 budget%(mean/max)=8.7/16.1 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-08T20:22:01.502+01:00   output: peakHold=0.564 masterPeakL/R=0.562/0.564 oversL/R=0/0 rmsL/R=0.0708/0.0728 nonFinite=0
+2026-11-08T20:22:01.503+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-08T20:22:01.503+01:00   instruments: hosts with live processBlock blocks=14 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-08T20:22:01.503+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=7297 serialBlocks=1 jobsByCallback=23324 jobsByWorkers=144644 joinKernelWaits=5586 lastDispatchWallMs=0.774 lastJoinWaitMs=0.119 (cumulative since start)
+2026-11-08T20:22:01.503+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52656 consumed=52608 missed=0 staleDiscarded=0 drainReleases=0 discardResets=0 missAbandons=0 | ownedNow=16 of audioRows=36 (cap 16) | #0 id=1 "Track 1" inserts=[]; #1 id=27 "Track 27" inserts=[]; #2 id=28 "Track 27 â€” kopia" inserts=[Post:Pro-R]; #3 id=32 "Track 27 â€” kopia â€” kopia 3" inserts=[Post:Pro-R]; #4 id=31 "Track 27 â€” kopia â€” kopia 2" inserts=[Post:Pro-R]; #5 id=30 "Track 27 â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #6 id=35 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #7 id=44 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 2" inserts=[Post:Pro-R]; #8 id=38 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #9 id=39 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #10 id=43 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #21 id=47 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia" inserts=[Post:Pro-R]; #22 id=70 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 20" inserts=[Post:Pro-R]; #23 id=69 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 19" inserts=[Post:Pro-R]; #24 id=68 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 18" inserts=[Post:Pro-R]; #25 id=67 "Track 27 â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia â€” kopia 17" inserts=[Post:Pro-R]
+2026-11-08T20:22:01.504+01:00   process: cpu=94.0% of one core (3.9% of 24 cores) systemBusy=9.8% workingSet=4703.14 MB private=4993.08 MB pageFaultsInWindow=51 (soft+hard; 1.69831/s)
+2026-11-08T20:22:01.504+01:00 step end ok: perf-profile: configured collect elapsedMs=3
+2026-11-08T20:22:01.707+01:00 step begin: perf-profile: stop playback (profiler stays on)
+2026-11-08T20:22:01.707+01:00   stopped; playhead=2509696
+2026-11-08T20:22:01.708+01:00 step end ok: perf-profile: stop playback (profiler stays on) elapsedMs=0
+2026-11-08T20:22:01.912+01:00 step begin: perf-profile: stopped/right-after-stop measurement window begins (30 s)
+2026-11-08T20:22:01.913+01:00   window start: playhead=2509696 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=4717.21 MB private=5006.79 MB
+2026-11-08T20:22:01.913+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52960 consumed=52912 missed=0 staleDiscarded=48 drainReleases=0 discardResets=16 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T20:22:01.914+01:00 step end ok: perf-profile: stopped/right-after-stop measurement window begins (30 s) elapsedMs=0
+2026-11-08T20:22:31.929+01:00 step begin: perf-profile: stopped/right-after-stop collect
+2026-11-08T20:22:31.930+01:00   === window: stopped/right-after-stop ===
+2026-11-08T20:22:31.931+01:00   window end: wall=30.02 s playhead=2509696 (started 2509696)
+2026-11-08T20:22:31.932+01:00   engine: blocks=2814 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.705/3.567/6.245 budget%(mean/max)=33.4/58.6 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-08T20:22:31.933+01:00   output: peakHold=0.052 masterPeakL/R=0.050/0.052 oversL/R=0/0 rmsL/R=0.0009/0.0009 nonFinite=0
+2026-11-08T20:22:31.934+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-08T20:22:31.934+01:00   instruments: hosts with live processBlock blocks=14 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-08T20:22:31.934+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=10150 serialBlocks=1 jobsByCallback=27104 jobsByWorkers=181186 joinKernelWaits=7496 lastDispatchWallMs=0.755 lastJoinWaitMs=0.461 (cumulative since start)
+2026-11-08T20:22:31.935+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52960 consumed=52912 missed=0 staleDiscarded=48 drainReleases=0 discardResets=16 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T20:22:31.935+01:00   process: cpu=74.1% of one core (3.1% of 24 cores) systemBusy=10.9% workingSet=4703.62 MB private=4993.16 MB pageFaultsInWindow=14 (soft+hard; 0.466379/s)
+2026-11-08T20:22:31.937+01:00 step end ok: perf-profile: stopped/right-after-stop collect elapsedMs=5
+2026-11-08T20:22:32.188+01:00 step begin: perf-profile: wait 0 s stopped
+2026-11-08T20:22:32.189+01:00 step end ok: perf-profile: wait 0 s stopped elapsedMs=0
+2026-11-08T20:22:32.393+01:00 step begin: perf-profile: stopped/after-gap measurement window begins (30 s)
+2026-11-08T20:22:32.394+01:00   window start: playhead=2509696 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=4703.62 MB private=4993.16 MB
+2026-11-08T20:22:32.395+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52960 consumed=52912 missed=0 staleDiscarded=48 drainReleases=0 discardResets=16 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T20:22:32.396+01:00 step end ok: perf-profile: stopped/after-gap measurement window begins (30 s) elapsedMs=2
+2026-11-08T20:23:02.410+01:00 step begin: perf-profile: stopped/after-gap collect
+2026-11-08T20:23:02.411+01:00   === window: stopped/after-gap ===
+2026-11-08T20:23:02.411+01:00   window end: wall=30.02 s playhead=2509696 (started 2509696)
+2026-11-08T20:23:02.411+01:00   engine: blocks=2814 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=2.696/3.466/6.739 budget%(mean/max)=32.5/63.2 nearOverruns(>70%)=0 overruns(>=100%)=0
+2026-11-08T20:23:02.412+01:00   output: peakHold=0.000 masterPeakL/R=0.000/0.000 oversL/R=0/0 rmsL/R=0.0000/0.0000 nonFinite=0
+2026-11-08T20:23:02.412+01:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-11-08T20:23:02.412+01:00   instruments: hosts with live processBlock blocks=14 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-11-08T20:23:02.412+01:00   render pool: workers=7 (threads incl. callback=8) serialForced=no parallelBlocks=13007 serialBlocks=1 jobsByCallback=30411 jobsByWorkers=217877 joinKernelWaits=9722 lastDispatchWallMs=0.713 lastJoinWaitMs=0.514 (cumulative since start)
+2026-11-08T20:23:02.413+01:00   read-ahead: depth=3 counters(cumulative): adopted=16 produced=52960 consumed=52912 missed=0 staleDiscarded=48 drainReleases=0 discardResets=16 missAbandons=0 | ownedNow=0 of audioRows=36 (cap 16)
+2026-11-08T20:23:02.413+01:00   process: cpu=79.6% of one core (3.3% of 24 cores) systemBusy=9.3% workingSet=4703.57 MB private=4993.06 MB pageFaultsInWindow=10 (soft+hard; 0.33314/s)
+2026-11-08T20:23:02.413+01:00 step end ok: perf-profile: stopped/after-gap collect elapsedMs=2
+2026-11-08T20:23:02.665+01:00 step begin: perf-profile: stop playback, profiler off
+2026-11-08T20:23:02.667+01:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-11-08T20:23:03.486+01:00 RESULT: PASS scenario=perf-profile totalMs=152938
