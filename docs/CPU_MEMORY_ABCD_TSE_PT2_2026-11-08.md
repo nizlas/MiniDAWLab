@@ -39,10 +39,13 @@ B→C difference is the Off effect.
   versions: `--seconds 30 --warmup 5 --start-seconds 17 --idle --idle-gap 0`. The control runs add
   `--profile-off`.
 - **Window state**: in every run the mixer window was closed by the scenario and no plug-in editor
-  was open. In all temp copies the MIDI editor workspace was set closed and the main window
-  position set to 261031's. 261031 was saved with the MIDI editor open, and 261106 at another
-  screen position. These are UI fields only and were made identical so the window state could not
-  differ between cases.
+  was open. 261031 was saved with the MIDI editor open, and 261106 at another screen position.
+  These UI fields were made identical in the temp copies so the window state could not differ
+  between cases:
+  - in the 261031 copies (A/B and D), the MIDI editor workspace was set closed;
+  - in the C copy, only the main window position (x/y) was changed, because 261106 stores no MIDI
+    editor workspace.
+  Section 7 lists every field the C copy changed.
 - **Run order**: two rounds in opposite order, each case with a profiled and a control run:
   - round 1: A, B, C, D, profiled then control;
   - round 2: D, C, B, A, control then profiled.
@@ -275,6 +278,86 @@ states, the proxy and the UI fields.
   differ.
 - **No listening** was done. The sound checks are automatic (master meter, processed hosts,
   transport advance).
+
+## 7. Which file case C measured (checked 2026-11-08, read-only)
+
+Added after the question of whether C represents the real 261106 project. Checked only by reading
+project files and existing logs; DAL was not started.
+
+**Files and hashes**
+
+| File | Path | SHA-256 | Written |
+|---|---|---|---|
+| Original | `C:\Users\nicla\Dropbox\TWA Shared\DALprojects\Saved Projects\TSE_pt2_261106\TSE_pt2.dalproj` | `E5CEF985078F5A390039B79A2ECDC5A0BDCF1BE80F20388EF98CAEBBBAC8E259` | 2026-11-06 07:27:50 |
+| Unchanged temp copy | `%TEMP%\dal-cmp3\TSE_pt2_261106\TSE_pt2.dalproj` | same as the original | same |
+| Measured source | `%TEMP%\dal-cmp3\TSE_pt2_261106\C.dalproj` | `5BFA8F791AF1372B7D378CA06F2A69AC71C1740C0EB858493BD8791FA5B6A90B` | 2026-11-08 20:13 |
+
+- **Original unchanged**: the original had the same hash before copying (20:0x), after the series
+  (21:0x) and again at this check. No file in the original folder was written after 2026-11-06.
+- **C.dalproj** was written by `variants.py` from the copied 261106 file. It is not derived from
+  261031, D or any older all-Off fixture.
+- **Per run**: each C run loaded its own copy `run-<tag>.dalproj` of C.dalproj, deleted after the
+  run.
+
+**Changes in C.dalproj against the original**: exactly two fields, `mainWindow.x` (−2414 → 33)
+and `mainWindow.y` (321 → 282). There are no Off, Mute, state, clip or routing changes.
+
+**Not mixed up with D or the all-Off fixture:**
+
+| Property | Original 261106 | C copy | D | Old all-Off fixture (`TSE_pt2-alloff.dalproj`) |
+|---|---|---|---|---|
+| Rows Off | 45 of 52 | 45 (identical per track) | 45 | 51 |
+| Rows muted | 42 | 42 | (as 261031) | – |
+| Track 40 muted | no | no | yes | – |
+| Saved playhead | 3263232 | 3263232 | 181473 | – |
+
+Off and Mute are separate fields in the file:
+- **Off** = the track's `off` flag; for instrument rows the instrument entry's `powerOn: false`
+  as well.
+- **Mute** = `muted`.
+
+The per-track table (TrackId, name, kind, Off and Mute in original and copy, D's Off, the
+fixture's Off) is in `evidence/.../offcheck.md`.
+
+**The rows that are not Off in the file** (all others are saved Off):
+
+| TrackId | Name | Mute |
+|---|---|---|
+| 3 | Track 3 (Groove Agent SE) | no |
+| 25 | Track 3 — kopia (Groove Agent SE) | no |
+| 45 | Track 8 — kopia 2 — kopia (HALion Sonic) | no |
+| 40 | Track 8 — kopia 3 (HALion Sonic) | no |
+| 5 | VB3-II | no |
+| 23 | VB3-II — kopia 2 | yes |
+| 2 | Stereo Out (master, no Off) | – |
+
+**Loaded model in the C runs**: all four C runs logged
+`tracks: … (muted=42 off=45) … primaryLoaded=6 primaryEmpty=8 … insert chains=46 instances=4`.
+
+**Your own interactive open of the original** (installed DAL 1.4.1), from the existing
+`project-load-diag.log`:
+- Load on 2026-11-08 at 21:18:55, closed at 21:26:08.
+- It logged `instrument kept unloaded (track Off)` for tracks 8, 26, 46, 57, 54, 65, 9 and 24.
+  Track 7 (MIDI 1) is Off and has no instrument.
+- It instantiated Groove Agent SE (3, 25), HALion Sonic (45, 40) and VB3-II (5, 23).
+- At close it destroyed exactly those six instruments and four effects (2 × DAL Mono Delay,
+  2 × Pro-Q 3; `effects detached count=4`).
+- No On/Off toggle was logged in that session (`track-power-diag.log` was last written
+  2026-11-06), and no autosave was written (`autosave-diag.log` was last written 2026-11-06).
+
+So **file, loaded model and instantiated plug-ins agree**: 6 instruments On, 45 rows Off, and C
+measured that project with only the window position changed.
+
+**Power button display**, from reading the code (not observed on screen):
+- Audio rows draw the Power cell from `Track::isTrackOff()` (`TrackLanesView.cpp:1795`).
+- Instrument rows draw it from the instrument controller's `powerOn`
+  (`InstrumentTimelineRowCoordinator.cpp:2302`), which is loaded from the saved `powerOn`.
+- Every Off instrument row in 261106 has both flags set Off, so the two sources agree for this
+  file.
+- An Off row is still shown as a row; its power glyph is grey (`0xff5a5858`), and an On row's is
+  green.
+- Whether the screen showed something else in your session cannot be determined from files and
+  logs. It would need a look at a fresh temp copy in DAL, which was not done here.
 
 ## 6. Evidence
 
